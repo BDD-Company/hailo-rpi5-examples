@@ -1,7 +1,6 @@
 from pathlib import Path
-import gi
-gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GLib
+from attr import dataclass
+
 import os
 import numpy as np
 import cv2
@@ -10,6 +9,48 @@ import hailo
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
+
+from queue import Queue
+from collections import deque
+
+from helpers import Rect, XY, configure_logging
+from dataclasses import dataclass, field
+import logging
+
+logger = logging.getLogger(__name__)
+
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib
+
+def full_classname(obj):
+    # based on https://gist.github.com/clbarnes/edd28ea32010eb159b34b075687bb49e#file-classname-py
+    cls = type(obj)
+    module = cls.__module__
+    name = cls.__qualname__
+    if module is not None and module != "__builtin__":
+        name = module + "." + name
+    return name
+
+def DEBUG_dump(prefix, obj):
+    print(prefix, obj, full_classname(obj), dir(obj))
+
+
+@dataclass(slots=True, order=True, frozen=True)
+class Detection:
+    bbox : Rect = field(default_factory=Rect)
+    confidence : float = 0.0
+    track_id : int|None = 0
+
+
+class OverwriteQueue(Queue):
+    def __init__(self, maxsize=0):
+        super().__init__(maxsize=maxsize)
+        # to make sure that Queue always stores elements, effectively overwriting some older ones
+        self.maxsize = 0
+
+    def _init(self, maxsize):
+        self.queue = deque(maxlen=maxsize)
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
@@ -26,6 +67,8 @@ class user_app_callback_class(app_callback_class):
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
 # -----------------------------------------------------------------------------------------------
+
+detections_queue = OverwriteQueue(maxsize=3)
 
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad, info, user_data):
@@ -55,8 +98,13 @@ def app_callback(pad, info, user_data):
     # Parse the detections
     detection_count = 0
     for detection in detections:
+        detection : hailo.HailoDetection = detection
+
+        # DEBUG_dump('detecion: ', detection)
+
         label = detection.get_label()
         bbox = detection.get_bbox()
+
         confidence = detection.get_confidence()
         if label == "person":
             # Get track ID
@@ -64,8 +112,20 @@ def app_callback(pad, info, user_data):
             track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
             if len(track) == 1:
                 track_id = track[0].get_id()
-            string_to_print += (f"Detection: ID: {track_id} Label: {label} Confidence: {confidence:.2f}\n")
+                # DEBUG_dump("track: ", track[0])
+            else:
+                track_id = None
+
+            # string_to_print += (f"Detection: ID: {track_id} Label: {label} Confidence: {confidence:.2f}\n")
             detection_count += 1
+            detections_queue.put(Detection(
+                bbox = Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
+                confidence = confidence,
+                track_id = track_id,
+            ))
+
+            # DEBUG_dump("bbox: ", bbox)
+
 
     if user_data.use_frame:
         # Note: using imshow will not work here, as the callback function is not running in the main thread
@@ -82,6 +142,33 @@ def app_callback(pad, info, user_data):
         print(string_to_print)
     return Gst.PadProbeReturn.OK
 
+import threading
+
+def drone_controlling_tread(drone):
+
+    from math import radians
+
+    center = XY(0.5, 0.5)
+    distance_r = 0.25
+    distance_r *= distance_r
+    frame_angular_size = radians(90)
+
+    logger.debug("starting up drone...")
+    logger.debug("drone started")
+
+    while True:
+        logger.debug("!!! awaiting detection... ")
+        detection : Detection = detections_queue.get()
+        logger.debug("!!! Detection: %s", detection)
+
+        if detection.bbox.center.distance_squared_to(center) < distance_r:
+            drone.move_forward(10.0)
+        else:
+            diff_xy = center - detection.bbox.center
+            diff_xy *= frame_angular_size
+            drone.move_to(diff_xy)
+
+
 if __name__ == "__main__":
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -90,4 +177,23 @@ if __name__ == "__main__":
     # Create an instance of the user app callback class
     user_data = user_app_callback_class()
     app = GStreamerDetectionApp(app_callback, user_data)
+
+    configure_logging(level = logging.WARNING)
+    logger.setLevel(level = logging.DEBUG)
+    # # otherwise too much verbose
+    # def logger_filter(r : logging.LogRecord):
+    #     if 'picamera2.py' in r.pathname and r.levelno < logging.WARNING:
+    #         return False
+    #     return True
+
+    from drone import DroneMover
+    drone = DroneMover('udp://:14550')
+
+    drone_thread = threading.Thread(
+        target = drone_controlling_tread,
+        args=(drone,),
+        name = "Drone"
+    )
+    drone_thread.start()
+
     app.run()
