@@ -142,7 +142,10 @@ def app_callback(pad, info, user_data):
         print(string_to_print)
     return Gst.PadProbeReturn.OK
 
+
 import threading
+import asyncio
+
 
 def drone_controlling_tread(drone):
 
@@ -153,30 +156,26 @@ def drone_controlling_tread(drone):
     distance_r *= distance_r
     frame_angular_size = radians(90)
 
-    logger.debug("starting up drone...")
-    logger.debug("drone started")
-
     while True:
         logger.debug("!!! awaiting detection... ")
         detection : Detection = detections_queue.get()
         logger.debug("!!! Detection: %s", detection)
 
-        if detection.bbox.center.distance_squared_to(center) < distance_r:
-            drone.move_forward(10.0)
-        else:
+        distance_to_center = detection.bbox.center.distance_squared_to(center)
+        if distance_to_center >= distance_r / 2:
             diff_xy = center - detection.bbox.center
             diff_xy *= frame_angular_size
             drone.move_to(diff_xy)
 
+        if distance_to_center < distance_r:
+            drone.move_forward(10.0)
 
-if __name__ == "__main__":
+async def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
     env_path_str = str(env_file)
     os.environ["HAILO_ENV_FILE"] = env_path_str
     # Create an instance of the user app callback class
-    user_data = user_app_callback_class()
-    app = GStreamerDetectionApp(app_callback, user_data)
 
     configure_logging(level = logging.WARNING)
     logger.setLevel(level = logging.DEBUG)
@@ -186,8 +185,10 @@ if __name__ == "__main__":
     #         return False
     #     return True
 
+    logger.debug("starting up drone...")
     from drone import DroneMover
     drone = DroneMover('udp://:14550')
+    logger.debug("drone started")
 
     drone_thread = threading.Thread(
         target = drone_controlling_tread,
@@ -196,4 +197,9 @@ if __name__ == "__main__":
     )
     drone_thread.start()
 
+    user_data = user_app_callback_class()
+    app = GStreamerDetectionApp(app_callback, user_data)
     app.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())

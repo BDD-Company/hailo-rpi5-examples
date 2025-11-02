@@ -1,22 +1,21 @@
-
+#!/usr/bin/env python
 import sys
 import asyncio
 import nest_asyncio
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw
 from mavsdk import System
-import datetime
 
 import logging
 
 logger = logging.Logger(__name__)
 nest_asyncio.apply()
 
-DEFAULT_TAKEOFF_ALTITUDE_M = 10
+DEFAULT_TAKEOFF_ALTITUDE_M = 3
 
 class DroneMover():
 
-    def __init__(self, drone_connection_string, config : dict = None) -> None:
+    def __init__(self, drone_connection_string, config : dict|None = None) -> None:
         super().__init__()
         self.drone = System()
         self.offboard = None
@@ -247,3 +246,26 @@ class DroneMover():
         Items are pulled from queue and executed one by one.
         """
         asyncio.run(task)
+
+async def main():
+    from helpers import configure_logging, XY
+    configure_logging(level = logging.NOTSET)
+
+    logger.debug("starting up drone...")
+
+    drone = DroneMover('udp://:14550')
+    drone.move_to_center()
+    drone.move_forward(10)
+    drone.move_to(XY(10, 10))
+
+    logger.debug("drone started")
+
+
+if __name__ == "__main__":
+    import asyncio
+    import nest_asyncio
+    loop = asyncio.new_event_loop()
+
+    nest_asyncio.apply()
+    loop.run_until_complete(main())
+
