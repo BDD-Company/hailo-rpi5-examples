@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from pathlib import Path
 from attr import dataclass
 
@@ -68,7 +70,7 @@ class user_app_callback_class(app_callback_class):
 # User-defined callback function
 # -----------------------------------------------------------------------------------------------
 
-detections_queue = OverwriteQueue(maxsize=3)
+detections_queue = OverwriteQueue(maxsize=2)
 
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad, info, user_data):
@@ -152,23 +154,42 @@ def drone_controlling_tread(drone):
     from math import radians
 
     center = XY(0.5, 0.5)
-    distance_r = 0.25
+    distance_r = 0.1
     distance_r *= distance_r
-    frame_angular_size = radians(90)
+    frame_angular_size = XY(120, 90)
 
+    detection = None
+    distance_to_center : float = 0.0
+    command = XY()
     while True:
-        logger.debug("!!! awaiting detection... ")
-        detection : Detection = detections_queue.get()
-        logger.debug("!!! Detection: %s", detection)
+        try:
+            detection = None
+            distance_to_center : float = 0.0
+            command = XY()
 
-        distance_to_center = detection.bbox.center.distance_squared_to(center)
-        if distance_to_center >= distance_r / 2:
-            diff_xy = center - detection.bbox.center
-            diff_xy *= frame_angular_size
-            drone.move_to(diff_xy)
+            logger.debug("!!! awaiting detection... ")
+            detection : Detection = detections_queue.get()
+            logger.debug("!!! Detection: %s", detection)
 
-        if distance_to_center < distance_r:
-            drone.move_forward(10.0)
+            distance_to_center = detection.bbox.center.distance_squared_to(center)
+            logger.debug("distance to center: %s", distance_to_center)
+            if distance_to_center >= distance_r / 2:
+                diff_xy = center - detection.bbox.center
+                logger.debug("move command: %s, frame: %s", diff_xy, frame_angular_size)
+                command = diff_xy.multiplied_by_XY(frame_angular_size)
+                # diff_xy = XY(math.degrees(diff_xy.x), math.degrees(diff_xy.y))
+
+                logger.debug("move command: %s", command)
+                drone.move_relative(command.x, command.y)
+
+            if distance_to_center < distance_r:
+                logger.debug("drone in the crosshair: move to center")
+                drone.move_forward(10.0)
+            sleep(0.5)
+
+        except:
+            logging.exception(f"Got exception: %s %s COMMAND: %s", detection, distance_to_center, command, exc_info=True)
+
 
 async def main():
     project_root = Path(__file__).resolve().parent.parent
@@ -177,8 +198,7 @@ async def main():
     os.environ["HAILO_ENV_FILE"] = env_path_str
     # Create an instance of the user app callback class
 
-    configure_logging(level = logging.WARNING)
-    logger.setLevel(level = logging.DEBUG)
+    configure_logging(level = logging.DEBUG)
     # # otherwise too much verbose
     # def logger_filter(r : logging.LogRecord):
     #     if 'picamera2.py' in r.pathname and r.levelno < logging.WARNING:
@@ -202,4 +222,10 @@ async def main():
     app.run()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import asyncio
+    import nest_asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    nest_asyncio.apply()
+    loop.run_until_complete(main())

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+
 import sys
 import asyncio
 import nest_asyncio
@@ -11,7 +12,7 @@ import logging
 logger = logging.Logger(__name__)
 nest_asyncio.apply()
 
-DEFAULT_TAKEOFF_ALTITUDE_M = 3
+DEFAULT_TAKEOFF_ALTITUDE_M = 10
 
 class DroneMover():
 
@@ -31,12 +32,14 @@ class DroneMover():
 
         async def __takeoff():
             self.move_to_center()
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
 
             # NOTE(vnemkov): not required, just visual indicator for the pilot
             logging.debug("Just a little dance")
             self.move_relative(-90, 0)
+            await asyncio.sleep(0.5)
             self.move_relative(90, 0)
+            await asyncio.sleep(0.5)
 
         # don't wait for takeoff, unblock rest of the systems
         self.tasks.append(asyncio.create_task(__takeoff()))
@@ -104,17 +107,19 @@ class DroneMover():
             await drone.action.disarm()
             return
 
-        await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
+        # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
         logging.debug("Taking off...")
         await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
         await asyncio.sleep(5)
 
         self.offboard = drone.offboard
 
-        # NOTE(vnemkov): not required, just visual indicator for the pilot
+        # # NOTE(vnemkov): not required, just visual indicator for the pilot
         logging.debug("Just a little dance")
         self.move_relative(-90, 0)
+        await asyncio.sleep(1)
         self.move_relative(90, 0)
+        await asyncio.sleep(1)
 
         return
 
@@ -224,7 +229,7 @@ class DroneMover():
     def move_forward(self, speed_ms : float = 1.0) -> None:
         async def _move_forward():
             await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(speed_ms, 0, 0, 0))
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
             await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
             logger.debug('!!! Executed move_forward')
         self.__execute_move_task(_move_forward())
@@ -233,7 +238,7 @@ class DroneMover():
     def move_relative(self, dx, dy) -> None:
         async def _move_relative_async():
             await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(1)
             logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
 
             # await self.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, dx))
@@ -265,6 +270,7 @@ if __name__ == "__main__":
     import asyncio
     import nest_asyncio
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     nest_asyncio.apply()
     loop.run_until_complete(main())
