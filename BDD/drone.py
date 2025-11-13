@@ -9,7 +9,7 @@ from mavsdk import System
 
 import logging
 
-logger = logging.Logger(__name__)
+logger = logging.Logger("BDD_drone")
 nest_asyncio.apply()
 
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
@@ -25,10 +25,11 @@ class DroneMover():
         self.initial_yaw = None
         self.cruise_altitude = self.config.get('cruise_altitude', DEFAULT_TAKEOFF_ALTITUDE_M)
         self.tasks : list[asyncio.Task] = []
+        self.drone_connection_string = drone_connection_string
         # self.telemetry = OverwriteQueue(1)
         # self.telemetry_thread = None
 
-        asyncio.run(self.__startup_sequence(drone_connection_string))
+        # asyncio.run(self.__startup_sequence(drone_connection_string))
 
         async def __takeoff():
             self.move_to_center()
@@ -40,9 +41,6 @@ class DroneMover():
             await asyncio.sleep(0.5)
             self.move_relative(90, 0)
             await asyncio.sleep(0.5)
-
-        # don't wait for takeoff, unblock rest of the systems
-        self.tasks.append(asyncio.create_task(__takeoff()))
 
         # Just to kick off telemetry collection
         # self.status()
@@ -65,6 +63,9 @@ class DroneMover():
 
         asyncio.run(__shutdown_async())
 
+    async def startup_sequence(self):
+        await self.__startup_sequence(self.drone_connection_string)
+
     async def __startup_sequence(self, drone_connection_string):
         logging.info("Connecting to drone...")
         await self.drone.connect(system_address = drone_connection_string)
@@ -83,14 +84,24 @@ class DroneMover():
                 logging.debug("seems armable")
             break
 
-        logging.info("arming")
-        for i in range(100):
-            try:
-                await drone.action.arm()
-                break
-            except:
-                logging.debug(f"Got exception while arming, retrying to arm (attempt {i}) after some timeout", exc_info=True)
-                await asyncio.sleep(0.2)
+        async def arm():
+            logging.info("arming")
+            arming_exception = None
+            for i in range(100):
+                try:
+                    await drone.action.arm()
+                    arming_exception = None
+                    break
+                except Exception as e:
+                    arming_exception = e
+                    logging.warning(f"retrying to arm, attempt {i}")
+                    await asyncio.sleep(0.1)
+
+            if arming_exception is not None:
+                logging.warning(f"Failed to arm, latest exception", exc_info=arming_exception)
+
+        await arm()
+
         logging.info("armed")
 
         await asyncio.sleep(1) # TODO(vnemkov): maybe remove?
@@ -110,16 +121,16 @@ class DroneMover():
         # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
         logging.debug("Taking off...")
         await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
-        await asyncio.sleep(5)
+        await asyncio.sleep(self.cruise_altitude / 2) # 2m/s climb rate approx
 
         self.offboard = drone.offboard
 
         # # NOTE(vnemkov): not required, just visual indicator for the pilot
-        logging.debug("Just a little dance")
-        self.move_relative(-90, 0)
-        await asyncio.sleep(1)
-        self.move_relative(90, 0)
-        await asyncio.sleep(1)
+        # logging.debug("Just a little dance")
+        # self.move_relative(-90, 0)
+        # await asyncio.sleep(1)
+        # self.move_relative(90, 0)
+        # await asyncio.sleep(1)
 
         return
 
@@ -207,11 +218,12 @@ class DroneMover():
     #         return None
 
     def move_to(self, new_pos) -> None:
-        # on the drone
+        print("move_to")
         new_pos.x *= -1
 
         async def _move_to_async():
             await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
+            logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
             await asyncio.sleep(0.1)
 
         self.__execute_move_task(_move_to_async())
@@ -227,6 +239,7 @@ class DroneMover():
         self.__execute_move_task(_move_to_center_async())
 
     def move_forward(self, speed_ms : float = 1.0) -> None:
+        print("move_forward")
         async def _move_forward():
             await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(speed_ms, 0, 0, 0))
             await asyncio.sleep(0.2)
@@ -236,13 +249,48 @@ class DroneMover():
 
 
     def move_relative(self, dx, dy) -> None:
+        print("move_relative")
         async def _move_relative_async():
+            logger.debug("_move_relative_async")
             await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
 
             # await self.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, dx))
         self.__execute_move_task(_move_relative_async())
+
+
+
+    async def move_to_async(self, new_pos) -> None:
+        # on the drone
+        new_pos.x *= -1
+
+        await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
+        logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
+        await asyncio.sleep(0.1)
+
+
+    async def move_to_center_async(self) -> None:
+        # this should move drone to initial pos
+
+        await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, 0))
+        # self.drone_controller.goto_position(self.initial_pos.latitude_deg, self.initial_pos.longitude_deg, self.initial_pos.altitude_m, self.initial_yaw)
+        await asyncio.sleep(0.1)
+        logger.debug('!!! Executed move_to_center')
+
+
+    async def move_forward_async(self, speed_ms : float = 1.0) -> None:
+        print("move_forward_async")
+        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(speed_ms, 0, 0, 0))
+        await asyncio.sleep(0.5)
+        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
+        logger.debug('!!! Executed move_forward')
+
+    async def move_relative_async(self, dx, dy) -> None:
+        print("move_relative_async")
+        await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
+        await asyncio.sleep(1)
+        logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
 
     def __execute_move_task(self, task):
         #TODO:

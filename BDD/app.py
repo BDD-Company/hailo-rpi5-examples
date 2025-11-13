@@ -12,6 +12,8 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_p
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
 
+import asyncio
+
 from queue import Queue
 from collections import deque
 
@@ -99,6 +101,7 @@ def app_callback(pad, info, user_data):
 
     # Parse the detections
     detection_count = 0
+    detections_list = []
     for detection in detections:
         detection : hailo.HailoDetection = detection
 
@@ -120,25 +123,26 @@ def app_callback(pad, info, user_data):
 
             # string_to_print += (f"Detection: ID: {track_id} Label: {label} Confidence: {confidence:.2f}\n")
             detection_count += 1
-            detections_queue.put(Detection(
+            detections_list.append(Detection(
                 bbox = Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
                 confidence = confidence,
                 track_id = track_id,
             ))
 
             # DEBUG_dump("bbox: ", bbox)
+    if len(detections) != 0:
+        detections_queue.put(detections_list)
 
-
-    if user_data.use_frame:
-        # Note: using imshow will not work here, as the callback function is not running in the main thread
-        # Let's print the detection count to the frame
-        cv2.putText(frame, f"Detections: {detection_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        # Example of how to use the new_variable and new_function from the user_data
-        # Let's print the new_variable and the result of the new_function to the frame
-        cv2.putText(frame, f"{user_data.new_function()} {user_data.new_variable}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        # Convert the frame to BGR
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        user_data.set_frame(frame)
+    # if user_data.use_frame:
+    #     # Note: using imshow will not work here, as the callback function is not running in the main thread
+    #     # Let's print the detection count to the frame
+    #     cv2.putText(frame, f"Detections: {detection_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    #     # Example of how to use the new_variable and new_function from the user_data
+    #     # Let's print the new_variable and the result of the new_function to the frame
+    #     cv2.putText(frame, f"{user_data.new_function()} {user_data.new_variable}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    #     # Convert the frame to BGR
+    #     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    #     user_data.set_frame(frame)
 
     if string_to_print:
         print(string_to_print)
@@ -148,9 +152,11 @@ def app_callback(pad, info, user_data):
 import threading
 import asyncio
 
+class StopSignal:
+    pass
+STOP = StopSignal()
 
-def drone_controlling_tread(drone):
-
+async def drone_controlling_tread(drone_connection_string):
     from math import radians
 
     center = XY(0.5, 0.5)
@@ -158,9 +164,13 @@ def drone_controlling_tread(drone):
     distance_r *= distance_r
     frame_angular_size = XY(120, 90)
 
-    detection = None
-    distance_to_center : float = 0.0
-    command = XY()
+    from drone import DroneMover
+    drone = DroneMover(drone_connection_string)
+
+    logger.debug("starting up drone...")
+    await drone.startup_sequence()
+    logger.debug("drone started")
+
     while True:
         try:
             detection = None
@@ -168,8 +178,19 @@ def drone_controlling_tread(drone):
             command = XY()
 
             logger.debug("!!! awaiting detection... ")
-            detection : Detection = detections_queue.get()
+            detections : list[Detection] = detections_queue.get()
+            if detections is STOP:
+                logger.info("stopping detection loop")
+                break
+
+            if len(detections) == 0:
+                continue
+
+            detections.sort(reverse=True, key = lambda d : d.confidence)
+            detection = detections[0]
+
             logger.debug("!!! Detection: %s", detection)
+            # TODO: if track id is None and confidence < 0.3 -- ignore target
 
             distance_to_center = detection.bbox.center.distance_squared_to(center)
             logger.debug("distance to center: %s", distance_to_center)
@@ -177,21 +198,23 @@ def drone_controlling_tread(drone):
                 diff_xy = center - detection.bbox.center
                 logger.debug("move command: %s, frame: %s", diff_xy, frame_angular_size)
                 command = diff_xy.multiplied_by_XY(frame_angular_size)
-                # diff_xy = XY(math.degrees(diff_xy.x), math.degrees(diff_xy.y))
+                # command *= 0.5
 
                 logger.debug("move command: %s", command)
                 drone.move_relative(command.x, command.y)
+                logger.debug("move command done")
 
             if distance_to_center < distance_r:
                 logger.debug("drone in the crosshair: move to center")
-                drone.move_forward(10.0)
-            sleep(0.5)
+                asyncio.run(drone.move_forward_async(0.5))
+
+            # await asyncio.sleep(0.5)
 
         except:
             logging.exception(f"Got exception: %s %s COMMAND: %s", detection, distance_to_center, command, exc_info=True)
 
 
-async def main():
+def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
     env_path_str = str(env_file)
@@ -199,33 +222,45 @@ async def main():
     # Create an instance of the user app callback class
 
     configure_logging(level = logging.DEBUG)
-    # # otherwise too much verbose
-    # def logger_filter(r : logging.LogRecord):
-    #     if 'picamera2.py' in r.pathname and r.levelno < logging.WARNING:
-    #         return False
-    #     return True
+    # shushing verbose loggers
+    logging.getLogger("picamera2").setLevel(logging.WARNING)
+    logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
 
-    logger.debug("starting up drone...")
-    from drone import DroneMover
-    drone = DroneMover('udp://:14550')
-    logger.debug("drone started")
 
     drone_thread = threading.Thread(
-        target = drone_controlling_tread,
-        args=(drone,),
+        target = asyncio.run,
+        args=(drone_controlling_tread('udp://:14550'),),
         name = "Drone"
     )
     drone_thread.start()
 
     user_data = user_app_callback_class()
     app = GStreamerDetectionApp(app_callback, user_data)
+    for i in range(3):
+        detections_queue.put([
+            Detection(
+                bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                confidence = 0.1,
+                track_id = 1
+            ),
+            Detection(
+                bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                confidence = 0.9,
+                track_id = 2
+            ),
+            Detection(
+                bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                confidence = 0.7,
+                track_id = 3
+            ),
+        ]
+        )
     app.run()
+    # detections_queue.put(STOP)
+    # drone_thread.join()
 
 if __name__ == "__main__":
-    import asyncio
-    import nest_asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # import nest_asyncio
 
-    nest_asyncio.apply()
-    loop.run_until_complete(main())
+    # nest_asyncio.apply()
+    main()
