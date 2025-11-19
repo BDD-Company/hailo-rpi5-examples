@@ -194,21 +194,23 @@ async def drone_controlling_tread(drone_connection_string):
 
             distance_to_center = detection.bbox.center.distance_squared_to(center)
             logger.debug("distance to center: %s", distance_to_center)
-            if distance_to_center >= distance_r / 2:
+
+            diff_xy = center - detection.bbox.center
+            logger.debug("move command: %s, frame: %s", diff_xy, frame_angular_size)
+            command = diff_xy.multiplied_by_XY(frame_angular_size)
+
+            if distance_to_center < distance_r:
+                logger.debug("drone in the crosshair: move to center")
+                asyncio.run(drone.move_to_target_async(command.x, command.y, 0.5))
+
+            elif distance_to_center >= distance_r / 2:
                 diff_xy = center - detection.bbox.center
                 logger.debug("move command: %s, frame: %s", diff_xy, frame_angular_size)
                 command = diff_xy.multiplied_by_XY(frame_angular_size)
-                # command *= 0.5
 
                 logger.debug("move command: %s", command)
                 drone.move_relative(command.x, command.y)
                 logger.debug("move command done")
-
-            if distance_to_center < distance_r:
-                logger.debug("drone in the crosshair: move to center")
-                asyncio.run(drone.move_forward_async(0.5))
-
-            # await asyncio.sleep(0.5)
 
         except:
             logging.exception(f"Got exception: %s %s COMMAND: %s", detection, distance_to_center, command, exc_info=True)
