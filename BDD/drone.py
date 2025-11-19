@@ -3,6 +3,7 @@
 import sys
 import asyncio
 import nest_asyncio
+import datetime
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate
 from mavsdk import System
@@ -10,7 +11,7 @@ from mavsdk import System
 import logging
 
 logger = logging.Logger("BDD_drone")
-nest_asyncio.apply()
+# nest_asyncio.apply()
 
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
 
@@ -30,17 +31,6 @@ class DroneMover():
         # self.telemetry_thread = None
 
         # asyncio.run(self.__startup_sequence(drone_connection_string))
-
-        # async def __takeoff():
-        #     self.move_to_center()
-        #     await asyncio.sleep(1)
-
-        #     # NOTE(vnemkov): not required, just visual indicator for the pilot
-        #     logging.debug("Just a little dance")
-        #     self.move_relative(-90, 0)
-        #     await asyncio.sleep(0.5)
-        #     self.move_relative(90, 0)
-        #     await asyncio.sleep(0.5)
 
         # Just to kick off telemetry collection
         # self.status()
@@ -166,66 +156,72 @@ class DroneMover():
 
         # return ic(XY(x = yaw_diff, y = altitude_diff))
 
-    # def status(self):
 
-    #     telemetry_collection_interval_s = self.config.get('telemetry_collection_interval_s', 1)
-    #     async def telemetry_thread():
-    #         while True:
-    #             try:
-    #                 telemetry_point = {"timestamp": datetime.datetime.now()}
-    #                 # basic telemetry data
-    #                 async for position in self.drone.telemetry.position():
-    #                     telemetry_point.update({
-    #                         "latitude": position.latitude_deg,
-    #                         "longitude": position.longitude_deg,
-    #                         "altitude": position.relative_altitude_m,
-    #                         "absolute_altitude": position.absolute_altitude_m
-    #                     })
+    async def get_telemetry_async(self):
+        try:
+            telemetry_point : dict = {"timestamp": datetime.datetime.now()}
+            # basic telemetry data
+            async for position in self.drone.telemetry.position():
+                telemetry_point.update({
+                    "position" : {
+                        "latitude": position.latitude_deg,
+                        "longitude": position.longitude_deg,
+                        "altitude": position.relative_altitude_m,
+                        "absolute_altitude": position.absolute_altitude_m
+                    }
+                })
 
-    #                 # battery
-    #                 async for battery in self.drone.telemetry.battery():
-    #                     telemetry_point.update({
-    #                         "battery_voltage": battery.voltage_v,
-    #                         "battery_remaining": battery.remaining_percent
-    #                     })
-    #                     break
+            # battery
+            async for battery in self.drone.telemetry.battery():
+                telemetry_point.update({
+                    "battery" : {
+                        "voltage": battery.voltage_v,
+                        "remaining": battery.remaining_percent
+                    }
+                })
+                break
 
-    #                 # GPS
-    #                 async for gps_info in self.drone.telemetry.gps_info():
-    #                     telemetry_point.update({
-    #                         "gps_satellites": gps_info.num_satellites,
-    #                         "gps_fix_type": gps_info.fix_type.name
-    #                     })
-    #                     break
+            # GPS
+            async for gps_info in self.drone.telemetry.gps_info():
+                if gps_info is None:
+                    continue
 
-    #                 # HEALTH
-    #                 async for health in self.drone.telemetry.health():
-    #                     telemetry_point.update({
-    #                         "health": health
-    #                     })
-    #                     break
+                telemetry_point.update({
+                    "gps" : {
+                        "satellites": gps_info.num_satellites,
+                        "fix_type": gps_info.fix_type.name if gps_info.fix_type is not None else None
+                    }
+                })
+                break
 
-    #                 self.telemetry.put(telemetry_point)
-    #                 await asyncio.sleep(telemetry_collection_interval_s)
+            # HEALTH
+            async for health in self.drone.telemetry.health():
+                telemetry_point.update({
+                    "health": health
+                })
+                break
 
-    #             except Exception as e:
-    #                 logger.exception("Error on telemetry thread", exc_info=True)
+            async for mode in self.drone.telemetry.flight_mode():
+                telemetry_point.update({
+                    "flight_mode": mode.name if mode is not None else None
+                })
 
-    #     # if self.telemetry_thread is None:
-    #     #     self.telemetry_thread = threading.Thread(
-    #     #         target=asyncio.run,
-    #     #         args=(telemetry_thread(),),
-    #     #         name="telemetry_thread"
-    #     #     )
-    #     #     self.telemetry_thread.daemon = False
-    #     #     self.telemetry_thread.start()
+            async for attitude in self.drone.telemetry.attitude_angular_velocity_body():
+                telemetry_point.update({
+                    "angular_velocity_body": {
+                        "pitch_s" : attitude.pitch_rad_s,
+                        "roll_s" : attitude.roll_rad_s,
+                        "yaw_s" : attitude.yaw_rad_s
+                    }
+                })
 
-    #     try:
-    #         telemetry : dict = self.telemetry.get(block = False)
-    #         return telemetry
-    #     except queue.Empty as e:
-    #         # no telemetry yet
-    #         return None
+            return telemetry_point
+
+
+        except Exception as e:
+            logger.exception("Error on telemetry thread", exc_info=True)
+            return None
+
 
     def move_to(self, new_pos) -> None:
         print("move_to")

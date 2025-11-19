@@ -167,6 +167,8 @@ async def drone_controlling_tread(drone_connection_string):
     from drone import DroneMover
     drone = DroneMover(drone_connection_string)
 
+    logger.debug("Drone telemetry: %s", await drone.get_telemetry_async())
+
     logger.debug("starting up drone...")
     await drone.startup_sequence()
     logger.debug("drone started")
@@ -211,6 +213,8 @@ async def drone_controlling_tread(drone_connection_string):
                 logger.debug("move command: %s", command)
                 drone.move_relative(command.x, command.y)
                 logger.debug("move command done")
+
+            logger.debug("Drone telemetry: %s", await drone.get_telemetry_async())
 
         except:
             logging.exception(f"Got exception: %s %s COMMAND: %s", detection, distance_to_center, command, exc_info=True)
