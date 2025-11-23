@@ -48,13 +48,14 @@ class DroneMover():
 
         async def __shutdown_async():
             # TODO: maybe try to land first?
-            await self.offboard.stop()
+            if self.offboard:
+                await self.offboard.stop()
             await self.drone.action.disarm()
 
         asyncio.run(__shutdown_async())
 
     async def startup_sequence(self):
-        await self.__startup_sequence(self.drone_connection_string)
+        return self.__startup_sequence(self.drone_connection_string)
 
     async def __startup_sequence(self, drone_connection_string):
         logging.info("Connecting to drone...")
@@ -79,7 +80,7 @@ class DroneMover():
             arming_exception = None
             for i in range(100):
                 try:
-                    await drone.action.arm()
+                    await drone.action.arm_force()
                     arming_exception = None
                     break
                 except Exception as e:
@@ -114,16 +115,18 @@ class DroneMover():
         await asyncio.sleep(self.cruise_altitude / 2) # 2m/s climb rate approx
 
         self.offboard = drone.offboard
+        logging.debug("took off")
 
         # # NOTE(vnemkov): not required, just visual indicator for the pilot
-        THRUST_VALUE = 0.3
-        logging.debug("Little silly dance with thrust value: %s", THRUST_VALUE)
-        await self.drone.offboard.set_attitude_rate(AttitudeRate(0, 0, yaw_deg_s=90, thrust_value=THRUST_VALUE))
-        await asyncio.sleep(0.5)
-        await self.drone.offboard.set_attitude_rate(AttitudeRate(0, 0, yaw_deg_s=-180, thrust_value=THRUST_VALUE))
-        await asyncio.sleep(0.5)
-        await self.drone.offboard.set_attitude_rate(AttitudeRate(0, 0, yaw_deg_s=-180, thrust_value=THRUST_VALUE))
-        await asyncio.sleep(0.5)
+        # THRUST_VALUE = 0.1
+        # logging.debug("Little silly dance with thrust value: %s", THRUST_VALUE)
+        # await self.drone.offboard.set_attitude_rate(AttitudeRate(0, 0, yaw_deg_s=90, thrust_value=THRUST_VALUE))
+        # await asyncio.sleep(0.5)
+        # await self.drone.offboard.set_attitude_rate(AttitudeRate(0, 0, yaw_deg_s=-90, thrust_value=THRUST_VALUE))
+        # await asyncio.sleep(1)
+        # await self.drone.offboard.set_attitude_rate(AttitudeRate(0, 0, 0, thrust_value=THRUST_VALUE))
+        # await asyncio.sleep(0.5)
+        # await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
 
         # # NOTE(vnemkov): not required, just visual indicator for the pilot
         # logging.debug("Just a little dance")
@@ -160,6 +163,7 @@ class DroneMover():
     async def get_telemetry_async(self):
         try:
             telemetry_point : dict = {"timestamp": datetime.datetime.now()}
+
             # basic telemetry data
             async for position in self.drone.telemetry.position():
                 telemetry_point.update({
@@ -170,6 +174,7 @@ class DroneMover():
                         "absolute_altitude": position.absolute_altitude_m
                     }
                 })
+                break
 
             # battery
             async for battery in self.drone.telemetry.battery():
@@ -205,6 +210,7 @@ class DroneMover():
                 telemetry_point.update({
                     "flight_mode": mode.name if mode is not None else None
                 })
+                break
 
             async for attitude in self.drone.telemetry.attitude_angular_velocity_body():
                 telemetry_point.update({
@@ -214,6 +220,7 @@ class DroneMover():
                         "yaw_s" : attitude.yaw_rad_s
                     }
                 })
+                break
 
             return telemetry_point
 
@@ -259,7 +266,7 @@ class DroneMover():
         async def _move_relative_async():
             logger.debug("_move_relative_async")
             await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
-            await asyncio.sleep(0.1)
+            # await asyncio.sleep(0.1)
             logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
 
             # await self.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, dx))
@@ -273,7 +280,7 @@ class DroneMover():
 
         await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
         logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
-        await asyncio.sleep(0.1)
+        # await asyncio.sleep(0.1)
 
 
     async def move_to_center_async(self) -> None:

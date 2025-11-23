@@ -10,7 +10,9 @@ import hailo
 
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
-from .app_base import GStreamerDetectionApp
+# from .app_base import GStreamerDetectionApp
+from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
+
 
 import asyncio
 
@@ -167,11 +169,12 @@ async def drone_controlling_tread(drone_connection_string):
     from drone import DroneMover
     drone = DroneMover(drone_connection_string)
 
-    logger.debug("Drone telemetry: %s", await drone.get_telemetry_async())
-
     logger.debug("starting up drone...")
     await drone.startup_sequence()
     logger.debug("drone started")
+
+    telemetry_data = await drone.get_telemetry_async()
+    logger.debug("Drone telemetry: %s", telemetry_data)
 
     while True:
         try:
@@ -201,20 +204,20 @@ async def drone_controlling_tread(drone_connection_string):
             logger.debug("move command: %s, frame: %s", diff_xy, frame_angular_size)
             command = diff_xy.multiplied_by_XY(frame_angular_size)
 
-            if distance_to_center < distance_r:
-                logger.debug("drone in the crosshair: move to center")
-                asyncio.run(drone.move_to_target_async(command.x, command.y, 0.5))
+            # if distance_to_center < distance_r:
+            #     logger.debug("drone in the crosshair: move to center")
+            #     asyncio.run(drone.move_to_target_async(command.x, command.y, 0.5))
 
-            elif distance_to_center >= distance_r / 2:
+            if distance_to_center >= distance_r / 2:
                 diff_xy = center - detection.bbox.center
                 logger.debug("move command: %s, frame: %s", diff_xy, frame_angular_size)
                 command = diff_xy.multiplied_by_XY(frame_angular_size)
 
                 logger.debug("move command: %s", command)
-                drone.move_relative(command.x, command.y)
+                await drone.move_relative_async(command.x, command.y)
                 logger.debug("move command done")
 
-            logger.debug("Drone telemetry: %s", await drone.get_telemetry_async())
+            # logger.debug("Drone telemetry: %s", await drone.get_telemetry_async())
 
         except:
             logging.exception(f"Got exception: %s %s COMMAND: %s", detection, distance_to_center, command, exc_info=True)
