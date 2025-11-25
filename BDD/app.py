@@ -158,7 +158,16 @@ class StopSignal:
     pass
 STOP = StopSignal()
 
-async def drone_controlling_tread(drone_connection_string):
+
+def drone_controlling_tread(*args, **kwargs):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(drone_controlling_tread_async(*args, **kwargs))
+    finally:
+        loop.close()
+
+async def drone_controlling_tread_async(drone_connection_string, drone_config):
     from math import radians
 
     center = XY(0.5, 0.5)
@@ -167,12 +176,13 @@ async def drone_controlling_tread(drone_connection_string):
     frame_angular_size = XY(120, 90)
 
     from drone import DroneMover
-    drone = DroneMover(drone_connection_string)
+    drone = DroneMover(drone_connection_string, drone_config)
 
     logger.debug("starting up drone...")
     await drone.startup_sequence()
     logger.debug("drone started")
 
+    logger.debug("Getting telemetry")
     telemetry_data = await drone.get_telemetry_async()
     logger.debug("Drone telemetry: %s", telemetry_data)
 
@@ -235,10 +245,13 @@ def main():
     logging.getLogger("picamera2").setLevel(logging.WARNING)
     logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
 
+    drone_config = {
+        'cruise_altitude' : 1
+    }
 
     drone_thread = threading.Thread(
-        target = asyncio.run,
-        args=(drone_controlling_tread('udp://:14550'),),
+        target = drone_controlling_tread,
+        args = ('udp://:14550', drone_config, ),
         name = "Drone"
     )
     drone_thread.start()
@@ -265,8 +278,9 @@ def main():
         ]
         )
     app.run()
-    # detections_queue.put(STOP)
-    # drone_thread.join()
+    print("Done !!!")
+    detections_queue.put(STOP)
+    drone_thread.join()
 
 if __name__ == "__main__":
     # import nest_asyncio
