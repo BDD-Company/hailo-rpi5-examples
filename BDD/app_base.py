@@ -60,6 +60,11 @@ try:
 except ImportError:
     pass # Available only on Pi OS
 
+
+import logging
+
+logger = logging.getLogger("GSTApp")
+
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
 # -----------------------------------------------------------------------------------------------
@@ -126,7 +131,7 @@ class GStreamerApp:
         # Initialize variables
         tappas_post_process_dir = Path(os.environ.get(TAPPAS_POSTPROC_PATH_KEY, ''))
         if tappas_post_process_dir == '':
-            print("TAPPAS_POST_PROC_DIR environment variable is not set. Please set it by running set-env in cli")
+            logger.error("TAPPAS_POST_PROC_DIR environment variable is not set. Please set it by running set-env in cli")
             exit(1)
         self.current_path = os.path.dirname(os.path.abspath(__file__))
         self.postprocess_dir = tappas_post_process_dir
@@ -137,7 +142,7 @@ class GStreamerApp:
         if self.video_source == USB_CAMERA:
             self.video_source = get_usb_video_devices()
             if not self.video_source:
-                print('Provided argument "--input" is set to "usb", however no available USB cameras found. Please connect a camera or specifiy different input method.')
+                logger.error('Provided argument "--input" is set to "usb", however no available USB cameras found. Please connect a camera or specifiy different input method.')
                 exit(1)
             else:
                 self.video_source = self.video_source[0]
@@ -185,11 +190,11 @@ class GStreamerApp:
                 try:
                     self.webrtc_frames_queue.put(frame)  # Add the frame to the queue (non-blocking)
                 except queue.Full:
-                    print("Frame queue is full. Dropping frame.")  # Drop the frame if the queue is full
+                    logger.warning("Frame queue is full. Dropping frame.")  # Drop the frame if the queue is full
         return Gst.FlowReturn.OK
 
     def on_fps_measurement(self, sink, fps, droprate, avgfps):
-        print(f"FPS: {fps:.2f}, Droprate: {droprate:.2f}, Avg FPS: {avgfps:.2f}")
+        logger.info(f"FPS: {fps:.2f}, Droprate: {droprate:.2f}, Avg FPS: {avgfps:.2f}")
         return True
 
     def create_pipeline(self):
@@ -200,12 +205,12 @@ class GStreamerApp:
         try:
             self.pipeline = Gst.parse_launch(pipeline_string)
         except Exception as e:
-            print(f"Error creating pipeline: {e}", file=sys.stderr)
+            logger.error(f"Error creating pipeline", exc_info=True)
             sys.exit(1)
 
         # Connect to hailo_display fps-measurements
         if self.show_fps:
-            print("Showing FPS")
+            logger.info("Showing FPS")
             self.pipeline.get_by_name("hailo_display").connect("fps-measurements", self.on_fps_measurement)
 
         # Create a GLib Main Loop
@@ -214,11 +219,12 @@ class GStreamerApp:
     def bus_call(self, bus, message, loop):
         t = message.type
         if t == Gst.MessageType.EOS:
-            print("End-of-stream")
+            logger.info("End-of-stream")
             self.on_eos()
         elif t == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            print(f"Error: {err}, {debug}", file=sys.stderr)
+            logger.error(f"got error from Gstreamer: %s : %s", err, debug)
+
             self.error_occurred = True
             self.shutdown()
         # QOS
@@ -228,14 +234,13 @@ class GStreamerApp:
             if not hasattr(self, 'qos_count'):
                 self.qos_count = 0
             self.qos_count += 1
+            qos_element = message.src.get_name()
+            logger.info("QoS message received from %s", qos_element)
+
             if self.qos_count > 50 and self.qos_count % 10 == 0:
-                qos_element = message.src.get_name()
-                print(f"\033[91mQoS message received from {qos_element}\033[0m")
-                print(f"\033[91mLots of QoS messages received: {self.qos_count}, consider optimizing the pipeline or reducing the pipeline frame rate see '--frame-rate' flag.\033[0m")
+                logger.warning("Lots of QoS messages received: %s, consider optimizing the pipeline or reducing the pipeline frame rate see '--frame-rate' flag.", self.qos_count)
 
         return True
-
-
 
 
     def on_eos(self):
@@ -243,15 +248,15 @@ class GStreamerApp:
             if self.sync == "false":
                 # Pause the pipeline to clear any queued data. It is required when running with sync=false
                 # This will produce some warnings, but it's fine
-                print("Pausing pipeline for rewind... some warnings are expected.")
+                logger.debug("Pausing pipeline for rewind... some warnings are expected.")
                 self.pipeline.set_state(Gst.State.PAUSED)
 
             # Seek to the beginning (position 0) using a flush seek.
             success = self.pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0)
             if success:
-                print("Video rewound successfully. Restarting playback...")
+                logger.debug("Video rewound successfully. Restarting playback...")
             else:
-                print("Error rewinding video.", file=sys.stderr)
+                logger.error("Error rewinding video.")
 
             # Resume playback.
             self.pipeline.set_state(Gst.State.PLAYING)
@@ -260,7 +265,7 @@ class GStreamerApp:
 
 
     def shutdown(self, signum=None, frame=None):
-        print("Shutting down... Hit Ctrl-C again to force quit.")
+        logger.info("Shutting down... Hit Ctrl-C again to force quit.")
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         self.pipeline.set_state(Gst.State.PAUSED)
         GLib.usleep(100000)  # 0.1 second delay
@@ -271,6 +276,7 @@ class GStreamerApp:
         self.pipeline.set_state(Gst.State.NULL)
         GLib.idle_add(self.loop.quit)
 
+
     def update_fps_caps(self, new_fps=30, source_name='source'):
         """Updates the FPS by setting max-rate on videorate element directly"""
         # Derive the videorate and capsfilter element names based on the source name
@@ -280,19 +286,19 @@ class GStreamerApp:
         # Get the videorate element
         videorate = self.pipeline.get_by_name(videorate_name)
         if videorate is None:
-            print(f"Element {videorate_name} not found in the pipeline.")
+            logger.warning(f"Element {videorate_name} not found in the pipeline.")
             return
 
         # Print current properties for debugging
         current_max_rate = videorate.get_property("max-rate")
-        print(f"Current videorate max-rate: {current_max_rate}")
+        logger.debug("Current videorate max-rate: %s", current_max_rate)
 
         # Update the max-rate property directly
         videorate.set_property("max-rate", new_fps)
 
         # Verify the change
         updated_max_rate = videorate.get_property("max-rate")
-        print(f"Updated videorate max-rate to: {updated_max_rate}")
+        logger.debug("Updated videorate max-rate to: %s", updated_max_rate)
 
         # Get the capsfilter element
         capsfilter = self.pipeline.get_by_name(capsfilter_name)
@@ -300,20 +306,22 @@ class GStreamerApp:
             new_caps_str = f"video/x-raw, framerate={new_fps}/1"
             new_caps = Gst.Caps.from_string(new_caps_str)
             capsfilter.set_property("caps", new_caps)
-            print(f"Updated capsfilter caps to match new rate")
+            logger.debug("Updated capsfilter caps to match new rate: %s", new_caps_str)
 
         # Update frame_rate property
         self.frame_rate = new_fps
 
 
-    def get_pipeline_string(self):
+    def get_pipeline_string(self) -> str:
         # This is a placeholder function that should be overridden by the child class
         return ""
 
+
     def dump_dot_file(self):
-        print("Dumping dot file...")
+        logger.debug("Dumping dot file...")
         Gst.debug_bin_to_dot_file(self.pipeline, Gst.DebugGraphDetails.ALL, "pipeline")
         return False
+
 
     def run(self):
         # Add a watch for messages on the pipeline's bus
@@ -326,14 +334,14 @@ class GStreamerApp:
         if not self.options_menu.disable_callback:
             identity = self.pipeline.get_by_name("identity_callback")
             if identity is None:
-                print("Warning: identity_callback element not found, add <identity name=identity_callback> in your pipeline where you want the callback to be called.")
+                logger.warning("identity_callback element not found, add <identity name=identity_callback> in your pipeline where you want the callback to be called.")
             else:
                 identity_pad = identity.get_static_pad("src")
                 identity_pad.add_probe(Gst.PadProbeType.BUFFER, self.app_callback, self.user_data)
 
         hailo_display = self.pipeline.get_by_name("hailo_display")
         if hailo_display is None and not getattr(self.options_menu, 'ui', False):
-            print("Warning: hailo_display element not found, add <fpsdisplaysink name=hailo_display> to your pipeline to support fps display.")
+            logger.warning("Warning: hailo_display element not found, add <fpsdisplaysink name=hailo_display> to your pipeline to support fps display.")
 
         # Disable QoS to prevent frame drops
         disable_qos(self.pipeline)
@@ -375,21 +383,22 @@ class GStreamerApp:
             for t in self.threads:
                 t.join()
         except Exception as e:
-            print(f"Error during cleanup: {e}", file=sys.stderr)
+            logger.error("Error during cleanup", exc_info=True)
         finally:
             if self.error_occurred:
-                print("Exiting with error...", file=sys.stderr)
+                logger.error("Exiting with error...")
                 sys.exit(1)
             else:
-                print("Exiting...")
+                logger.info("Exiting...")
                 sys.exit(0)
 
-def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 30):
+def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 30, picamera_controls_initial = None, picamera_controls_per_frame_callback = None):
     appsrc = pipeline.get_by_name("app_source")
     appsrc.set_property("is-live", True)
     appsrc.set_property("format", Gst.Format.TIME)
-    print("appsrc properties: ", appsrc)
+    logger.debug("appsrc properties: %s", appsrc)
     # Initialize Picamera2
+
     with Picamera2() as picam2:
         if picamera_config is None:
             # Default configuration
@@ -401,11 +410,19 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
             config = picamera_config
         # Configure the camera with the created configuration
         picam2.configure(config)
+
+        def apply_controls(controls_dict : dict):
+            # TODO: creck that control is supported first
+            picam2.set_controls(controls_dict)
+
+        if picamera_controls_initial is not None:
+            apply_controls(picamera_controls_initial)
+
         # Update GStreamer caps based on 'lores' stream
         lores_stream = config['lores']
         format_str = 'RGB' if lores_stream['format'] == 'RGB888' else video_format
         width, height = lores_stream['size']
-        print(f"Picamera2 configuration: width={width}, height={height}, format={format_str}")
+        logger.debug("Picamera2 configuration: width=%s, height=%s, format=%s", width, height, format_str)
         appsrc.set_property(
             "caps",
             Gst.Caps.from_string(
@@ -416,7 +433,7 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
         picam2.start()
         frame_count = 0
         start_time = time.time()
-        print("picamera_process started")
+        logger.debug("picamera_process started")
         while True:
             # TODO(vnemkov): only set if camera actually supports those:
             # Must set AF params AFTER picam2.start() above, otherwise it doesn't work
@@ -426,10 +443,15 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
 #                "LensPosition": 6,
 #            })
 
+            if picamera_controls_per_frame_callback is not None:
+                picamera_controls = picamera_controls_per_frame_callback(frame_count)
+                if picamera_controls:
+                    apply_controls(picamera_controls)
+
             frame_data = picam2.capture_array('lores')
             # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
             if frame_data is None:
-                print("Failed to capture frame.")
+                logger.error("Failed to capture frame #%s.", frame_count)
                 break
             # Convert framontigue data if necessary
             frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
@@ -445,7 +467,7 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
             if ret == Gst.FlowReturn.FLUSHING:
                 break
             if ret != Gst.FlowReturn.OK:
-                print("Failed to push buffer:", ret)
+                logger.error("Failed to push buffer: %s", ret)
                 break
             frame_count += 1
 
@@ -459,7 +481,7 @@ def disable_qos(pipeline):
     """
     # Ensure the pipeline is a Gst.Pipeline instance
     if not isinstance(pipeline, Gst.Pipeline):
-        print("The provided object is not a GStreamer Pipeline")
+        logger.warning("The provided object is not a GStreamer Pipeline")
         return
 
     # Iterate through all elements in the pipeline
@@ -473,7 +495,7 @@ def disable_qos(pipeline):
         if 'qos' in GObject.list_properties(element):
             # Set the 'qos' property to False
             element.set_property('qos', False)
-            print(f"Set qos to False for {element.get_name()}")
+            logger.debug(f"Set qos to False for %s", element.get_name())
 
 # This function is used to display the user data frame
 def display_user_data_frame(user_data: app_callback_class):
@@ -509,7 +531,7 @@ class GStreamerDetectionApp(GStreamerApp):
             if detected_arch is None:
                 raise ValueError("Could not auto-detect Hailo architecture. Please specify --arch manually.")
             self.arch = detected_arch
-            print(f"Auto-detected Hailo architecture: {self.arch}")
+            logger.info("Auto-detected Hailo architecture: %s", self.arch)
         else:
             self.arch = self.options_menu.arch
 
@@ -544,6 +566,9 @@ class GStreamerDetectionApp(GStreamerApp):
 
         self.create_pipeline()
 
+    def get_output_pipeline_string(self, video_sink : str, sync : str = 'true', show_fps : str = 'true'):
+        return DISPLAY_PIPELINE(video_sink=video_sink, sync=sync, show_fps=show_fps)
+
     def get_pipeline_string(self):
         source_pipeline = SOURCE_PIPELINE(video_source=self.video_source,
                                           video_width=self.video_width, video_height=self.video_height,
@@ -558,7 +583,7 @@ class GStreamerDetectionApp(GStreamerApp):
         detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
         tracker_pipeline = TRACKER_PIPELINE(class_id=1)
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
-        display_pipeline = DISPLAY_PIPELINE(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
+        display_pipeline = self.get_output_pipeline_string(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
 
         pipeline_string = (
             f'{source_pipeline} ! '
@@ -567,5 +592,6 @@ class GStreamerDetectionApp(GStreamerApp):
             f'{user_callback_pipeline} ! '
             f'{display_pipeline}'
         )
-        print(pipeline_string)
+
+        logger.debug(pipeline_string)
         return pipeline_string
