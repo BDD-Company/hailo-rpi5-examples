@@ -27,7 +27,8 @@ class DroneMover():
         self.cruise_altitude = self.config.get('cruise_altitude', DEFAULT_TAKEOFF_ALTITUDE_M)
         self.tasks : list[asyncio.Task] = []
         self.drone_connection_string = drone_connection_string
-        # self.telemetry = OverwriteQueue(1)
+
+        # self.telemetry_data = {}
         # self.telemetry_thread = None
 
         # asyncio.run(self.__startup_sequence(drone_connection_string))
@@ -54,12 +55,10 @@ class DroneMover():
 
         asyncio.run(__shutdown_async())
 
-    async def startup_sequence(self):
-        return self.__startup_sequence(self.drone_connection_string)
 
-    async def __startup_sequence(self, drone_connection_string):
-        logging.info("Connecting to drone...")
-        await self.drone.connect(system_address = drone_connection_string)
+    async def startup_sequence(self):
+        logging.info("Connecting to drone... %s", self.drone_connection_string)
+        await self.drone.connect(system_address = self.drone_connection_string)
 
         drone = self.drone
 
@@ -160,74 +159,44 @@ class DroneMover():
         # return ic(XY(x = yaw_diff, y = altitude_diff))
 
 
-    async def get_telemetry_async(self):
-        try:
-            telemetry_point : dict = {"timestamp": datetime.datetime.now()}
+    async def get_telemetry_async(self) -> dict:
+        print("!!! TELEMETRY", file = sys.stderr, flush = True)
+        logger.debug("!!! telemetry")
 
-            # basic telemetry data
-            async for position in self.drone.telemetry.position():
-                telemetry_point.update({
-                    "position" : {
-                        "latitude": position.latitude_deg,
-                        "longitude": position.longitude_deg,
-                        "altitude": position.relative_altitude_m,
-                        "absolute_altitude": position.absolute_altitude_m
-                    }
-                })
-                break
+        telemetry_items = [
+            # "position",
+            "battery",
+            # "gps_info",
+            "health",
+            "odometry",
+            "attitude_angular_velocity_body"
+        ]
+        # tasks = {
+        #     "position": asyncio.create_task(_one(self.drone.telemetry.position())),
+        #     "battery": asyncio.create_task(_one(self.drone.telemetry.battery())),
+        #     "gps_info": asyncio.create_task(_one(self.drone.telemetry.gps_info())),
+        #     "health": asyncio.create_task(_one(self.drone.telemetry.health())),
+        #     "attitude_angular_velocity_body": asyncio.create_task(
+        #         _one(self.drone.telemetry.attitude_angular_velocity_body())
+        #     ),
+        # }
+        tasks = {
+            item : asyncio.create_task(_one(getattr(self.drone.telemetry, item)())) for item in telemetry_items
+        }
+        logger.debug("!!! tasks")
 
-            # battery
-            async for battery in self.drone.telemetry.battery():
-                telemetry_point.update({
-                    "battery" : {
-                        "voltage": battery.voltage_v,
-                        "remaining": battery.remaining_percent
-                    }
-                })
-                break
+        snapshot = {}
+        # task_start_time = datetime.datetime.now().ctime()
+        for key, task in tasks.items():
+            print("!!! TELEMETRY task", key, file = sys.stderr, flush = True)
+            msg = await task
 
-            # GPS
-            async for gps_info in self.drone.telemetry.gps_info():
-                if gps_info is None:
-                    continue
+            # with open(key + task_start_time + '.pickle', 'wb') as f:
+            #     pickle.dump(msg, f)
 
-                telemetry_point.update({
-                    "gps" : {
-                        "satellites": gps_info.num_satellites,
-                        "fix_type": gps_info.fix_type.name if gps_info.fix_type is not None else None
-                    }
-                })
-                break
+            snapshot[key] = mavsdk_msg_to_dict(msg)
 
-            # HEALTH
-            async for health in self.drone.telemetry.health():
-                telemetry_point.update({
-                    "health": health
-                })
-                break
-
-            async for mode in self.drone.telemetry.flight_mode():
-                telemetry_point.update({
-                    "flight_mode": mode.name if mode is not None else None
-                })
-                break
-
-            async for attitude in self.drone.telemetry.attitude_angular_velocity_body():
-                telemetry_point.update({
-                    "angular_velocity_body": {
-                        "pitch_s" : attitude.pitch_rad_s,
-                        "roll_s" : attitude.roll_rad_s,
-                        "yaw_s" : attitude.yaw_rad_s
-                    }
-                })
-                break
-
-            return telemetry_point
-
-
-        except Exception as e:
-            logger.exception("Error on telemetry thread", exc_info=True)
-            return None
+        return snapshot
 
 
     def move_to(self, new_pos) -> None:
@@ -241,6 +210,7 @@ class DroneMover():
 
         self.__execute_move_task(_move_to_async())
 
+
     def move_to_center(self) -> None:
         # this should move drone to initial pos
         async def _move_to_center_async():
@@ -250,6 +220,7 @@ class DroneMover():
             logger.debug('!!! Executed move_to_center')
 
         self.__execute_move_task(_move_to_center_async())
+
 
     def move_forward(self, speed_ms : float = 1.0) -> None:
         print("move_forward")
@@ -271,7 +242,6 @@ class DroneMover():
 
             # await self.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, dx))
         self.__execute_move_task(_move_relative_async())
-
 
 
     async def move_to_async(self, new_pos) -> None:
@@ -310,11 +280,13 @@ class DroneMover():
         # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
         logger.debug('!!! Executed move_forward')
 
+
     async def move_relative_async(self, dx, dy) -> None:
         print("move_relative_async")
         await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
         await asyncio.sleep(1)
         logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
+
 
     def __execute_move_task(self, task):
         #TODO:
@@ -323,6 +295,7 @@ class DroneMover():
         Items are pulled from queue and executed one by one.
         """
         asyncio.run(task)
+
 
 async def main():
     from helpers import configure_logging, XY

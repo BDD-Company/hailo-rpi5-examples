@@ -392,6 +392,7 @@ class GStreamerApp:
                 logger.info("Exiting...")
                 sys.exit(0)
 
+
 def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 30, picamera_controls_initial = None, picamera_controls_per_frame_callback = None):
     appsrc = pipeline.get_by_name("app_source")
     appsrc.set_property("is-live", True)
