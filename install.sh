@@ -7,7 +7,7 @@ set -euox pipefail
 NO_INSTALLATION=false
 PYHAILORT_PATH=""
 PYTAPPAS_PATH=""
-DOWNLOAD_ALL="default"  # Default to false unless --all is specified
+VENV_NAME_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--no-installation)
@@ -22,9 +22,9 @@ while [[ $# -gt 0 ]]; do
       PYTAPPAS_PATH="$2"
       shift 2
       ;;
-    --all)
-      DOWNLOAD_ALL="all"
-      shift
+    -v|--venv-name)
+      VENV_NAME_OVERRIDE="$2"
+      shift 2
       ;;
     *)
       echo "Unknown option: $1"
@@ -63,9 +63,6 @@ if [[ -n "$CONFIG_FILE" ]]; then
       hailort_version)     hailort_version="$val"     ;;
       tappas_version)      tappas_version="$val"      ;;
       virtual_env_name)    virtual_env_name="$val"    ;;
-      hailo_apps_infra_repo_url)   hailo_apps_infra_repo_url="$val"   ;;
-      hailo_apps_infra_branch_tag) hailo_apps_infra_branch_tag="$val" ;;
-      hailo_apps_infra_path)  hailo_apps_infra_path="$val"  ;;
       tappas_variant) tappas_variant="$val" ;;
       # you can add more mappings here…
     esac
@@ -79,17 +76,7 @@ fi
 : "${hailort_version:=4.20.0}"
 : "${tappas_version:=3.31.0}"
 : "${virtual_env_name:="hailo_venv"}"
-: "${hailo_apps_infra_repo_url:=https://github.com/hailo-ai/hailo-apps-infra.git}"
-: "${hailo_apps_infra_branch_tag:=dev}"
-: "${hailo_apps_infra_path:="auto"}"  # or "auto" for latest
 : "${tappas_variant:="hailo-tappas-core"}"  # or "x86_64"
-
-# Ensure all required variables are set
-if [[ "$hailo_apps_infra_branch_tag" == "auto" ]] && [[ "$hailo_apps_infra_path" == "auto" ]]; then
-  echo "❌ Please set 'hailo_apps_infra_repo_url', 'hailo_apps_infra_branch_tag', and 'hailo_apps_infra_path' in the config."
-  echo "Using hailo_apps_infra_branch_tag = dev because auto was set."
-  hailo_apps_infra_branch_tag="dev"
-fi
 
 # Now use those
 BASE_URL="$server_url"
@@ -97,7 +84,9 @@ DOWNLOAD_DIR="$storage_dir"
 HAILORT_VERSION="$hailort_version"
 TAPPAS_CORE_VERSION="$tappas_version"
 VENV_NAME="$virtual_env_name"
-HAILO_INFRA_PATH="$hailo_apps_infra_path"
+if [[ -n "$VENV_NAME_OVERRIDE" ]]; then
+  VENV_NAME="$VENV_NAME_OVERRIDE"
+fi
 TAPPAS_PIP_PKG="$tappas_variant"
 
 # —————————————————————————————
@@ -110,10 +99,8 @@ echo "  DOWNLOAD_DIR       = $DOWNLOAD_DIR"
 echo "  HAILORT_VERSION    = $HAILORT_VERSION"
 echo "  TAPPAS_CORE_VERSION= $TAPPAS_CORE_VERSION"
 echo "  VENV_NAME          = $VENV_NAME"
-echo "  Hailo-Apps-Infra   = $hailo_apps_infra_repo_url @ $hailo_apps_infra_branch_tag"
 echo "  TAPPAS_PIP_PKG     = $TAPPAS_PIP_PKG"
 echo "  TAPPAS_VARIANT     = $tappas_variant"
-echo "  HAILO_INFRA_PATH   = $HAILO_INFRA_PATH"
 echo "  CONFIG_FILE        = $CONFIG_FILE"
 
 
@@ -273,8 +260,6 @@ ENV_PATH="$(pwd)/$ENV_FILE"
 export HAILO_ENV_FILE="${ENV_PATH}"
 echo $HAILO_ENV_FILE
 
-CONFIG_PATH="$(pwd)/$CONFIG_FILE"
-
 # Step 1: Create the .env file if it doesn't exist
 if [[ ! -f "$ENV_PATH" ]]; then
     echo "🔧 Creating .env file at $ENV_PATH"
@@ -294,26 +279,6 @@ pip install "py>=1.8.0"
 
 
 pip install -r requirements.txt
-echo $"📦 Installing Hailo-Apps-Infra… $HAILO_INFRA_PATH"
-if [[ "$HAILO_INFRA_PATH" != "auto" ]]; then
-  echo "📦 Installing Hailo-Apps-Infra from $HAILO_INFRA_PATH…"
-  pip install -e "$HAILO_INFRA_PATH"
-else
-    echo "📦 Installing hailo-apps-infra from Git ($hailo_apps_infra_branch_tag)…"
-    pip install "git+${hailo_apps_infra_repo_url}@${hailo_apps_infra_branch_tag}#egg=hailo-apps"
-fi
-
-
-echo "📦 Installing shared runtime deps…"
-
-
-###——— POST-INSTALL ———————————————————————————————————————————————————
-echo
-echo "⚙️  Running post-install…"
-hailo-post-install \
-    --dotenv "$ENV_PATH" \
-    --config "$CONFIG_PATH" \
-    --group "$DOWNLOAD_ALL"
 
 
 ###——— FINISHED —————————————————————————————————————————————————————

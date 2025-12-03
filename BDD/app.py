@@ -152,10 +152,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     await drone.startup_sequence()
     logger.debug("drone started")
 
-    logger.debug("Getting telemetry")
-    telemetry_data = await drone.get_telemetry_async()
-    logger.debug("Drone telemetry: %s", json.dumps(telemetry_data))
-    current_attitude = await drone.get_current_attitude_async()
+    # logger.debug("Getting telemetry")
+    # telemetry_data = await drone.get_telemetry_async()
+    # logger.debug("Drone telemetry: %s", json.dumps(telemetry_data))
+    # current_attitude = await drone.get_current_attitude_async()
 
     while True:
         try:
@@ -165,7 +165,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             logger.debug("!!! awaiting detection... ")
             try:
-                detections_obj : Detections = detections_queue.get(timeout = 0.02)
+                detections_obj : Detections = detections_queue.get(timeout = 0.1)
             except Empty:
                 current_attitude = await drone.get_current_attitude_async()
                 logger.debug("attitude: %s", current_attitude)

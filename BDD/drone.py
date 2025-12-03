@@ -121,16 +121,17 @@ class DroneMover():
             arming_exception = None
             for i in range(100):
                 try:
-                    await drone.action.arm_force()
+                    await drone.action.arm()
                     arming_exception = None
                     break
                 except Exception as e:
                     arming_exception = e
                     logging.warning(f"retrying to arm, attempt {i}")
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
 
             if arming_exception is not None:
                 logging.warning(f"Failed to arm, latest exception", exc_info=arming_exception)
+                raise Exception('failed to arm')
 
         await arm()
 
@@ -154,7 +155,7 @@ class DroneMover():
             await drone.action.disarm()
             return
 
-        # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
+        await asyncio.sleep(1) # TODO(vnemkov): maybe remove?
         logging.debug("Taking off...")
         await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
         await asyncio.sleep(self.cruise_altitude / 2) # 2m/s climb rate approx
