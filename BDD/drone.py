@@ -19,12 +19,14 @@ async def _one(gen):
     async for item in gen:
         return item
 
-
-
 def mavsdk_msg_to_dict(msg) -> dict:
     if dataclasses.is_dataclass(msg):
         d = dataclasses.asdict(msg)
         return {key : mavsdk_msg_to_dict(val) for key, val in d.items()}
+
+    # do not unroll "primitive" types and enums
+    if type(msg).__module__ == "builtins" or isinstance(msg, Enum):
+        return msg
 
     d = {}
     for name in dir(msg):
@@ -36,9 +38,7 @@ def mavsdk_msg_to_dict(msg) -> dict:
 
         if dataclasses.is_dataclass(v):
             v = mavsdk_msg_to_dict(v)
-
-        # do not unroll "primitive" types and enums
-        if type(v).__module__ != "builtins" and not isinstance(v, Enum):
+        else:
             v = mavsdk_msg_to_dict(v)
 
         d[name] = v
@@ -206,16 +206,20 @@ class DroneMover():
 
         telemetry_items = [
             # "position", # -- hangs
-            "battery",
+            # "battery", # pretty useless
             # "heading", # -- hangs
             # "gps_info", # -- hangs
             "odometry",
-            "attitude_angular_velocity_body",
-            "health",
-            "imu",
+            # "attitude_angular_velocity_body", # present in odometry
+            # "health", # useless after start
+            # "imu", # using "attitude_euler" instead
             # "raw_imu", # -- hangs
             # "scaled_imu", # -- hangs
             "scaled_pressure",
+            "attitude_euler",
+            # "position_velocity_ned",
+            "flight_mode"
+            # "rc_status",
         ]
         # tasks = {
         #     "position": asyncio.create_task(_one(self.drone.telemetry.position())),
