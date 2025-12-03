@@ -1,26 +1,22 @@
 #!/usr/bin/env python
 
 from pathlib import Path
-from attr import dataclass
+import asyncio
+
+from queue import Queue
+from collections import deque
+from dataclasses import dataclass, field
+
 
 import os
 import numpy as np
-import cv2
 import hailo
 
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from app_base import GStreamerDetectionApp
-# from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
-
-
-import asyncio
-
-from queue import Queue
-from collections import deque
 
 from helpers import Rect, XY, configure_logging
-from dataclasses import dataclass, field
 import logging
 
 logger = logging.getLogger(__name__)
@@ -233,6 +229,20 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
             logging.exception(f"Got exception: %s %s COMMAND: %s", detection, distance_to_center, command, exc_info=True)
 
 
+class App(GStreamerDetectionApp):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30):
+        self.video_output_directory = video_output_path or '.'
+        self.video_output_chunk_length_s = video_output_chunk_length_s or 30
+        super().__init__(app_callback, user_data, parser)
+
+    def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
+        video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000 * 1000 * 1000
+        return f'''
+            videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast \
+            ! h264parse config-interval=1 \
+            ! splitmuxsink name=smx max-size-time={video_output_chunk_length_ns} muxer-factory=mp4mux async-finalize=true location="{self.video_output_directory}/clip-%05d.mp4"
+        '''
+
 def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -257,26 +267,30 @@ def main():
     drone_thread.start()
 
     user_data = user_app_callback_class()
-    app = GStreamerDetectionApp(app_callback, user_data)
-    for i in range(3):
-        detections_queue.put([
-            Detection(
-                bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                confidence = 0.1,
-                track_id = 1
-            ),
-            Detection(
-                bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                confidence = 0.9,
-                track_id = 2
-            ),
-            Detection(
-                bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                confidence = 0.7,
-                track_id = 3
-            ),
-        ]
-        )
+    app = App(app_callback, user_data)
+
+    DEBUG = False
+    if DEBUG:
+        for i in range(3):
+            detections_queue.put([
+                Detection(
+                    bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                    confidence = 0.1,
+                    track_id = 1
+                ),
+                Detection(
+                    bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                    confidence = 0.9,
+                    track_id = 2
+                ),
+                Detection(
+                    bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                    confidence = 0.7,
+                    track_id = 3
+                ),
+            ]
+            )
+
     app.run()
     print("Done !!!")
     detections_queue.put(STOP)

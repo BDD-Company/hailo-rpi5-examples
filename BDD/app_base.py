@@ -211,7 +211,11 @@ class GStreamerApp:
         # Connect to hailo_display fps-measurements
         if self.show_fps:
             logger.info("Showing FPS")
-            self.pipeline.get_by_name("hailo_display").connect("fps-measurements", self.on_fps_measurement)
+            display_sink = self.pipeline.get_by_name("hailo_display")
+            if display_sink is not None:
+                display_sink.connect("fps-measurements", self.on_fps_measurement)
+            else:
+                logger.warning("hailo_display sink is not present in pipiline, can't show FPS")
 
         # Create a GLib Main Loop
         self.loop = GLib.MainLoop()
@@ -511,6 +515,7 @@ class GStreamerDetectionApp(GStreamerApp):
     def __init__(self, app_callback, user_data, parser=None):
         if parser == None:
             parser = get_default_parser()
+
         parser.add_argument(
             "--labels-json",
             default=None,
