@@ -207,25 +207,25 @@ def debug_output_thread(output_queue : Queue, file_name, target_fps = 30, displa
     frame : np.ndarray = output['detections'].frame
     h, w, _ = frame.shape
 
-    # ffmpeg_cmd = [
-    #     "ffmpeg",
-    #     "-y",
-    #     "-re",  # read input at native rate
-    #     "-fflags", "nobuffer",
-    #     "-f", "rawvideo",
-    #     "-pix_fmt", "bgr24",
-    #     "-s", f"{w}x{h}",
-    #     "-r", str(target_fps),
-    #     "-i", "pipe:0",
-    #     "-vcodec", "libx264",
-    #     "-preset", "fast",
-    #     "-crf", "18",
-    #     "-segment_time", "30"
-    #     "-reset_timestamps", "1",
-    #     f"{file_name}_{record_start_time_str}_%03d.mp4"
-    # ]
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-y",
+        "-re",  # read input at native rate
+        "-fflags", "nobuffer",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{w}x{h}",
+        "-r", str(target_fps),
+        "-i", "pipe:0",
+        "-vcodec", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-segment_time", "30"
+        "-reset_timestamps",
+        f"{file_name}_{record_start_time_str}_%03d.mp4"
+    ]
 
-    # proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
     process_output(output, None, display)
 
     output = None
@@ -239,8 +239,8 @@ def debug_output_thread(output_queue : Queue, file_name, target_fps = 30, displa
             logger.exception("exception while processing frame %d", frame_id, exc_info=True, stack_info=True)
             break
 
-    # proc.stdin.close()
-    # proc.wait()
+    proc.stdin.close()
+    proc.wait()
 
 
 if __name__ == '__main__':
@@ -267,7 +267,7 @@ if __name__ == '__main__':
     telemetry = json.loads('{"odometry": {"angular_velocity_body": {"pitch_rad_s": -0.0010726579930633307, "roll_rad_s": 0.0010208315216004848, "yaw_rad_s": 0.0006282856920734048}, "child_frame_id": "1 (BODY_NED)", "frame_id": "1 (BODY_NED)", "pose_covariance": {"covariance_matrix": [0.00013371351815294474, NaN, NaN, NaN, NaN, NaN, 0.00013370705710258335, NaN, NaN, NaN, NaN, 0.07561597973108292, NaN, NaN, NaN, 1.736115154926665e-05, NaN, NaN, 1.3997990208736155e-05, NaN, 0.0010160470847040415]}, "position_body": {"x_m": 0.0010958998464047909, "y_m": -0.00166346225887537, "z_m": -1.66695237159729}, "q": {"timestamp_us": 0, "w": 0.7084895968437195, "x": 0.02082471176981926, "y": 0.019742604345083237, "z": -0.7051376104354858}, "time_usec": 1102239786672, "velocity_body": {"x_m_s": 0.0006445666076615453, "y_m_s": 0.001224401406943798, "z_m_s": 0.005852778907865286}, "velocity_covariance": {"covariance_matrix": [0.0014366698451340199, NaN, NaN, NaN, NaN, NaN, 0.0014359699562191963, NaN, NaN, NaN, NaN, 0.004651403985917568, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]}}, "scaled_pressure": {"absolute_pressure_hpa": 1008.449951171875, "differential_pressure_hpa": 0.0, "differential_pressure_temperature_deg": 0.0, "temperature_deg": 36.290000915527344, "timestamp_us": 1102240195000}, "attitude_euler": {"pitch_deg": 3.287358045578003, "roll_deg": 0.0956246480345726, "timestamp_us": 1102239771000, "yaw_deg": -89.72563171386719}, "flight_mode": "7 (OFFBOARD)"}')
 
     output_queue = Queue()
-    for i in range(0, 5):
+    for i in range(0, 500):
         d = dataclasses.replace(detections_template, frame_id = i, frame=frame.copy())
         output_queue.put({
             'detections': d,
@@ -275,6 +275,6 @@ if __name__ == '__main__':
             'move_command': XY((i - 5)* 20, (i - 5)* 20),
             'telemetry' : telemetry
         })
-    # output_queue.put(None) # Just to terminate by exception
+    output_queue.put(None) # Just to terminate by exception
 
     debug_output_thread(output_queue=output_queue, file_name='test', display = True)
