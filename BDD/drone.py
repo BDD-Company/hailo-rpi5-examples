@@ -2,7 +2,6 @@
 
 import sys
 import asyncio
-import nest_asyncio
 import datetime
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate
