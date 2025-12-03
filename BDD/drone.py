@@ -12,6 +12,8 @@ from mavsdk import System
 
 import logging
 
+from mavsdk.telemetry import Telemetry, EulerAngle
+
 logger = logging.Logger("BDD_drone")
 # nest_asyncio.apply()
 
@@ -200,8 +202,16 @@ class DroneMover():
         # return ic(XY(x = yaw_diff, y = altitude_diff))
 
 
+    async def get_current_yaw_async(self) -> float:
+        """
+        MUCH (!!!) faster than getting all telemetry data at once
+        """
+        val : EulerAngle = await _one(self.drone.telemetry.attitude_euler())
+        return val.yaw_deg
+
+
     async def get_telemetry_async(self) -> dict:
-        print("!!! TELEMETRY", file = sys.stderr, flush = True)
+        # print("!!! TELEMETRY", file = sys.stderr, flush = True)
         logger.debug("!!! telemetry")
 
         telemetry_items = [
@@ -238,7 +248,7 @@ class DroneMover():
         snapshot = {}
         # task_start_time = datetime.datetime.now().ctime()
         for key, task in tasks.items():
-            print("!!! TELEMETRY task", key, file = sys.stderr, flush = True)
+            # print("!!! TELEMETRY task", key, file = sys.stderr, flush = True)
             msg = await task
 
             # with open(key + task_start_time + '.pickle', 'wb') as f:
