@@ -21,13 +21,16 @@ async def _one(gen):
     async for item in gen:
         return item
 
-def mavsdk_msg_to_dict(msg) -> dict:
+def mavsdk_msg_to_dict(msg):
     if dataclasses.is_dataclass(msg):
         d = dataclasses.asdict(msg)
         return {key : mavsdk_msg_to_dict(val) for key, val in d.items()}
 
     # do not unroll "primitive" types and enums
     if type(msg).__module__ == "builtins" or isinstance(msg, Enum):
+        if isinstance(msg, Enum):
+            return f"{msg.value} ({msg.name})"
+
         return msg
 
     d = {}
@@ -202,12 +205,12 @@ class DroneMover():
         # return ic(XY(x = yaw_diff, y = altitude_diff))
 
 
-    async def get_current_yaw_async(self) -> float:
+    async def get_current_attitude_async(self) -> dict[str, float]:
         """
         MUCH (!!!) faster than getting all telemetry data at once
         """
         val : EulerAngle = await _one(self.drone.telemetry.attitude_euler())
-        return val.yaw_deg
+        return mavsdk_msg_to_dict(val)
 
 
     async def get_telemetry_async(self) -> dict:
