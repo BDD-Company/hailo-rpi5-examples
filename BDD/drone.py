@@ -2,7 +2,10 @@
 
 import sys
 import asyncio
-import datetime
+# import datetime
+# import threading
+import dataclasses
+from enum import Enum
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate
 from mavsdk import System
@@ -11,6 +14,41 @@ import logging
 
 logger = logging.Logger("BDD_drone")
 # nest_asyncio.apply()
+
+async def _one(gen):
+    async for item in gen:
+        return item
+
+
+
+def mavsdk_msg_to_dict(msg) -> dict:
+    if dataclasses.is_dataclass(msg):
+        d = dataclasses.asdict(msg)
+        return {key : mavsdk_msg_to_dict(val) for key, val in d.items()}
+
+    d = {}
+    for name in dir(msg):
+        if name.startswith("_"):
+            continue
+        v = getattr(msg, name)
+        if callable(v):
+            continue
+
+        if dataclasses.is_dataclass(v):
+            v = mavsdk_msg_to_dict(v)
+
+        # do not unroll "primitive" types and enums
+        if type(v).__module__ != "builtins" and not isinstance(v, Enum):
+            v = mavsdk_msg_to_dict(v)
+
+        d[name] = v
+
+    # nested list-like objects
+    if len(d) == 0 and len(msg) != 0:
+        d = tuple(i for i in msg)
+
+    return d
+
 
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
 
@@ -95,6 +133,10 @@ class DroneMover():
 
         await asyncio.sleep(1) # TODO(vnemkov): maybe remove?
 
+        logger.debug("getting initial telemetry...")
+        # await drone.telemetry.set_rate_heading(50.0)
+        logger.debug("initial telemetry: %s", await self.get_telemetry_async())
+
         # Важно: перед включением Offboard нужно отправить хотя бы одну команду
         # NED: Z вниз → 0 = текущая высота
         await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, 0.0, 0.0))
@@ -163,12 +205,17 @@ class DroneMover():
         logger.debug("!!! telemetry")
 
         telemetry_items = [
-            # "position",
+            # "position", # -- hangs
             "battery",
-            # "gps_info",
-            "health",
+            # "heading", # -- hangs
+            # "gps_info", # -- hangs
             "odometry",
-            "attitude_angular_velocity_body"
+            "attitude_angular_velocity_body",
+            "health",
+            "imu",
+            # "raw_imu", # -- hangs
+            # "scaled_imu", # -- hangs
+            "scaled_pressure",
         ]
         # tasks = {
         #     "position": asyncio.create_task(_one(self.drone.telemetry.position())),
