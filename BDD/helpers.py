@@ -1,17 +1,29 @@
 #!/usr/bin/env python3
 
 from dataclasses import dataclass, field
-
 from collections import deque
-import time
 from functools import wraps
 import logging
 import datetime
+from queue import Queue
 
-Milliseconds = int
+import numpy as np
 
-def get_current_time_ms() -> Milliseconds:
-    return int(time.time_ns() / (1000 * 1000))
+
+# Milliseconds = int
+# def get_current_time_ms() -> Milliseconds:
+#     return int(time.time_ns() / (1000 * 1000))
+
+
+class OverwriteQueue(Queue):
+    def __init__(self, maxsize=0):
+        super().__init__(maxsize=maxsize)
+        # to make sure that Queue always stores elements, effectively overwriting some older ones
+        self.maxsize = 0
+
+    def _init(self, maxsize):
+        self.queue = deque(maxlen=maxsize)
+
 
 class FPSCounter:
     def __init__(self, average_over_frames=10):
@@ -375,3 +387,31 @@ class dotdict(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
+
+
+
+@dataclass(slots=True, order=True, frozen=True)
+class Detection:
+    bbox : Rect = field(default_factory=Rect)
+    confidence : float = 0.0
+    track_id : int|None = 0
+
+@dataclass(slots=True, frozen=True)
+class Detections:
+    frame_id : int
+    frame : np.ndarray | None = None
+    detections : list[Detection] = field(default_factory=list)
+
+
+def full_classname(obj):
+    # based on https://gist.github.com/clbarnes/edd28ea32010eb159b34b075687bb49e#file-classname-py
+    cls = type(obj)
+    module = cls.__module__
+    name = cls.__qualname__
+    if module is not None and module != "__builtin__":
+        name = module + "." + name
+    return name
+
+def DEBUG_dump(prefix, obj):
+    print(prefix, obj, full_classname(obj), dir(obj))
+

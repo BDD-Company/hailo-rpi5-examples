@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+from math import nan
 from pathlib import Path
 import asyncio
 
@@ -17,43 +18,16 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_p
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from app_base import GStreamerDetectionApp
 
-from helpers import Rect, XY, configure_logging
-import logging
-
-logger = logging.getLogger(__name__)
-
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
-def full_classname(obj):
-    # based on https://gist.github.com/clbarnes/edd28ea32010eb159b34b075687bb49e#file-classname-py
-    cls = type(obj)
-    module = cls.__module__
-    name = cls.__qualname__
-    if module is not None and module != "__builtin__":
-        name = module + "." + name
-    return name
+from helpers import Rect, XY, configure_logging, OverwriteQueue, Detection, Detections
 
-def DEBUG_dump(prefix, obj):
-    print(prefix, obj, full_classname(obj), dir(obj))
+import logging
+logger = logging.getLogger(__name__)
 
 
-@dataclass(slots=True, order=True, frozen=True)
-class Detection:
-    bbox : Rect = field(default_factory=Rect)
-    confidence : float = 0.0
-    track_id : int|None = 0
-
-
-class OverwriteQueue(Queue):
-    def __init__(self, maxsize=0):
-        super().__init__(maxsize=maxsize)
-        # to make sure that Queue always stores elements, effectively overwriting some older ones
-        self.maxsize = 0
-
-    def _init(self, maxsize):
-        self.queue = deque(maxlen=maxsize)
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
@@ -68,11 +42,6 @@ class user_app_callback_class(app_callback_class):
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
 # -----------------------------------------------------------------------------------------------
-
-@dataclass(slots=True, frozen=True)
-class Detections:
-    detections : list[Detection] = field(default_factory=list)
-    frame : np.ndarray | None = None
 
 
 # This is the callback function that will be called when data is available from the pipeline
@@ -132,7 +101,7 @@ def app_callback(pad, info, user_data : user_app_callback_class):
 
             # DEBUG_dump("bbox: ", bbox)
     if len(detections) != 0:
-        user_data.detections_queue.put(Detections(detections_list, frame))
+        user_data.detections_queue.put(Detections(user_data.frame_count, frame, detections_list))
 
     # if user_data.use_frame:
     #     # Note: using imshow will not work here, as the callback function is not running in the main thread
@@ -190,15 +159,17 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
     while True:
         try:
-            detection = None
-            distance_to_center : float = 0.0
+            detections_obj = Detections(-1)
+            distance_to_center : float = float('NaN')
             command = XY()
 
             logger.debug("!!! awaiting detection... ")
             try:
                 detections_obj : Detections = detections_queue.get(timeout = 0.02)
             except Empty:
-                detections_obj = Detections()
+                current_attitude = await drone.get_current_attitude_async()
+                logger.debug("attitude: %s", current_attitude)
+                continue
 
             if detections_obj is STOP:
                 logger.info("stopping detection loop")
@@ -245,19 +216,17 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                         await drone.move_relative_async(command.x, command.y)
                         logger.debug("move command done")
 
-            if output_queue is not None:
+            # -1 means that there was no frame and no detections
+            if output_queue is not None and detections_obj.frame_id != -1:
                 output = {
-                    'frame' : frame,
-                    'detections' : detections,
+                    'detections' : detections_obj,
                     'selected' : selected_detection,
                     'move_command': command,
                     'telemetry': await drone.get_telemetry_async(),
                 }
 
         except:
-            logging.exception(f"Got exception: %s %s COMMAND: %s", detection, distance_to_center, command, exc_info=True)
-
-
+            logging.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, command, exc_info=True)
 
 
 
@@ -277,6 +246,7 @@ class App(GStreamerDetectionApp):
         '''
 
 
+
 def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -290,6 +260,7 @@ def main():
     logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
 
     detections_queue = OverwriteQueue(maxsize=2)
+    output_queue = OverwriteQueue(maxsize=2)
 
     drone_config = {
         'cruise_altitude' : 1
@@ -297,20 +268,22 @@ def main():
 
     drone_thread = threading.Thread(
         target = drone_controlling_tread,
-        args = ('udp://:14550', drone_config, detections_queue),
+        args = ('udp://:14550', drone_config, detections_queue, output_queue),
         name = "Drone"
     )
     drone_thread.start()
 
     user_data = user_app_callback_class(detections_queue)
+    user_data.use_frame = True
     app = App(app_callback, user_data)
 
     DEBUG = True
     if DEBUG:
         for i in range(3):
             detections_queue.put(
-                Detections(
-                    [
+                Detections(-1,
+                    frame = None,
+                    detections = [
                         Detection(
                             bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
                             confidence = 0.1,
@@ -327,7 +300,6 @@ def main():
                             track_id = 3
                         ),
                     ],
-                    frame = None
                 )
             )
 
@@ -337,7 +309,4 @@ def main():
     drone_thread.join()
 
 if __name__ == "__main__":
-    # import nest_asyncio
-
-    # nest_asyncio.apply()
     main()
