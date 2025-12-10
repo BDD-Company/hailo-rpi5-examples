@@ -15,13 +15,6 @@ import logging
 
 logger = logging.Logger("BDD_drone")
 
-
-async def _one(gen):
-    async for item in gen:
-        return item
-
-
-
 DEFAULT_TAKEOFF_ALTITUDE_M = 30
 
 class DroneMover():
