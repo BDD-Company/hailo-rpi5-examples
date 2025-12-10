@@ -7,13 +7,22 @@ import datetime
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate
 from mavsdk import System
+from mavsdk.telemetry import Telemetry, EulerAngle
+
+
 
 import logging
 
 logger = logging.Logger("BDD_drone")
-# nest_asyncio.apply()
 
-DEFAULT_TAKEOFF_ALTITUDE_M = 10
+
+async def _one(gen):
+    async for item in gen:
+        return item
+
+
+
+DEFAULT_TAKEOFF_ALTITUDE_M = 30
 
 class DroneMover():
 
@@ -66,9 +75,10 @@ class DroneMover():
         asyncio.run(__shutdown_async())
 
 
-    async def startup_sequence(self):
+    async def startup_sequence(self, arm_attempts = 100):
         logging.info("Connecting to drone... %s", self.drone_connection_string)
         await self.drone.connect(system_address = self.drone_connection_string)
+        arm_attempts = max(3, arm_attempts)
 
         drone = self.drone
 
@@ -87,7 +97,7 @@ class DroneMover():
         async def arm():
             logging.info("arming")
             arming_exception = None
-            for i in range(100):
+            for i in range(arm_attempts):
                 try:
                     await drone.action.arm()
                     arming_exception = None
@@ -169,16 +179,6 @@ class DroneMover():
         # yaw_diff = self.initial_yaw - yaw
 
         # return ic(XY(x = yaw_diff, y = altitude_diff))
-    async def get_current_yaw_async(self):
-        """
-        MUCH (!!!) faster than getting all telemetry data at once
-        """
-        return await self.get_cached_attitude()
-
-
-    async def get_current_yaw_generator(self):
-        return self.drone.telemetry.attitude_euler()
-
 
     async def _ensure_attitude_cache(self):
         """
