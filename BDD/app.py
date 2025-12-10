@@ -240,11 +240,12 @@ class App(GStreamerDetectionApp):
         super().__init__(app_callback, user_data, parser)
 
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
+        record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000 * 1000 * 1000
         return f'''
             videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast \
             ! h264parse config-interval=1 \
-            ! splitmuxsink name=smx max-size-time={video_output_chunk_length_ns} muxer-factory=mp4mux async-finalize=true location="{self.video_output_directory}/clip-%05d.mp4"
+            ! splitmuxsink name=smx max-size-time={video_output_chunk_length_ns} muxer-factory=mp4mux async-finalize=true location="{self.video_output_directory}/RAW_{record_start_time_str}_%05d.mp4"
         '''
 
 def main():
