@@ -15,7 +15,7 @@ import logging
 
 logger = logging.Logger("BDD_drone")
 
-DEFAULT_TAKEOFF_ALTITUDE_M = 30
+DEFAULT_TAKEOFF_ALTITUDE_M = 20
 
 class DroneMover():
 
@@ -122,9 +122,9 @@ class DroneMover():
             return
 
         # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
-        logging.debug("Taking off...")
+        logging.debug("Taking off to %s...", self.cruise_altitude)
         await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
-        await asyncio.sleep(self.cruise_altitude / 2) # 2m/s climb rate approx
+        await asyncio.sleep(10) #self.cruise_altitude / 2) # 2m/s climb rate approx
 
         self.offboard = drone.offboard
         logging.debug("took off")

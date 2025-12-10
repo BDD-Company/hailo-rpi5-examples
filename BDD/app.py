@@ -168,7 +168,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
     from math import radians
 
     center = XY(0.5, 0.5)
-    distance_r = 0.2
+    distance_r = 0.1
     distance_r *= distance_r
     frame_angular_size = XY(120, 90)
 
@@ -176,7 +176,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
     drone = DroneMover(drone_connection_string, drone_config)
 
     logger.debug("starting up drone...")
-    await drone.startup_sequence()
+    await drone.startup_sequence(100)
     logger.debug("drone started")
 
     # Warm up the attitude cache so we always have a recent value without waiting
@@ -216,8 +216,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
 
             forward_speed = 0
             if horizontal_distance < distance_r:
-                forward_speed = 10
-                logger.debug("drone is in fron of us: moving towards it with speed: %s m/s", forward_speed)
+                forward_speed = 3
+                logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
                 # await drone.move_to_target_async(command.x, command.y, 0.3)
 
             # else: #if distance_to_center >= distance_r / 2:
@@ -263,7 +263,7 @@ def main():
     logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
 
     drone_config = {
-        'cruise_altitude' : 1
+        'cruise_altitude' : 10
     }
 
     drone_thread = threading.Thread(
@@ -278,7 +278,12 @@ def main():
 
     DEBUG = False
     if DEBUG:
-        for i in range(3):
+        for i in range(30):
+            if detections_queue.full():
+                time.sleep(0.01)
+                if detections_queue.full():
+                    continue
+
             detections_queue.put([
                 Detection(
                     bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
@@ -304,7 +309,4 @@ def main():
     drone_thread.join()
 
 if __name__ == "__main__":
-    # import nest_asyncio
-
-    # nest_asyncio.apply()
     main()

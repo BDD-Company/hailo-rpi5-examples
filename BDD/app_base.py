@@ -12,6 +12,9 @@ import cv2
 import numpy as np
 import time
 import queue
+
+import datetime
+
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib, GObject
 
