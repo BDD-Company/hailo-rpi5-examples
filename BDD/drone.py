@@ -267,35 +267,35 @@ class DroneMover():
         self.__execute_move_task(_move_to_center_async())
 
 
-    def move_forward(self, speed_ms : float = 1.0) -> None:
-        print("move_forward")
-        async def _move_forward():
-            await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(speed_ms, 0, 0, 0))
-            await asyncio.sleep(0.2)
-            await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
-            logger.debug('!!! Executed move_forward')
-        self.__execute_move_task(_move_forward())
+    # def move_forward(self, speed_ms : float = 1.0) -> None:
+    #     print("move_forward")
+    #     async def _move_forward():
+    #         await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(speed_ms, 0, 0, 0))
+    #         await asyncio.sleep(0.2)
+    #         await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
+    #         logger.debug('!!! Executed move_forward')
+    #     self.__execute_move_task(_move_forward())
 
 
-    def move_relative(self, dx, dy) -> None:
-        print("move_relative")
-        async def _move_relative_async():
-            logger.debug("_move_relative_async")
-            await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
-            # await asyncio.sleep(0.1)
-            logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
+    # def move_relative(self, dx, dy) -> None:
+    #     print("move_relative")
+    #     async def _move_relative_async():
+    #         logger.debug("_move_relative_async")
+    #         await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
+    #         # await asyncio.sleep(0.1)
+    #         logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
 
-            # await self.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, dx))
-        self.__execute_move_task(_move_relative_async())
+    #         # await self.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, dx))
+    #     self.__execute_move_task(_move_relative_async())
 
 
-    async def move_to_async(self, new_pos) -> None:
-        # on the drone
-        new_pos.x *= -1
+    # async def move_to_async(self, new_pos) -> None:
+    #     # on the drone
+    #     new_pos.x *= -1
 
-        await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
-        logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
-        # await asyncio.sleep(0.1)
+    #     await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
+    #     logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
+    #     # await asyncio.sleep(0.1)
 
 
     async def move_to_center_async(self) -> None:
@@ -307,29 +307,37 @@ class DroneMover():
         logger.debug('!!! Executed move_to_center')
 
 
-    async def move_to_target_async(self, yaw_degree : float, pitch_degree : float, thrust : float = 0.2) -> None:
-        print("move_forward_async")
-        try:
-            # -1 : here ducking nose DOWN to be able to move to target which is UP (due to how quadcopters move)
-            # 0.5 : doing it sligthly so target doesn't disappear from frame
-            pitch_degree *= -1
-            await self.drone.offboard.set_attitude(Attitude(0, pitch_deg=pitch_degree, yaw_deg=yaw_degree, thrust_value=thrust))
-        except:
-            logger.exception("While moving to target with pitch: %s, yaw: %s, thrust: %s",
-                pitch_degree,
-                yaw_degree,
-                thrust)
+    async def track_target(self, x : float, y : float, forward_speed_m_s : float = 0.0) -> None:
+        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=forward_speed_m_s, right_m_s=0, down_m_s=0, yawspeed_deg_s=x))
 
-        # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(speed_ms, 0, 0, 0))
-        # await asyncio.sleep(0.5)
-        # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
-        logger.debug('!!! Executed move_forward')
+    async def standstill(self):
+        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
+
+    # async def move_to_target_async(self, yaw_m_s : float, pitch_degree : float, forward_speed_m_s : float = 0.0) -> None:
+    #     print("move_forward_async")
+    #     try:
+    #         # -1 : here ducking nose DOWN to be able to move to target which is UP (due to how quadcopters move)
+    #         # 0.5 : doing it sligthly so target doesn't disappear from frame
+    #         # pitch_degree *= -1
+    #         # await self.drone.offboard.set_attitude(Attitude(0, pitch_deg=pitch_degree, yaw_deg=yaw_degree, thrust_value=thrust))
+    #         await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=forward_speed, 0, 0, yawspeed_deg_s=yaw_degree))
+
+    #     except:
+    #         logger.exception("While moving to target with pitch: %s, yaw: %s, thrust: %s",
+    #             pitch_degree,
+    #             yaw_degree,
+    #             thrust)
+
+        # # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(speed_ms, 0, 0, 0))
+        # # await asyncio.sleep(0.5)
+        # # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
+        # logger.debug('!!! Executed move_forward')
 
 
     async def move_relative_async(self, dx, dy) -> None:
         print("move_relative_async")
         await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
-        await asyncio.sleep(1)
+        # await asyncio.sleep(1)
         logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
 
 
@@ -350,7 +358,7 @@ async def main():
 
     drone = DroneMover('udp://:14550')
     drone.move_to_center()
-    drone.move_forward(10)
+    await drone.move_forward_async(10)
     drone.move_to(XY(10, 10))
 
     logger.debug("drone started")
