@@ -28,6 +28,10 @@ class DroneMover():
         self.tasks : list[asyncio.Task] = []
         self.drone_connection_string = drone_connection_string
 
+        self._attitude_task : asyncio.Task | None = None
+        self._attitude_ready : asyncio.Event | None = None
+        self._latest_attitude : EulerAngle | None = None
+
         # self.telemetry_data = {}
         # self.telemetry_thread = None
 
@@ -40,7 +44,13 @@ class DroneMover():
     def __del__(self):
         async def __await_tasks():
             for t in self.tasks:
-                await asyncio.wait_for(t, timeout=0.001)
+                t.cancel()
+                try:
+                    await asyncio.wait_for(t, timeout=0.001)
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    pass
 
         asyncio.run(__await_tasks())
 
@@ -79,7 +89,7 @@ class DroneMover():
             arming_exception = None
             for i in range(100):
                 try:
-                    await drone.action.arm_force()
+                    await drone.action.arm()
                     arming_exception = None
                     break
                 except Exception as e:
@@ -115,6 +125,8 @@ class DroneMover():
 
         self.offboard = drone.offboard
         logging.debug("took off")
+
+        await self._ensure_attitude_cache()
 
         # # NOTE(vnemkov): not required, just visual indicator for the pilot
         # THRUST_VALUE = 0.1
@@ -157,6 +169,46 @@ class DroneMover():
         # yaw_diff = self.initial_yaw - yaw
 
         # return ic(XY(x = yaw_diff, y = altitude_diff))
+    async def get_current_yaw_async(self):
+        """
+        MUCH (!!!) faster than getting all telemetry data at once
+        """
+        return await self.get_cached_attitude()
+
+
+    async def get_current_yaw_generator(self):
+        return self.drone.telemetry.attitude_euler()
+
+
+    async def _ensure_attitude_cache(self):
+        """
+        Spin a background task that keeps the latest attitude sample so callers
+        can read it without awaiting the next gRPC update.
+        """
+        if self._attitude_task is not None:
+            return
+
+        self._attitude_ready = asyncio.Event()
+
+        async def _consume_attitude():
+            async for attitude in self.drone.telemetry.attitude_euler():
+                self._latest_attitude = attitude
+                self._attitude_ready.set()
+
+        self._attitude_task = asyncio.create_task(_consume_attitude())
+        self.tasks.append(self._attitude_task)
+
+
+    async def get_cached_attitude(self, wait_for_first: bool = True) -> EulerAngle | None:
+        """
+        Return the last received attitude sample; optionally wait for the first one.
+        """
+        await self._ensure_attitude_cache()
+
+        if wait_for_first and self._attitude_ready is not None:
+            await self._attitude_ready.wait()
+
+        return self._latest_attitude
 
 
     async def get_telemetry_async(self) -> dict:
@@ -319,4 +371,3 @@ if __name__ == "__main__":
 
     nest_asyncio.apply()
     loop.run_until_complete(main())
-

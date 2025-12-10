@@ -7,7 +7,7 @@ from queue import Queue
 from collections import deque
 from dataclasses import dataclass, field
 
-
+import datetime
 import os
 import numpy as np
 import hailo
@@ -178,9 +178,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
     await drone.startup_sequence()
     logger.debug("drone started")
 
-    logger.debug("Getting telemetry")
-    telemetry_data = await drone.get_telemetry_async()
-    logger.debug("Drone telemetry: %s", telemetry_data)
+    # Warm up the attitude cache so we always have a recent value without waiting
+    current_attitude = await drone.get_cached_attitude()
 
     while True:
         try:
@@ -197,10 +196,14 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
             if len(detections) == 0:
                 continue
 
+            cached_attitude = await drone.get_cached_attitude(wait_for_first=False)
+            if cached_attitude is not None:
+                current_attitude = cached_attitude
+
             detections.sort(reverse=True, key = lambda d : d.confidence)
             detection = detections[0]
 
-            logger.debug("!!! Detection: %s", detection)
+            logger.debug("!!! Detection: %s, attitude: %s", detection, current_attitude)
             # TODO: if track id is None and confidence < 0.3 -- ignore target
 
             distance_to_center = detection.bbox.center.distance_squared_to(center)
@@ -210,14 +213,15 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
             logger.debug("move command: %s, frame: %s", diff_xy, frame_angular_size)
             command = diff_xy.multiplied_by_XY(frame_angular_size)
 
-            # if distance_to_center < distance_r:
-            #     logger.debug("drone in the crosshair: move to center")
-            #     asyncio.run(drone.move_to_target_async(command.x, command.y, 0.5))
+            if distance_to_center < distance_r:
+                logger.debug("drone in the crosshair: move to center")
+                await drone.move_to_target_async(command.x, command.y, 0.3)
 
-            if distance_to_center >= distance_r / 2:
+            elif distance_to_center >= distance_r / 2:
                 diff_xy = center - detection.bbox.center
                 logger.debug("move command: %s, frame: %s", diff_xy, frame_angular_size)
                 command = diff_xy.multiplied_by_XY(frame_angular_size)
+                command.x += current_attitude.yaw_deg
 
                 logger.debug("move command: %s", command)
                 await drone.move_relative_async(command.x, command.y)
