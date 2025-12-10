@@ -6,6 +6,7 @@ import asyncio
 from queue import Queue
 from collections import deque
 from dataclasses import dataclass, field
+import time
 
 import datetime
 import os
@@ -167,7 +168,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
     from math import radians
 
     center = XY(0.5, 0.5)
-    distance_r = 0.1
+    distance_r = 0.2
     distance_r *= distance_r
     frame_angular_size = XY(120, 90)
 
