@@ -19,7 +19,7 @@ from app_base import GStreamerDetectionApp
 
 from mavsdk.telemetry import EulerAngle
 
-from helpers import Rect, XY, configure_logging
+from helpers import Rect, XY, configure_logging, OverwriteQueue, Detection
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,22 +40,6 @@ def full_classname(obj):
 def DEBUG_dump(prefix, obj):
     print(prefix, obj, full_classname(obj), dir(obj))
 
-
-@dataclass(slots=True, order=True, frozen=True)
-class Detection:
-    bbox : Rect = field(default_factory=Rect)
-    confidence : float = 0.0
-    track_id : int|None = 0
-
-
-class OverwriteQueue(Queue):
-    def __init__(self, maxsize=0):
-        super().__init__(maxsize=maxsize)
-        # to make sure that Queue always stores elements, effectively overwriting some older ones
-        self.maxsize = 0
-
-    def _init(self, maxsize):
-        self.queue = deque(maxlen=maxsize)
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function

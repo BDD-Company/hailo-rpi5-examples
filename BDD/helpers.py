@@ -7,6 +7,7 @@ import time
 from functools import wraps
 import logging
 import datetime
+from queue import Queue
 
 Milliseconds = int
 
@@ -375,3 +376,20 @@ class dotdict(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
+
+
+@dataclass(slots=True, order=True, frozen=True)
+class Detection:
+    bbox : Rect = field(default_factory=Rect)
+    confidence : float = 0.0
+    track_id : int|None = 0
+
+
+class OverwriteQueue(Queue):
+    def __init__(self, maxsize=0):
+        super().__init__(maxsize=maxsize)
+        # to make sure that Queue always stores elements, effectively overwriting some older ones
+        self.maxsize = 0
+
+    def _init(self, maxsize):
+        self.queue = deque(maxlen=maxsize)
