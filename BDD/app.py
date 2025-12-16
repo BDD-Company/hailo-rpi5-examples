@@ -165,6 +165,12 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
     await drone.startup_sequence(100)
     logger.debug("drone started")
 
+    logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
+
+    logger.debug("!!! getting telemetry")
+    telemetry = await drone.get_telemetry_dict(True)
+    logger.debug("GOT telemetry: %s", telemetry)
+
     # Warm up the attitude cache so we always have a recent value without waiting
     current_attitude : EulerAngle = await drone.get_cached_attitude()
 
@@ -192,6 +198,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
             detection = detections[0]
 
             logger.debug("!!! Detection: %s, attitude: %s", detection, current_attitude)
+            logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
             # TODO: if track id is None and confidence < 0.3 -- ignore target
             if detection.confidence < 0.25:
                 logger.debug("!!! ignoring detection as false-positive")

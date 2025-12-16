@@ -3,19 +3,53 @@
 import sys
 import asyncio
 import nest_asyncio
-import datetime
+import dataclasses
+from enum import Enum
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate
 from mavsdk import System
 from mavsdk.telemetry import Telemetry, EulerAngle
-
-
 
 import logging
 
 logger = logging.Logger("BDD_drone")
 
 DEFAULT_TAKEOFF_ALTITUDE_M = 20
+
+
+def mavsdk_msg_to_dict(msg):
+    if dataclasses.is_dataclass(msg):
+        d = dataclasses.asdict(msg)
+        return {key : mavsdk_msg_to_dict(val) for key, val in d.items()}
+
+    # do not unroll "primitive" types and enums
+    if type(msg).__module__ == "builtins" or isinstance(msg, Enum):
+        if isinstance(msg, Enum):
+            return f"{msg.value} ({msg.name})"
+
+        return msg
+
+    d = {}
+    for name in dir(msg):
+        if name.startswith("_"):
+            continue
+        v = getattr(msg, name)
+        if callable(v):
+            continue
+
+        if dataclasses.is_dataclass(v):
+            v = mavsdk_msg_to_dict(v)
+        else:
+            v = mavsdk_msg_to_dict(v)
+
+        d[name] = v
+
+    # nested list-like objects
+    if len(d) == 0 and len(msg) != 0:
+        d = tuple(i for i in msg)
+
+    return d
+
 
 class DroneMover():
 
@@ -30,9 +64,17 @@ class DroneMover():
         self.tasks : list[asyncio.Task] = []
         self.drone_connection_string = drone_connection_string
 
-        self._attitude_task : asyncio.Task | None = None
-        self._attitude_ready : asyncio.Event | None = None
-        self._latest_attitude : EulerAngle | None = None
+        # Telemetry aspects to keep cached; edit this list to add/remove streams.
+        self.telemetry_aspects = [
+            "attitude_euler",
+            "battery",
+            "health",
+            "odometry",
+            "attitude_angular_velocity_body",
+        ]
+        self._telemetry_tasks : dict[str, asyncio.Task] = {}
+        self._telemetry_ready : dict[str, asyncio.Event] = {}
+        self._telemetry_latest : dict[str, object] = {}
 
         # self.telemetry_data = {}
         # self.telemetry_thread = None
@@ -129,7 +171,7 @@ class DroneMover():
         self.offboard = drone.offboard
         logging.debug("took off")
 
-        await self._ensure_attitude_cache()
+        await self._ensure_telemetry_cache()
 
         # # NOTE(vnemkov): not required, just visual indicator for the pilot
         # THRUST_VALUE = 0.1
@@ -173,75 +215,67 @@ class DroneMover():
 
         # return ic(XY(x = yaw_diff, y = altitude_diff))
 
-    async def _ensure_attitude_cache(self):
+    async def _ensure_telemetry_cache(self, aspects: list[str] | None = None):
         """
-        Spin a background task that keeps the latest attitude sample so callers
-        can read it without awaiting the next gRPC update.
+        Start background consumers for each telemetry aspect so the latest sample
+        is always available without awaiting a fresh gRPC call.
         """
-        if self._attitude_task is not None:
-            return
+        aspects = self.telemetry_aspects if aspects is None else aspects
 
-        self._attitude_ready = asyncio.Event()
+        for aspect in aspects:
+            if aspect in self._telemetry_tasks:
+                continue
 
-        async def _consume_attitude():
-            async for attitude in self.drone.telemetry.attitude_euler():
-                self._latest_attitude = attitude
-                self._attitude_ready.set()
+            self._telemetry_ready[aspect] = asyncio.Event()
 
-        self._attitude_task = asyncio.create_task(_consume_attitude())
-        self.tasks.append(self._attitude_task)
+            async def _consume(aspect_name: str):
+                async for sample in getattr(self.drone.telemetry, aspect_name)():
+                    self._telemetry_latest[aspect_name] = sample
+                    self._telemetry_ready[aspect_name].set()
+
+            task = asyncio.create_task(_consume(aspect))
+            self._telemetry_tasks[aspect] = task
+            self.tasks.append(task)
+
+
+    async def get_cached_telemetry(self, aspect: str, wait_for_first: bool = True):
+        """
+        Return the last received telemetry sample for `aspect`; optionally wait
+        for the first sample. Add/remove aspects in `self.telemetry_aspects`.
+        """
+        await self._ensure_telemetry_cache([aspect])
+
+        if wait_for_first and aspect in self._telemetry_ready:
+            await self._telemetry_ready[aspect].wait()
+
+        return self._telemetry_latest.get(aspect)
 
 
     async def get_cached_attitude(self, wait_for_first: bool = True) -> EulerAngle | None:
-        """
-        Return the last received attitude sample; optionally wait for the first one.
-        """
-        await self._ensure_attitude_cache()
-
-        if wait_for_first and self._attitude_ready is not None:
-            await self._attitude_ready.wait()
-
-        return self._latest_attitude
+        return await self.get_cached_telemetry("attitude_euler", wait_for_first=wait_for_first)
 
 
-    async def get_telemetry_async(self) -> dict:
-        print("!!! TELEMETRY", file = sys.stderr, flush = True)
-        logger.debug("!!! telemetry")
+    async def get_telemetry_dict(self, wait = False) -> dict:
+        result = {}
+        for aspect in self.telemetry_aspects:
+            result[aspect] = mavsdk_msg_to_dict(await self.get_cached_telemetry(aspect, wait))
 
-        telemetry_items = [
-            # "position",
-            "battery",
-            # "gps_info",
-            "health",
-            "odometry",
-            "attitude_angular_velocity_body"
-        ]
-        # tasks = {
-        #     "position": asyncio.create_task(_one(self.drone.telemetry.position())),
-        #     "battery": asyncio.create_task(_one(self.drone.telemetry.battery())),
-        #     "gps_info": asyncio.create_task(_one(self.drone.telemetry.gps_info())),
-        #     "health": asyncio.create_task(_one(self.drone.telemetry.health())),
-        #     "attitude_angular_velocity_body": asyncio.create_task(
-        #         _one(self.drone.telemetry.attitude_angular_velocity_body())
-        #     ),
-        # }
-        tasks = {
-            item : asyncio.create_task(_one(getattr(self.drone.telemetry, item)())) for item in telemetry_items
-        }
-        logger.debug("!!! tasks")
+        return result
 
-        snapshot = {}
-        # task_start_time = datetime.datetime.now().ctime()
-        for key, task in tasks.items():
-            print("!!! TELEMETRY task", key, file = sys.stderr, flush = True)
-            msg = await task
+    def get_telemetry_dict_sync(self, wait = False) -> dict:
+        return asyncio.run(self.get_telemetry_dict(wait))
 
-            # with open(key + task_start_time + '.pickle', 'wb') as f:
-            #     pickle.dump(msg, f)
+    # async def get_telemetry_async(self) -> dict:
+    #     """
+    #     Return a snapshot of the latest cached telemetry aspects.
+    #     """
+    #     await self._ensure_telemetry_cache()
 
-            snapshot[key] = mavsdk_msg_to_dict(msg)
+    #     snapshot = {}
+    #     for aspect in self.telemetry_aspects:
+    #         snapshot[aspect] = await self.get_cached_telemetry(aspect, wait_for_first=False)
 
-        return snapshot
+    #     return snapshot
 
 
     def move_to(self, new_pos) -> None:
