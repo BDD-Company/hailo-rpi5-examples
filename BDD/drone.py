@@ -122,7 +122,7 @@ class DroneMover():
             return
 
         # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
-        logging.debug("Taking off to %s...", self.cruise_altitude)
+        logging.debug("Taking off to %sm...", self.cruise_altitude)
         await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
         await asyncio.sleep(10) #self.cruise_altitude / 2) # 2m/s climb rate approx
 
@@ -337,7 +337,7 @@ class DroneMover():
     async def move_relative_async(self, dx, dy) -> None:
         print("move_relative_async")
         await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
-        # await asyncio.sleep(1)
+        await asyncio.sleep(0.1)
         logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
 
 
