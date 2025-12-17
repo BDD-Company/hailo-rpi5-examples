@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-import sys
 import asyncio
 import nest_asyncio
 import dataclasses
@@ -9,6 +8,8 @@ from enum import Enum
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate
 from mavsdk import System
 from mavsdk.telemetry import Telemetry, EulerAngle
+
+from helpers import MoveCommand, dotdict
 
 import logging
 
@@ -49,7 +50,6 @@ def mavsdk_msg_to_dict(msg):
         d = tuple(i for i in msg)
 
     return d
-
 
 class DroneMover():
 
@@ -194,27 +194,6 @@ class DroneMover():
         return
 
 
-    # def _get_position_and_yaw(self)-> tuple[DronePosition, float]:
-    #     async def _get_position_and_yaw_async(self):
-    #         position = self.drone_controller.get_position()
-    #         yaw = self.drone_controller.get_yaw()
-    #         return DronePosition.from_drone_position_tuple(await position), await yaw
-
-    #     return asyncio.run(_get_position_and_yaw_async(self))
-
-    # def current_pos(self) -> XY:
-    #     return XY()
-
-        # if self.initial_pos is None or self.initial_yaw is None:
-        #     self.initial_pos, self.initial_yaw = self._get_position_and_yaw()
-        #     ic(self.initial_pos, self.initial_yaw)
-
-        # position, yaw = self._get_position_and_yaw()
-        # altitude_diff = self.initial_pos.altitude_m - position.altitude_m
-        # yaw_diff = self.initial_yaw - yaw
-
-        # return ic(XY(x = yaw_diff, y = altitude_diff))
-
     async def _ensure_telemetry_cache(self, aspects: list[str] | None = None):
         """
         Start background consumers for each telemetry aspect so the latest sample
@@ -260,46 +239,23 @@ class DroneMover():
         for aspect in self.telemetry_aspects:
             result[aspect] = mavsdk_msg_to_dict(await self.get_cached_telemetry(aspect, wait))
 
-        return result
+        return dotdict(result)
+
 
     def get_telemetry_dict_sync(self, wait = False) -> dict:
         return asyncio.run(self.get_telemetry_dict(wait))
 
-    # async def get_telemetry_async(self) -> dict:
-    #     """
-    #     Return a snapshot of the latest cached telemetry aspects.
-    #     """
-    #     await self._ensure_telemetry_cache()
 
-    #     snapshot = {}
-    #     for aspect in self.telemetry_aspects:
-    #         snapshot[aspect] = await self.get_cached_telemetry(aspect, wait_for_first=False)
+    # def move_to(self, new_pos) -> None:
+    #     print("move_to")
+    #     new_pos.x *= -1
 
-    #     return snapshot
+    #     async def _move_to_async():
+    #         await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
+    #         logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
+    #         await asyncio.sleep(0.1)
 
-
-    def move_to(self, new_pos) -> None:
-        print("move_to")
-        new_pos.x *= -1
-
-        async def _move_to_async():
-            await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
-            logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
-            await asyncio.sleep(0.1)
-
-        self.__execute_move_task(_move_to_async())
-
-
-    def move_to_center(self) -> None:
-        # this should move drone to initial pos
-        async def _move_to_center_async():
-            await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, 0))
-            # self.drone_controller.goto_position(self.initial_pos.latitude_deg, self.initial_pos.longitude_deg, self.initial_pos.altitude_m, self.initial_yaw)
-            await asyncio.sleep(0.1)
-            logger.debug('!!! Executed move_to_center')
-
-        self.__execute_move_task(_move_to_center_async())
-
+    #     self.__execute_move_task(_move_to_async())
 
     # def move_forward(self, speed_ms : float = 1.0) -> None:
     #     print("move_forward")
@@ -332,13 +288,13 @@ class DroneMover():
     #     # await asyncio.sleep(0.1)
 
 
-    async def move_to_center_async(self) -> None:
-        # this should move drone to initial pos
+    # async def move_to_center_async(self) -> None:
+    #     # this should move drone to initial pos
 
-        await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, 0))
-        # self.drone_controller.goto_position(self.initial_pos.latitude_deg, self.initial_pos.longitude_deg, self.initial_pos.altitude_m, self.initial_yaw)
-        await asyncio.sleep(0.1)
-        logger.debug('!!! Executed move_to_center')
+    #     await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, 0))
+    #     # self.drone_controller.goto_position(self.initial_pos.latitude_deg, self.initial_pos.longitude_deg, self.initial_pos.altitude_m, self.initial_yaw)
+    #     await asyncio.sleep(0.1)
+    #     logger.debug('!!! Executed move_to_center')
 
 
     async def track_target(self, x : float, y : float, forward_speed_m_s : float = 0.0) -> None:
@@ -346,6 +302,10 @@ class DroneMover():
 
     async def standstill(self):
         await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
+
+
+    async def execute_move_command(self, move_command : MoveCommand) -> None:
+        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=move_command.move_speed_ms, right_m_s=0, down_m_s=0, yawspeed_deg_s=move_command.adjust_attitude.x))
 
     # async def move_to_target_async(self, yaw_m_s : float, pitch_degree : float, forward_speed_m_s : float = 0.0) -> None:
     #     print("move_forward_async")

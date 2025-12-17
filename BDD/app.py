@@ -1,44 +1,35 @@
 #!/usr/bin/env python
 
+from math import nan
 from pathlib import Path
 import asyncio
 
-from queue import Queue
+from queue import Queue, Empty
 from collections import deque
 from dataclasses import dataclass, field
-import time
 
-import datetime
 import os
 import numpy as np
-import hailo
+import json
+import datetime
 
+import hailo
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from app_base import GStreamerDetectionApp
 
 from mavsdk.telemetry import EulerAngle
 
-from helpers import Rect, XY, configure_logging, OverwriteQueue, Detection
-import logging
-
-logger = logging.getLogger(__name__)
-
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
-def full_classname(obj):
-    # based on https://gist.github.com/clbarnes/edd28ea32010eb159b34b075687bb49e#file-classname-py
-    cls = type(obj)
-    module = cls.__module__
-    name = cls.__qualname__
-    if module is not None and module != "__builtin__":
-        name = module + "." + name
-    return name
+from helpers import Rect, XY, configure_logging, OverwriteQueue, Detection, Detections, MoveCommand
+from debug_output import debug_output_thread
 
-def DEBUG_dump(prefix, obj):
-    print(prefix, obj, full_classname(obj), dir(obj))
+import logging
+logger = logging.getLogger(__name__)
+
 
 
 # -----------------------------------------------------------------------------------------------
@@ -46,21 +37,18 @@ def DEBUG_dump(prefix, obj):
 # -----------------------------------------------------------------------------------------------
 # Inheritance from the app_callback_class
 class user_app_callback_class(app_callback_class):
-    def __init__(self):
+    def __init__(self, detections_queue):
         super().__init__()
-        self.new_variable = 42  # New variable example
+        self.detections_queue = detections_queue
 
-    def new_function(self):  # New function example
-        return "The meaning of life is: "
 
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
 # -----------------------------------------------------------------------------------------------
 
-detections_queue = OverwriteQueue(maxsize=2)
 
 # This is the callback function that will be called when data is available from the pipeline
-def app_callback(pad, info, user_data):
+def app_callback(pad, info, user_data : user_app_callback_class):
     # Get the GstBuffer from the probe info
     buffer = info.get_buffer()
     # Check if the buffer is valid
@@ -76,9 +64,9 @@ def app_callback(pad, info, user_data):
 
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
     frame = None
-    if user_data.use_frame and format is not None and width is not None and height is not None:
-        # Get video frame
-        frame = get_numpy_from_buffer(buffer, format, width, height)
+    # if user_data.use_frame and format is not None and width is not None and height is not None:
+    #     # Get video frame
+    frame = get_numpy_from_buffer(buffer, format, width, height)
 
     # Get the detections from the buffer
     roi = hailo.get_roi_from_buffer(buffer)
@@ -115,8 +103,8 @@ def app_callback(pad, info, user_data):
             ))
 
             # DEBUG_dump("bbox: ", bbox)
-    if len(detections) != 0:
-        detections_queue.put(detections_list)
+    # if len(detections) != 0:
+    user_data.detections_queue.put(Detections(user_data.frame_count, frame, detections_list))
 
     # if user_data.use_frame:
     #     # Note: using imshow will not work here, as the callback function is not running in the main thread
@@ -150,7 +138,10 @@ def drone_controlling_tread(*args, **kwargs):
     finally:
         loop.close()
 
-async def drone_controlling_tread_async(drone_connection_string, drone_config):
+MIN_CONFIDENCE = 0.4
+MOVE_CONFIDENCE = 0.6
+
+async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None):
     from math import radians
 
     center = XY(0.5, 0.5)
@@ -162,73 +153,84 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config):
     drone = DroneMover(drone_connection_string, drone_config)
 
     logger.debug("starting up drone...")
-    await drone.startup_sequence(100)
+    await drone.startup_sequence(1)
     logger.debug("drone started")
 
     logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
 
     logger.debug("!!! getting telemetry")
-    telemetry = await drone.get_telemetry_dict(True)
-    logger.debug("GOT telemetry: %s", telemetry)
-
-    # Warm up the attitude cache so we always have a recent value without waiting
+    telemetry_dict = await drone.get_telemetry_dict(True)
     current_attitude : EulerAngle = await drone.get_cached_attitude()
+    logger.debug("GOT telemetry: %s and attitude: %s", telemetry_dict, current_attitude)
 
     while True:
         try:
-            detection = None
-            distance_to_center : float = 0.0
-            command = XY()
+            detections_obj = Detections(-1)
+            distance_to_center : float = float('NaN')
+            angle_to_target = XY()
+            forward_speed = 0
 
             logger.debug("!!! awaiting detection... ")
-            detections : list[Detection] = detections_queue.get()
-            if detections is STOP:
-                logger.info("stopping detection loop")
+            try:
+                detections_obj : Detections = detections_queue.get(timeout = 0.1)
+            except Empty:
+                # No detections, not even frame with ID and image
+                continue
+
+            if detections_obj is STOP:
+                logger.info("stopping detdetections_objection loop")
                 break
 
-            if len(detections) == 0:
-                # await drone.standstill()
-                continue
+            telemetry_dict = await drone.get_telemetry_dict()
 
-            cached_attitude = await drone.get_cached_attitude(wait_for_first=False)
-            if cached_attitude is not None:
-                current_attitude = cached_attitude
+            detections, frame = detections_obj.detections, detections_obj.frame
+            detection = None
+
+            # TODO just assign current_attitude ? not sure if cached_attitude can be None at this point, since we've already fetched a value previously
+            # cached_attitude = await drone.get_cached_attitude(wait_for_first=False)
+            # if cached_attitude is not None:
+            #     current_attitude = cached_attitude
+            current_attitude = await drone.get_cached_attitude(wait_for_first=False)
 
             detections.sort(reverse=True, key = lambda d : d.confidence)
-            detection = detections[0]
 
-            logger.debug("!!! Detection: %s, attitude: %s", detection, current_attitude)
-            logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
-            # TODO: if track id is None and confidence < 0.3 -- ignore target
-            if detection.confidence < 0.25:
-                logger.debug("!!! ignoring detection as false-positive")
-                continue
+            if len(detections) > 0:
+                best_detection = detections[0]
+                if best_detection.confidence >= MIN_CONFIDENCE:
+                    detection = best_detection
+                    logger.debug("!!! Detection: %s", detection)
 
-            distance_to_center = detection.bbox.center.distance_squared_to(center)
-            logger.debug("distance to center: %s", distance_to_center)
-            horizontal_distance = detection.bbox.center.x - center.x
+                    distance_to_center = detection.bbox.center.distance_squared_to(center)
+                    logger.debug("distance to center: %s", distance_to_center)
+                    horizontal_distance = detection.bbox.center.x - center.x
 
-            diff_xy = center - detection.bbox.center
-            logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
-            angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
-            logger.debug("target: %s", angle_to_target)
+                    diff_xy = center - detection.bbox.center
+                    logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
+                    angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
+                    logger.debug("target: %s", angle_to_target)
 
-            forward_speed = 0
-            if detection.confidence >= 0.5 and horizontal_distance < distance_r:
-                forward_speed = 3
-                logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
+                    forward_speed = 0
+                    if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
+                        forward_speed = 3
+                        logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
 
-                logger.debug("move %s", angle_to_target)
-                await drone.track_target(angle_to_target.x / 10, angle_to_target.y / 10, forward_speed)
-                logger.debug("move command done")
+                    logger.debug("move %s", angle_to_target)
+                    await drone.track_target(angle_to_target.x / 10, angle_to_target.y / 10, forward_speed)
+                    logger.debug("move command done")
 
-            elif distance_to_center >= distance_r / 2:
-                await drone.move_relative_async(angle_to_target.x, angle_to_target.y)
-
-            # logger.debug("Drone telemetry: %s", await drone.get_telemetry_async())
+            # -1 means that there was no frame and no detections
+            if output_queue is not None:
+                output = {
+                    'detections' : detections_obj,
+                    'selected' : detection,
+                    'move_command': MoveCommand(angle_to_target, forward_speed),
+                    'telemetry': telemetry_dict,
+                }
+                output_queue.put(output)
 
         except:
-            logging.exception(f"Got exception: %s %s COMMAND: %s", detection, distance_to_center, command, exc_info=True)
+            logging.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, command, exc_info=True)
+
 
 
 class App(GStreamerDetectionApp):
@@ -246,6 +248,8 @@ class App(GStreamerDetectionApp):
             ! splitmuxsink name=smx max-size-time={video_output_chunk_length_ns} muxer-factory=mp4mux async-finalize=true location="{self.video_output_directory}/RAW_{record_start_time_str}_%05d.mp4"
         '''
 
+
+
 def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -258,45 +262,55 @@ def main():
     logging.getLogger("picamera2").setLevel(logging.WARNING)
     logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
 
+    detections_queue = OverwriteQueue(maxsize=2)
+    output_queue = OverwriteQueue(maxsize=20)
+
     drone_config = {
         'cruise_altitude' : 10
     }
 
     drone_thread = threading.Thread(
         target = drone_controlling_tread,
-        args = ('udp://:14550', drone_config, ),
+        args = ('udp://:14550', drone_config, detections_queue, output_queue),
         name = "Drone"
     )
     drone_thread.start()
 
-    user_data = user_app_callback_class()
+    output_thread = threading.Thread(
+        target = debug_output_thread,
+        args = (output_queue,),
+        kwargs=dict(file_name='OUT_', destination_IP = "127.0.0.1", destination_port = 5004, display = True),
+    )
+    output_thread.start()
+
+    user_data = user_app_callback_class(detections_queue)
+    user_data.use_frame = True
     app = App(app_callback, user_data)
 
-    DEBUG = False
+    DEBUG = True
     if DEBUG:
-        for i in range(30):
-            if detections_queue.full():
-                time.sleep(0.01)
-                if detections_queue.full():
-                    continue
-
-            detections_queue.put([
-                Detection(
-                    bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                    confidence = 0.1,
-                    track_id = 1
-                ),
-                Detection(
-                    bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                    confidence = 0.9,
-                    track_id = 2
-                ),
-                Detection(
-                    bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                    confidence = 0.7,
-                    track_id = 3
-                ),
-            ]
+        for i in range(3):
+            detections_queue.put(
+                Detections(-1,
+                    frame = None,
+                    detections = [
+                        Detection(
+                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                            confidence = 0.1,
+                            track_id = 1
+                        ),
+                        Detection(
+                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                            confidence = 0.9,
+                            track_id = 2
+                        ),
+                        Detection(
+                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                            confidence = 0.7,
+                            track_id = 3
+                        ),
+                    ],
+                )
             )
 
     app.run()
