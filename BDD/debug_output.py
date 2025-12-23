@@ -1,15 +1,15 @@
 #! /usr/bin/env python
 
 import subprocess
-import numpy as np
 import datetime
 from queue import Queue
 import logging
 import json
-import re
+# import re
 import dataclasses
 
 import cv2
+import numpy as np
 
 from helpers import Detections, Detection, XY, MoveCommand, Rect
 
