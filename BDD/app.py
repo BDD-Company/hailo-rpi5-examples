@@ -7,6 +7,7 @@ import asyncio
 from queue import Queue, Empty
 from collections import deque
 from dataclasses import dataclass, field
+import math
 
 import os
 import numpy as np
@@ -138,8 +139,8 @@ def drone_controlling_tread(*args, **kwargs):
     finally:
         loop.close()
 
-MIN_CONFIDENCE = 0.4
-MOVE_CONFIDENCE = 0.6
+MIN_CONFIDENCE = 0.25
+MOVE_CONFIDENCE = 0.4
 
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None):
     from math import radians
@@ -153,7 +154,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     drone = DroneMover(drone_connection_string, drone_config)
 
     logger.debug("starting up drone...")
-    await drone.startup_sequence(1)
+    await drone.startup_sequence(100)
     logger.debug("drone started")
 
     logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
@@ -163,6 +164,20 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     current_attitude : EulerAngle = await drone.get_cached_attitude()
     logger.debug("GOT telemetry: %s and attitude: %s", telemetry_dict, current_attitude)
 
+    # start_time = now = datetime.datetime.now()
+    # # logger.debug("Moving forward 10m")
+    # await drone.move_xy(XY(100, 0), 0)
+    # await asyncio.sleep(1)
+    # await drone.move_xy(XY(10, 10), 45)
+    # await asyncio.sleep(1)
+    # await drone.move_xy(XY(-10, -10), -45)
+    # await asyncio.sleep(1)
+    # await drone.move_xy(XY(-20, 0), 180)
+    # await asyncio.sleep(2)
+    # await drone.move_xy(XY(50, 0), 0)
+
+    # return
+    moving = False
     while True:
         try:
             detections_obj = Detections(-1)
@@ -170,7 +185,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             angle_to_target = XY()
             forward_speed = 0
 
-            logger.debug("!!! awaiting detection... ")
+            # logger.debug("!!! awaiting detection... ")
             try:
                 detections_obj : Detections = detections_queue.get(timeout = 0.1)
             except Empty:
@@ -178,7 +193,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 continue
 
             if detections_obj is STOP:
-                logger.info("stopping detdetections_objection loop")
+                logger.info("stopping")
                 break
 
             telemetry_dict = await drone.get_telemetry_dict()
@@ -194,29 +209,58 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             detections.sort(reverse=True, key = lambda d : d.confidence)
 
-            if len(detections) > 0:
-                best_detection = detections[0]
-                if best_detection.confidence >= MIN_CONFIDENCE:
-                    detection = best_detection
-                    logger.debug("!!! Detection: %s", detection)
+            detection = detections[0] if len(detections) > 0 else Detection()
+            if detection.confidence >= MIN_CONFIDENCE:
+                logger.debug("!!! Detection: %s, current atitude: %s", detection, current_attitude)
 
-                    distance_to_center = detection.bbox.center.distance_squared_to(center)
-                    logger.debug("distance to center: %s", distance_to_center)
-                    horizontal_distance = detection.bbox.center.x - center.x
+                # distance_to_center = detection.bbox.center.distance_squared_to(center)
+                # logger.debug("distance to center: %s", distance_to_center)
+                # horizontal_distance = detection.bbox.center.x - center.x
 
-                    diff_xy = center - detection.bbox.center
-                    logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
-                    angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
-                    logger.debug("target: %s", angle_to_target)
+                # diff_xy = center - detection.bbox.center
+                # logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
+                # angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
+                # logger.debug("target: %s", angle_to_target)
 
-                    forward_speed = 0
-                    if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
-                        forward_speed = 3
-                        logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
+                # forward_speed = 0
+                # if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
+                #     forward_speed = 1
+                #     logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
 
-                    logger.debug("move %s", angle_to_target)
-                    await drone.track_target(angle_to_target.x / 10, angle_to_target.y / 10, forward_speed)
-                    logger.debug("move command done")
+                # DISTANCE = 10 * forward_speed
+                # absolute_angle = current_attitude.yaw_deg + angle_to_target.x
+                # dest_xy = XY(math.cos(angle_to_target.x) * DISTANCE, math.sin(angle_to_target.y) * DISTANCE)
+                # absolute_angle *= -1
+                # logger.debug("!!! move to %s, angle: %s, absolute: %s°, current attitude: %s", dest_xy, angle_to_target, absolute_angle, current_attitude)
+
+                # await drone.move_xy(XY(), yaw = absolute_angle)
+                # # await drone.track_target(angle_to_target.x / 10, angle_to_target.y / 10, forward_speed)
+                distance_to_center = detection.bbox.center.distance_squared_to(center)
+                logger.debug("distance to center: %s", distance_to_center)
+                horizontal_distance = detection.bbox.center.x - center.x
+
+                diff_xy = center - detection.bbox.center
+                logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
+                angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
+                logger.debug("target: %s", angle_to_target)
+
+                forward_speed = 0
+                if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
+                    forward_speed = 3
+                    logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
+
+                logger.debug("move %s, speed: %s ms", angle_to_target, forward_speed)
+                await drone.track_target(angle_to_target.x, angle_to_target.y, forward_speed)
+                logger.debug("move command done")
+                moving = True
+
+            else:
+                if moving:
+                    logger.debug("No viable detections, stoppig")
+
+                # await drone.move_xy(XY(),  current_attitude.yaw_deg)
+                await drone.standstill()
+                moving = False
 
             # -1 means that there was no frame and no detections
             if output_queue is not None:
@@ -280,6 +324,7 @@ def main():
         target = debug_output_thread,
         args = (output_queue,),
         kwargs=dict(file_name='OUT_', destination_IP = "127.0.0.1", destination_port = 5004, display = True),
+        name="DEBUG"
     )
     output_thread.start()
 

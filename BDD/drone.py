@@ -9,7 +9,7 @@ from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, Velo
 from mavsdk import System
 from mavsdk.telemetry import Telemetry, EulerAngle
 
-from helpers import MoveCommand, dotdict
+from helpers import MoveCommand, dotdict, XY
 
 import logging
 
@@ -166,7 +166,7 @@ class DroneMover():
         # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
         logging.debug("Taking off to %sm...", self.cruise_altitude)
         await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
-        await asyncio.sleep(10) #self.cruise_altitude / 2) # 2m/s climb rate approx
+        await asyncio.sleep(5) #self.cruise_altitude / 2) # 2m/s climb rate approx
 
         self.offboard = drone.offboard
         logging.debug("took off")
@@ -298,14 +298,22 @@ class DroneMover():
 
 
     async def track_target(self, x : float, y : float, forward_speed_m_s : float = 0.0) -> None:
-        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=forward_speed_m_s, right_m_s=0, down_m_s=0, yawspeed_deg_s=x))
+        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=forward_speed_m_s, right_m_s=0, down_m_s=y / 20, yawspeed_deg_s=x))
+        await asyncio.sleep(0.1)
 
-    async def standstill(self):
-        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
+
+    # async def standstill(self):
+    #     await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
 
 
     async def execute_move_command(self, move_command : MoveCommand) -> None:
         await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=move_command.move_speed_ms, right_m_s=0, down_m_s=0, yawspeed_deg_s=move_command.adjust_attitude.x))
+
+
+    async def move_xy(self, xy : XY, yaw = 0) -> None:
+        await self.drone.offboard.set_position_ned(PositionNedYaw(xy.x, xy.y, -1 * self.cruise_altitude, yaw))
+        # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=move_command.move_speed_ms, right_m_s=0, down_m_s=0, yawspeed_deg_s=move_command.adjust_attitude.x))
+
 
     # async def move_to_target_async(self, yaw_m_s : float, pitch_degree : float, forward_speed_m_s : float = 0.0) -> None:
     #     print("move_forward_async")
@@ -335,13 +343,9 @@ class DroneMover():
         logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
 
 
-    def __execute_move_task(self, task):
-        #TODO:
-        """ Maintain a move task queue, with only 1 active item,
-        so whenever a new item is added, queue is cleaned out.
-        Items are pulled from queue and executed one by one.
-        """
-        asyncio.run(task)
+    async def standstill(self) -> None:
+        print("move_relative_async")
+        await self.drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
 
 
 async def main():

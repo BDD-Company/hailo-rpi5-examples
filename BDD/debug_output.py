@@ -25,6 +25,7 @@ FRAME_METADATA_COLOR = (0, 255, 0)    # green
 FRAME_METADATA_COLOR_BG = (80, 80, 80) #(120, 120, 0)
 MOVE_COMMAND_COLOR = (0, 0, 255) # red
 
+
 def change_color(color, diff = (0, 0, 0), factor : float = 1):
     assert len(color) == len(diff)
 
@@ -212,66 +213,68 @@ def debug_output_thread(output_queue : Queue, file_name, destination_IP = "127.0
         frame : np.ndarray = output['detections'].frame
     frame_h, frame_w, _ = frame.shape
 
-    # ffmpeg_cmd = [
-    #     "ffmpeg",
-    #     "-y",
-    #     "-re",  # read input at native rate
-    #     "-fflags", "nobuffer",
-    #     "-f", "rawvideo",
-    #     "-pix_fmt", "bgr24",
-    #     "-s", f"{w}x{h}",
-    #     "-r", str(target_fps),
-    #     "-i", "pipe:0",
-    #     "-vcodec", "libx264",
-    #     "-preset", "fast",
-    #     "-crf", "18",
-    #     "-segment_time", "30"
-    #     "-reset_timestamps",
-    #     f"{file_name}_{record_start_time_str}_%03d.mp4"
-    # ]
     ffmpeg_cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
-        "-use_wallclock_as_timestamps",
+        "ffmpeg",
+        "-y",
+        "-re",  # read input at native rate
+        "-fflags", "nobuffer",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
-        "-video_size", f"{frame_w}x{frame_h}",
-        # "-fps_mode", "vfr",
-        "-i", "-",          # stdin OR?:  #     "-i", "pipe:0",
-        "-an",
-        "-filter_complex", "[0:v]split=2[v_rtp][v_seg]",
-
-        # RTP output
-        "-map", "[v_rtp]",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
-        # "-g", str(FPS),
-        # "-keyint_min", str(FPS),
-        "-f", "rtp",
-        "-payload_type", "96",
-        "-sdp_file", "stream.sdp",
-        f"rtp://{destination_IP}:{destination_port}?pkt_size=1200",
-
-        # 30s chunks
-        "-map", "[v_seg]",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        # "-g", str(FPS * 2),
-        # "-keyint_min", str(FPS * 2),
-        "-f", "segment",
-        "-segment_time", "30",
-        "-reset_timestamps", "1",
+        "-s", f"{frame_w}x{frame_h}",
+        # "-r", str(target_fps),
+        "-i", "pipe:0",
+        "-vcodec", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-segment_time", "30"
+        "-reset_timestamps",
         f"{file_name}_{record_start_time_str}_%03d.mp4"
     ]
 
+    # ffmpeg_cmd = [
+    #     "ffmpeg", "-hide_banner", "-loglevel", "warning",
+    #     "-use_wallclock_as_timestamps",
+    #     "-f", "rawvideo",
+    #     "-pix_fmt", "bgr24",
+    #     "-video_size", f"{frame_w}x{frame_h}",
+    #     # "-fps_mode", "vfr",
+    #     "-i", "pipe:0",
+    #     "-i", "-",          # stdin OR?:  #     "-i", "pipe:0",
+    #     "-an",
+    #     "-filter_complex", "[0:v]split=2[v_rtp][v_seg]",
+
+    #     # RTP output
+    #     "-map", "[v_rtp]",
+    #     "-c:v", "libx264",
+    #     "-preset", "ultrafast",
+    #     "-tune", "zerolatency",
+    #     # "-g", str(FPS),
+    #     # "-keyint_min", str(FPS),
+    #     "-f", "rtp",
+    #     "-payload_type", "96",
+    #     "-sdp_file", "stream.sdp",
+    #     f"rtp://{destination_IP}:{destination_port}?pkt_size=1200",
+
+    #     # 30s chunks
+    #     "-map", "[v_seg]",
+    #     "-c:v", "libx264",
+    #     "-preset", "veryfast",
+    #     # "-g", str(FPS * 2),
+    #     # "-keyint_min", str(FPS * 2),
+    #     "-f", "segment",
+    #     "-segment_time", "30",
+    #     "-reset_timestamps", "1",
+    #     f"{file_name}_{record_start_time_str}_%03d.mp4"
+    # ]
+
     proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-    process_output(output, proc, display)
+    process_output(output, proc.stdin, display)
 
     output = None
     while True:
         try:
             output = output_queue.get()
-            process_output(output, proc, display)
+            process_output(output, proc.stdin, display)
             # process_output(output, proc.stdin, display)
         except:
             frame_id = output or -1
