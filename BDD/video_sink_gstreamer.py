@@ -114,7 +114,7 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
         self._rtsp_appsrc = None
         self._address = "0.0.0.0"  # bind explicitly on IPv4 to avoid IPv6-only binds
 
-        self._pusher = _FrameQueuePusher(lambda: self._rtsp_appsrc, drop_if_error=True, overwriting_queue = False, queue_size = max(1, int(self.fps / 2)))
+        self._pusher = _FrameQueuePusher(lambda: self._rtsp_appsrc, drop_if_error=True, overwriting_queue = True, queue_size = max(1, int(self.fps / 2)))
 
     # public API
     def start(self, frame_size):
@@ -186,7 +186,7 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
         logger.debug("[RtspStreamerSink] media-configure: building pipeline for client")
         element = media.get_element()
         self._rtsp_appsrc = element.get_child_by_name("rtsp_src")
-        caps = Gst.Caps.from_string(f"video/x-raw,format=BGR,width={self.w},height={self.h},framerate={int(self.fps)}/1")
+        caps = Gst.Caps.from_string(f"video/x-raw,format=RGB,width={self.w},height={self.h},framerate=0/1")
         self._rtsp_appsrc.set_property("caps", caps)
         self._rtsp_appsrc.set_property("is-live", True)
         self._rtsp_appsrc.set_property("format", Gst.Format.TIME)
@@ -239,7 +239,7 @@ class RecorderSink(interfaces.FrameSinkInterface):
         pattern_path = str(self.out_dir / "clip-%05d.mp4")  # initial; we override via format-location
         launch = (
             f'appsrc name=rec_src is-live=true block=true format=time do-timestamp=true '
-            f'caps=video/x-raw,format=BGR,width={self.w},height={self.h} '
+            f'caps=video/x-raw,format=RGB,width={self.w},height={self.h} '
             f'! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast '
             f'bitrate={self.bitrate} key-int-max={self.keyint} '
             f'! h264parse config-interval=1 '
