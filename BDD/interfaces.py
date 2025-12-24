@@ -11,7 +11,7 @@ class FrameSinkInterface(ABC):
         pass
 
     @abstractmethod
-    def submit(self, frame: np.ndarray):
+    def process_frame(self, frame: np.ndarray):
         pass
 
     @abstractmethod

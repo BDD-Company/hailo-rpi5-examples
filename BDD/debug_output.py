@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 
 from helpers import Detections, Detection, XY, MoveCommand, Rect
+from interfaces import FrameSinkInterface
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ def draw_detection(frame, detection : Detection, color, line_thickness = 1):
     #     )
 
 
-def process_output(output, dest, display=False):
+def process_output(output) -> np.ndarray:
     # output = {
     #                 'detections' : detections_obj,
     #                 'selected' : selected_detection,
@@ -165,7 +166,7 @@ def process_output(output, dest, display=False):
     frame = detections.frame if detections else None
 
     if frame is None:
-        return
+        return None
 
     frame_size = XY(frame.shape[1], frame.shape[0])
     frame_center = frame_size / 2
@@ -196,93 +197,33 @@ def process_output(output, dest, display=False):
         2
     )
 
-    if dest:
-        dest.write(frame.tobytes())
-
-    if display:
-        cv2.imshow('debug display', frame)
-        cv2.waitKeyEx(10)
+    return frame
 
 
-def debug_output_thread(output_queue : Queue, file_name, destination_IP = "127.0.0.1", destination_port = 5004, display = False):
-    record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-
+def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
     frame = None
     while frame is None:
         output = output_queue.get()
         frame : np.ndarray = output['detections'].frame
     frame_h, frame_w, _ = frame.shape
 
-    ffmpeg_cmd = [
-        "ffmpeg",
-        "-y",
-        "-re",  # read input at native rate
-        "-fflags", "nobuffer",
-        "-f", "rawvideo",
-        "-pix_fmt", "bgr24",
-        "-s", f"{frame_w}x{frame_h}",
-        # "-r", str(target_fps),
-        "-i", "pipe:0",
-        "-vcodec", "libx264",
-        "-preset", "fast",
-        "-crf", "18",
-        "-segment_time", "30"
-        "-reset_timestamps",
-        f"{file_name}_{record_start_time_str}_%03d.mp4"
-    ]
+    sink.start()
+    try:
+        output = None
+        while True:
+            try:
+                output = output_queue.get()
+                annotated_frame = process_output(output)
 
-    # ffmpeg_cmd = [
-    #     "ffmpeg", "-hide_banner", "-loglevel", "warning",
-    #     "-use_wallclock_as_timestamps",
-    #     "-f", "rawvideo",
-    #     "-pix_fmt", "bgr24",
-    #     "-video_size", f"{frame_w}x{frame_h}",
-    #     # "-fps_mode", "vfr",
-    #     "-i", "pipe:0",
-    #     "-i", "-",          # stdin OR?:  #     "-i", "pipe:0",
-    #     "-an",
-    #     "-filter_complex", "[0:v]split=2[v_rtp][v_seg]",
+                if annotated_frame is not None:
+                    sink.submit(annotated_frame)
 
-    #     # RTP output
-    #     "-map", "[v_rtp]",
-    #     "-c:v", "libx264",
-    #     "-preset", "ultrafast",
-    #     "-tune", "zerolatency",
-    #     # "-g", str(FPS),
-    #     # "-keyint_min", str(FPS),
-    #     "-f", "rtp",
-    #     "-payload_type", "96",
-    #     "-sdp_file", "stream.sdp",
-    #     f"rtp://{destination_IP}:{destination_port}?pkt_size=1200",
-
-    #     # 30s chunks
-    #     "-map", "[v_seg]",
-    #     "-c:v", "libx264",
-    #     "-preset", "veryfast",
-    #     # "-g", str(FPS * 2),
-    #     # "-keyint_min", str(FPS * 2),
-    #     "-f", "segment",
-    #     "-segment_time", "30",
-    #     "-reset_timestamps", "1",
-    #     f"{file_name}_{record_start_time_str}_%03d.mp4"
-    # ]
-
-    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-    process_output(output, proc.stdin, display)
-
-    output = None
-    while True:
-        try:
-            output = output_queue.get()
-            process_output(output, proc.stdin, display)
-            # process_output(output, proc.stdin, display)
-        except:
-            frame_id = output or -1
-            logger.exception("exception while processing frame %d", frame_id, exc_info=True, stack_info=True)
-            break
-
-    proc.stdin.close()
-    proc.wait()
+            except:
+                frame_id = output or -1
+                logger.exception("exception while processing frame %d", frame_id, exc_info=True, stack_info=True)
+                break
+    finally:
+        sink.stop()
 
 
 if __name__ == '__main__':
@@ -319,4 +260,14 @@ if __name__ == '__main__':
         })
     output_queue.put(None) # Just to terminate by exception
 
-    debug_output_thread(output_queue=output_queue, file_name='test', display = True)
+    from video_sink_gstreamer import RtspStreamerSink, RecorderSink
+    from video_sink_multi import MultiSink
+    from opencv_show_image_sink import OpenCVShowImageSink
+
+    sink = MultiSink([
+        RtspStreamerSink((800, 600), 30, 8554),
+        RecorderSink((800, 600), 30, "./test_recordings"),
+        OpenCVShowImageSink(window_title='DEBUG IMAGE')
+    ])
+
+    debug_output_thread(frame_queue=output_queue, sink=sink)
