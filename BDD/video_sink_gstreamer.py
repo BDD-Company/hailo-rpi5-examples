@@ -66,7 +66,7 @@ class _FrameQueuePusher:
                     if ret != Gst.FlowReturn.OK and not self._drop_if_error:
                         # simple yield
                         time.sleep(0.001)
-                    logger.debug("!!! emitted frame for : %s", appsrc.name)
+                    # logger.debug("!!! emitted frame for : %s", appsrc.name)
                 except Exception:
                     logger.exception("Got exception for src: %s", appsrc.name)
                     # swallow errors to keep realtime flow
