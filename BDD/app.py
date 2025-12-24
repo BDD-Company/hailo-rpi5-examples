@@ -326,7 +326,7 @@ def main():
 
     sink = MultiSink([
         RtspStreamerSink(30, 8554),
-        RecorderSink(10, "recordings"),
+        RecorderSink(30, "recordings", segment_seconds=10),
         # OpenCVShowImageSink(window_title='DEBUG IMAGE')
     ])
 
