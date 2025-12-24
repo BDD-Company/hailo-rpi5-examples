@@ -158,6 +158,9 @@ def process_output(output) -> np.ndarray:
     #                 'move_command': command,
     #                 'telemetry': await drone.get_telemetry_async(),
     #             }
+    if output is None:
+        return None
+
     detections = output.get('detections', Detections(-1))
     selected : Detection|None = output.get('selected', None)
     move_command : MoveCommand | None = output.get('move_command', None)
@@ -201,22 +204,25 @@ def process_output(output) -> np.ndarray:
 
 
 def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
+
+    # Get the first frame and figure out image dimensions
     frame = None
     while frame is None:
-        output = output_queue.get()
+        output = frame_queue.get()
         frame : np.ndarray = output['detections'].frame
     frame_h, frame_w, _ = frame.shape
+    logger.debug("Got first frame of size W:%u, H:%u", frame_w, frame_h)
 
-    sink.start()
+    sink.start((frame_w, frame_h))
     try:
         output = None
         while True:
             try:
-                output = output_queue.get()
+                output = frame_queue.get()
                 annotated_frame = process_output(output)
 
                 if annotated_frame is not None:
-                    sink.submit(annotated_frame)
+                    sink.process_frame(annotated_frame)
 
             except:
                 frame_id = output or -1
@@ -227,47 +233,62 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
 
 
 if __name__ == '__main__':
-
-    frame = cv2.imread('/home/bdd/hailo-rpi5-examples/SAMPLE_800x600.jpg') # np.zeros(shape=[800, 600, 3], dtype=np.uint8)
-    detections = [
-        Detection(
-            bbox = Rect.from_xyxy(0.1, 0.15, 0.2, 0.25),
-            confidence = 0.1,
-            track_id = 1
-        ),
-        Detection(
-            bbox = Rect.from_xyxy(0.2, 0.25, 0.3, 0.35),
-            confidence = 0.9,
-            track_id = 2
-        ),
-        Detection(
-            bbox = Rect.from_xyxy(0.4, 0.45, 0.5, 0.55),
-            confidence = 0.7,
-            track_id = 3
-        ),
-    ]
-    detections_template = Detections(0, frame=None, detections=detections)
-    telemetry = json.loads('{"odometry": {"angular_velocity_body": {"pitch_rad_s": -0.0010726579930633307, "roll_rad_s": 0.0010208315216004848, "yaw_rad_s": 0.0006282856920734048}, "child_frame_id": "1 (BODY_NED)", "frame_id": "1 (BODY_NED)", "pose_covariance": {"covariance_matrix": [0.00013371351815294474, NaN, NaN, NaN, NaN, NaN, 0.00013370705710258335, NaN, NaN, NaN, NaN, 0.07561597973108292, NaN, NaN, NaN, 1.736115154926665e-05, NaN, NaN, 1.3997990208736155e-05, NaN, 0.0010160470847040415]}, "position_body": {"x_m": 0.0010958998464047909, "y_m": -0.00166346225887537, "z_m": -1.66695237159729}, "q": {"timestamp_us": 0, "w": 0.7084895968437195, "x": 0.02082471176981926, "y": 0.019742604345083237, "z": -0.7051376104354858}, "time_usec": 1102239786672, "velocity_body": {"x_m_s": 0.0006445666076615453, "y_m_s": 0.001224401406943798, "z_m_s": 0.005852778907865286}, "velocity_covariance": {"covariance_matrix": [0.0014366698451340199, NaN, NaN, NaN, NaN, NaN, 0.0014359699562191963, NaN, NaN, NaN, NaN, 0.004651403985917568, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]}}, "scaled_pressure": {"absolute_pressure_hpa": 1008.449951171875, "differential_pressure_hpa": 0.0, "differential_pressure_temperature_deg": 0.0, "temperature_deg": 36.290000915527344, "timestamp_us": 1102240195000}, "attitude_euler": {"pitch_deg": 3.287358045578003, "roll_deg": 0.0956246480345726, "timestamp_us": 1102239771000, "yaw_deg": -89.72563171386719}, "flight_mode": "7 (OFFBOARD)"}')
-
-    output_queue = Queue()
-    for i in range(0, 500):
-        d = dataclasses.replace(detections_template, frame_id = i, frame=frame.copy())
-        output_queue.put({
-            'detections': d,
-            'selected' : d.detections[0],
-            'move_command': MoveCommand(adjust_attitude=XY((i - 5)* 20, (i - 5)* 20), move_speed_ms=10),
-            'telemetry' : telemetry
-        })
-    output_queue.put(None) # Just to terminate by exception
+    import threading
+    import time
+    import math
 
     from video_sink_gstreamer import RtspStreamerSink, RecorderSink
     from video_sink_multi import MultiSink
     from opencv_show_image_sink import OpenCVShowImageSink
 
+    output_queue = Queue()
+
+    def producer_thread_func(n_frames = 1000, delay_between_frames_ms=100):
+        frame = cv2.imread('/home/bdd/hailo-rpi5-examples/SAMPLE_800x600.jpg') # np.zeros(shape=[800, 600, 3], dtype=np.uint8)
+        detections = [
+            Detection(
+                bbox = Rect.from_xyxy(0.1, 0.15, 0.2, 0.25),
+                confidence = 0.1,
+                track_id = 1
+            ),
+            Detection(
+                bbox = Rect.from_xyxy(0.2, 0.25, 0.3, 0.35),
+                confidence = 0.9,
+                track_id = 2
+            ),
+            Detection(
+                bbox = Rect.from_xyxy(0.4, 0.45, 0.5, 0.55),
+                confidence = 0.7,
+                track_id = 3
+            ),
+        ]
+        detections_template = Detections(0, frame=None, detections=detections)
+        telemetry = json.loads('{"odometry": {"angular_velocity_body": {"pitch_rad_s": -0.0010726579930633307, "roll_rad_s": 0.0010208315216004848, "yaw_rad_s": 0.0006282856920734048}, "child_frame_id": "1 (BODY_NED)", "frame_id": "1 (BODY_NED)", "pose_covariance": {"covariance_matrix": [0.00013371351815294474, NaN, NaN, NaN, NaN, NaN, 0.00013370705710258335, NaN, NaN, NaN, NaN, 0.07561597973108292, NaN, NaN, NaN, 1.736115154926665e-05, NaN, NaN, 1.3997990208736155e-05, NaN, 0.0010160470847040415]}, "position_body": {"x_m": 0.0010958998464047909, "y_m": -0.00166346225887537, "z_m": -1.66695237159729}, "q": {"timestamp_us": 0, "w": 0.7084895968437195, "x": 0.02082471176981926, "y": 0.019742604345083237, "z": -0.7051376104354858}, "time_usec": 1102239786672, "velocity_body": {"x_m_s": 0.0006445666076615453, "y_m_s": 0.001224401406943798, "z_m_s": 0.005852778907865286}, "velocity_covariance": {"covariance_matrix": [0.0014366698451340199, NaN, NaN, NaN, NaN, NaN, 0.0014359699562191963, NaN, NaN, NaN, NaN, 0.004651403985917568, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]}}, "scaled_pressure": {"absolute_pressure_hpa": 1008.449951171875, "differential_pressure_hpa": 0.0, "differential_pressure_temperature_deg": 0.0, "temperature_deg": 36.290000915527344, "timestamp_us": 1102240195000}, "attitude_euler": {"pitch_deg": 3.287358045578003, "roll_deg": 0.0956246480345726, "timestamp_us": 1102239771000, "yaw_deg": -89.72563171386719}, "flight_mode": "7 (OFFBOARD)"}')
+
+
+        for i in range(0, n_frames):
+            d = dataclasses.replace(detections_template, frame_id = i, frame=frame.copy())
+            q = i / 10
+            output_queue.put({
+                'detections': d,
+                'selected' : d.detections[0],
+                'move_command': MoveCommand(adjust_attitude=XY(math.cos(q) * 20, math.sin(q)* 20), move_speed_ms=10),
+                'telemetry' : telemetry
+            })
+            time.sleep(delay_between_frames_ms / 1000)
+        output_queue.put(None) # Just to terminate by exception
+
+    producer_thread = threading.Thread(
+        target=producer_thread_func,
+        name="Producer",
+        args=(1000000, 100)
+    )
+    producer_thread.start()
+
     sink = MultiSink([
-        RtspStreamerSink((800, 600), 30, 8554),
-        RecorderSink((800, 600), 30, "./test_recordings"),
-        OpenCVShowImageSink(window_title='DEBUG IMAGE')
+        RtspStreamerSink(30, 8554),
+        RecorderSink(10, "/home/bdd/hailo-rpi5-examples/test_recordings"),
+        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
     ])
 
     debug_output_thread(frame_queue=output_queue, sink=sink)

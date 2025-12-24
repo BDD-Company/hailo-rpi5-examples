@@ -27,6 +27,10 @@ from gi.repository import Gst, GLib
 
 from helpers import Rect, XY, configure_logging, OverwriteQueue, Detection, Detections, MoveCommand
 from debug_output import debug_output_thread
+from video_sink_gstreamer import RtspStreamerSink, RecorderSink
+from video_sink_multi import MultiSink
+# from opencv_show_image_sink import OpenCVShowImageSink
+
 
 import logging
 logger = logging.getLogger(__name__)
@@ -320,10 +324,15 @@ def main():
     )
     drone_thread.start()
 
+    sink = MultiSink([
+        RtspStreamerSink(30, 8554),
+        RecorderSink(10, "recordings"),
+        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
+    ])
+
     output_thread = threading.Thread(
         target = debug_output_thread,
-        args = (output_queue,),
-        kwargs=dict(file_name='OUT_', destination_IP = "127.0.0.1", destination_port = 5004, display = True),
+        args = (output_queue,sink),
         name="DEBUG"
     )
     output_thread.start()

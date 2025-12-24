@@ -52,7 +52,7 @@ class _FrameQueuePusher:
     def _run(self):
         while not self._stop.is_set():
             try:
-                frame = self._q.get(timeout=0.2)
+                frame = self._q.get(timeout=0.01)
             except queue.Empty:
                 continue
             appsrc = self._get_appsrc()
@@ -66,9 +66,13 @@ class _FrameQueuePusher:
                     if ret != Gst.FlowReturn.OK and not self._drop_if_error:
                         # simple yield
                         time.sleep(0.001)
+                    logger.debug("!!! emitted frame for : %s", appsrc.name)
                 except Exception:
+                    logger.exception("Got exception for src: %s", appsrc.name)
                     # swallow errors to keep realtime flow
                     pass
+            else:
+                logger.warning("appsrc is None")
             self._q.task_done()
 
 
@@ -77,7 +81,7 @@ def _validate_frame(frame: np.ndarray, expect_w: int, expect_h: int):
         raise ValueError("frame must be BGR uint8 HxWx3 numpy array")
     h, w = frame.shape[:2]
     if w != expect_w or h != expect_h:
-        raise ValueError(f"unexpected frame size {w}x{h}, expected {expect_w}x{expect_h}")
+        raise ValueError(f"unexpected frame size: got {w}x{h}, expected {expect_w}x{expect_h}")
 
 
 # --------------------------- Class 1: RTSP -----------------------------------
@@ -90,19 +94,19 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
     Interface: start(), submit(frame), stop()
     """
     def __init__(self,
-                 frame_size,              # (width, height)
                  fps_hint: float = 30.0,
                  port: int = 8554,
                  path: str = "/stream",
                  bitrate_kbps: int = 4000,
                  keyint_seconds: int = 2):
-        self.w, self.h = map(int, frame_size)
+        self.w, self.h = map(int, (0, 0))
         self.fps = float(fps_hint) if fps_hint and fps_hint > 0 else 30.0
         self.port = int(port)
         self.path = path if path.startswith("/") else "/" + path
         self.bitrate = int(bitrate_kbps)
         self.keyint = max(1, int(self.fps * keyint_seconds))
 
+        self._mainctx = None
         self._mainloop = None
         self._mainloop_thr = None
         self._server = None
@@ -110,12 +114,14 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
         self._rtsp_appsrc = None
         self._address = "0.0.0.0"  # bind explicitly on IPv4 to avoid IPv6-only binds
 
-        self._pusher = _FrameQueuePusher(lambda: self._rtsp_appsrc, drop_if_error=True, overwriting_queue = True, queue_size = max(1, int(self.fps / 2)))
+        self._pusher = _FrameQueuePusher(lambda: self._rtsp_appsrc, drop_if_error=True, overwriting_queue = False, queue_size = max(1, int(self.fps / 2)))
 
     # public API
-    def start(self):
+    def start(self, frame_size):
+        self.w, self.h = map(int, frame_size)
         # GLib loop
-        self._mainloop = GLib.MainLoop()
+        self._mainctx = GLib.MainContext.new()
+        self._mainloop = GLib.MainLoop(context=self._mainctx)
         self._mainloop_thr = threading.Thread(target=self._mainloop.run, daemon=True)
 
         # RTSP server
@@ -126,7 +132,8 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
             self._server.set_address(self._address)
         except Exception:
             pass  # API exists on all recent builds; ignore if older
-        self._server.attach(None)  # attach to default main-context
+        # attach to the same context the mainloop will run in
+        self._server.attach(self._mainctx)
 
         mounts = self._server.get_mount_points()
         self._factory = GstRtspServer.RTSPMediaFactory.new()
@@ -134,11 +141,11 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
 
         launch = (
             f'appsrc name=rtsp_src is-live=true block=false format=time do-timestamp=true '
-            f'caps=video/x-raw,format=BGR,width={self.w},height={self.h} '
+            f'caps=video/x-raw,format=BGR,width={self.w},height={self.h},framerate={int(self.fps)}/1 '
             f'! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast '
             f'bitrate={self.bitrate} key-int-max={self.keyint} '
             f'! h264parse config-interval=1 '
-            f'! rtph264pay config-interval=1 name=pay0 pt=96'
+            f'! rtph264pay config-interval=1 name=pay0 pt=96 '
         )
         # IMPORTANT: add spaces inside the parentheses so the parser
         # doesn't “stick” the ) to the previous token.
@@ -147,16 +154,20 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
 
         mounts.add_factory(self.path, self._factory)
 
-        self._mainloop_thr.start()
         self._pusher.start()
+        self._mainloop_thr.start()
 
-        logger.info(f"[RtspStreamerSink] RTSP at rtsp://0.0.0.0:{self.port}{self.path}")
+        logger.debug(f"[RtspStreamerSink] RTSP at rtsp://0.0.0.0:{self.port}{self.path}")
 
     def process_frame(self, frame):
+        if not hasattr(self, "frame_id"):
+            self.frame_id = 0
+
         _validate_frame(frame, self.w, self.h)
         self._pusher.submit(frame)
 
-        # logger.debug("[RtspStreamerSink] %s%s\tpushed frame %s", self.port, self.path, frame.id)
+        # logger.debug("[RtspStreamerSink] %s%s\tpushed frame %s", self.port, self.path, self.frame_id)
+        self.frame_id += 1
 
 
     def stop(self):
@@ -172,14 +183,17 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
 
     # internals
     def _on_media_configure(self, factory, media):
+        logger.debug("[RtspStreamerSink] media-configure: building pipeline for client")
         element = media.get_element()
         self._rtsp_appsrc = element.get_child_by_name("rtsp_src")
-        caps = Gst.Caps.from_string(f"video/x-raw,format=BGR,width={self.w},height={self.h}")
+        caps = Gst.Caps.from_string(f"video/x-raw,format=BGR,width={self.w},height={self.h},framerate={int(self.fps)}/1")
         self._rtsp_appsrc.set_property("caps", caps)
         self._rtsp_appsrc.set_property("is-live", True)
         self._rtsp_appsrc.set_property("format", Gst.Format.TIME)
         self._rtsp_appsrc.set_property("block", False)
         self._rtsp_appsrc.set_property("do-timestamp", True)
+
+        logging.debug("Got media_configure for %s", self._rtsp_appsrc.name)
 
 
 # ------------------------ Class 2: Segment Recorder --------------------------
@@ -192,7 +206,6 @@ class RecorderSink(interfaces.FrameSinkInterface):
     Interface: start(), submit(frame), stop()
     """
     def __init__(self,
-                 frame_size,               # (width, height)
                  fps_hint: float = 30.0,
                  out_dir: str = "./recordings",
                  segment_seconds: int = 30,
@@ -200,7 +213,7 @@ class RecorderSink(interfaces.FrameSinkInterface):
                  keyint_seconds: int = 2,
                  filename_base : str = 'record',
                  filename_pattern: str = "%%s-%Y%m%d-%H%M%S-%%05d.mp4"):
-        self.w, self.h = map(int, frame_size)
+        self.w, self.h = map(int, (0, 0))
         self.fps = float(fps_hint) if fps_hint and fps_hint > 0 else 30.0
         self.out_dir = pathlib.Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -219,7 +232,8 @@ class RecorderSink(interfaces.FrameSinkInterface):
         self._pusher = _FrameQueuePusher(lambda: self._appsrc, drop_if_error=False, queue_size = max(1, int(self.fps * 2)))
 
     # public API
-    def start(self):
+    def start(self, frame_size):
+        self.w, self.h = map(int, frame_size)
         # Build pipeline
         # NOTE: appsrc block=true to naturally backpressure if disk/encoder is slow
         pattern_path = str(self.out_dir / "clip-%05d.mp4")  # initial; we override via format-location
@@ -266,16 +280,27 @@ class RecorderSink(interfaces.FrameSinkInterface):
 
 # ----------------------------- Example usage ---------------------------------
 if __name__ == "__main__":
+    from video_sink_multi import MultiSink
+    from helpers import configure_logging
+
+    configure_logging(level = logging.DEBUG)
+
     w, h = 640, 480
-    rtsp = RtspStreamerSink((w, h), fps_hint=30, port=8554, path="/stream", bitrate_kbps=3000)
-    rec  = RecorderSink((w, h), fps_hint=30, out_dir="./recordings", segment_seconds=30, bitrate_kbps=3000)
 
+    rtsp = RtspStreamerSink(fps_hint=30, port=8554, path="/stream", bitrate_kbps=3000)
+    rec  = RecorderSink(fps_hint=30, out_dir="./recordings", segment_seconds=30, bitrate_kbps=3000)
+    sink = MultiSink([
+        rtsp,
+        rec
+        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
+    ])
 
-    rtsp.start()
-    rec.start()
+    # rtsp.start((w, h))
+    # # rec.start((w, h))
+    sink.start((w, h))
 
     print("Watch with:")
-    print("  VLC: rtsp://127.0.0.1:8554/stream")
+    print("  vlc rtsp://127.0.0.1:8554/stream")
     print("Stop: Ctrl+C")
 
     try:
@@ -291,16 +316,17 @@ if __name__ == "__main__":
             # feed both (in your app, just call .submit on the subset you use)
 
             frame = img
-            rtsp.process_frame(frame)
-            rec.process_frame(frame)
+            sink.process_frame(frame)
+            # rtsp.process_frame(frame)
+            # rec.process_frame(frame)
 
-            time.sleep(1/30)
+            time.sleep(0.03)
             frame_id += 1
 
     except KeyboardInterrupt:
         pass
     finally:
         # shutdown order: stop sources first, then pipelines/loop
-        rec.stop()
-        rtsp.stop()
-
+        # rec.stop()
+        # rtsp.stop()
+        sink.stop()
