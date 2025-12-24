@@ -403,7 +403,7 @@ class Detections:
     detections : list[Detection] = field(default_factory=list)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class MoveCommand:
     # X - yaw
     adjust_attitude : XY = field(default_factory=XY)

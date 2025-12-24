@@ -177,7 +177,7 @@ def process_output(output) -> np.ndarray:
     if telemetry is not None:
         telemetry_text = telemetry_as_text(telemetry)
         for line_no, line in enumerate(telemetry_text.splitlines()):
-            font_scale = 0.3
+            font_scale = 0.4
             draw_text(frame, line, XY(0, 20 + 40 * line_no * font_scale), font_scale=font_scale, color=FRAME_METADATA_COLOR, bg_color=FRAME_METADATA_COLOR_BG, line_width=1)
 
     for detection in detections.detections:

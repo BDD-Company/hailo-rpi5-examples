@@ -141,7 +141,7 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
 
         launch = (
             f'appsrc name=rtsp_src is-live=true block=false format=time do-timestamp=true '
-            f'caps=video/x-raw,format=I420,width={self.w},height={self.h},framerate=0/1 '
+            f'caps=video/x-raw,format=RGB,width={self.w},height={self.h},framerate=0/1 '
             f'! queue max-size-buffers=10 leaky=downstream '
             f'! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast '
             f'bitrate={self.bitrate} key-int-max={self.keyint} '

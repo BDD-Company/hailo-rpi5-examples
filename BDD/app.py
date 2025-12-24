@@ -188,6 +188,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             distance_to_center : float = float('NaN')
             angle_to_target = XY()
             forward_speed = 0
+            move_command = MoveCommand()
 
             # logger.debug("!!! awaiting detection... ")
             try:
@@ -250,12 +251,17 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 forward_speed = 0
                 if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
-                    forward_speed = 3
+                    forward_speed = 30
                     logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
 
+                move_command = MoveCommand(
+                    angle_to_target,
+                    forward_speed
+                )
+
                 logger.debug("move %s, speed: %s ms", angle_to_target, forward_speed)
-                await drone.track_target(angle_to_target.x, angle_to_target.y, forward_speed)
-                logger.debug("move command done")
+                await drone.execute_move_command(move_command)
+                logger.debug("move command sent %s", move_command)
                 moving = True
 
             else:
@@ -271,13 +277,13 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 output = {
                     'detections' : detections_obj,
                     'selected' : detection,
-                    'move_command': MoveCommand(angle_to_target, forward_speed),
+                    'move_command': move_command,
                     'telemetry': telemetry_dict,
                 }
                 output_queue.put(output)
 
         except:
-            logging.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, command, exc_info=True)
+            logging.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, move_command, exc_info=True)
 
 
 

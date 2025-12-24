@@ -67,10 +67,10 @@ class DroneMover():
         # Telemetry aspects to keep cached; edit this list to add/remove streams.
         self.telemetry_aspects = [
             "attitude_euler",
-            "battery",
+            # "battery",
             "health",
             "odometry",
-            "attitude_angular_velocity_body",
+            # "attitude_angular_velocity_body",
         ]
         self._telemetry_tasks : dict[str, asyncio.Task] = {}
         self._telemetry_ready : dict[str, asyncio.Event] = {}
