@@ -522,14 +522,22 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
                 f"framerate={target_fps}/1, pixel-aspect-ratio=1/1"
             )
         )
+
+        sensor_timestamp_caps = Gst.Caps.from_string("timestamp/x-picamera2-sensor")
+        unix_timestamp_caps = Gst.Caps.from_string("timestamp/x-unix")
+        frame_id_caps = Gst.Caps.from_string("frame-id/x-picamera2")
+
         picam2.start()
         frame_count = 0
-        start_time = time.time()
+
+        # used to convert from absolute frame time of Picamera2 to relative of Gstreamer (starting from 0)
+        first_frame_timestamp_ns = 0
+        prev_frame_timestamp_ns = 0
         logger.debug("picamera_process started")
         while True:
             # TODO(vnemkov): only set if camera actually supports those:
             # Must set AF params AFTER picam2.start() above, otherwise it doesn't work
-#            picam2.set_controls({
+#            apply_controls({
 #                "AfMode": picamera_controls.AfModeEnum.Manual,
 #                "AfRange": controls.AfRangeEnum.Full,
 #                "LensPosition": 6,
@@ -540,20 +548,51 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
                 if picamera_controls:
                     apply_controls(picamera_controls)
 
+            request = picam2.capture_request()
+
+            frame_data = None
+            frame_meta = None
+            frame_timestamp_ns = 0
+            try:
+                frame_data = request.make_array("lores")
+                frame_meta = request.get_metadata()
+            finally:
+                request.release()
+
             frame_data = picam2.capture_array('lores')
             # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
             if frame_data is None:
                 logger.error("Failed to capture frame #%s.", frame_count)
                 break
+
             # Convert framontigue data if necessary
             frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
             frame = np.asarray(frame)
+
             # Create Gst.Buffer by wrapping the frame data
             buffer = Gst.Buffer.new_wrapped(frame.tobytes())
+
             # Set buffer PTS and duration
-            buffer_duration = Gst.util_uint64_scale_int(1, Gst.SECOND, target_fps)
-            buffer.pts = frame_count * buffer_duration
-            buffer.duration = buffer_duration
+            # buffer_duration = Gst.util_uint64_scale_int(1, Gst.SECOND, target_fps)
+
+            if frame_meta is not None:
+                sensor_timestamp_ns = frame_meta.get("SensorTimestamp", None)
+                if sensor_timestamp_ns is not None:
+                    if first_frame_timestamp_ns == 0:
+                        first_frame_timestamp_ns = sensor_timestamp_ns
+                    frame_timestamp_ns = sensor_timestamp_ns - first_frame_timestamp_ns
+                    logging.debug("frame #%d\ttimestamp from sensor: %s, frame timestamp: %s", frame_count, sensor_timestamp_ns, frame_timestamp_ns)
+
+                buffer.pts = frame_timestamp_ns
+                buffer.dts = frame_timestamp_ns
+                buffer.duration = Gst.CLOCK_TIME_NONE ## ?
+
+                buffer.add_reference_timestamp_meta(sensor_timestamp_caps, sensor_timestamp_ns, Gst.CLOCK_TIME_NONE)
+                buffer.add_reference_timestamp_meta(unix_timestamp_caps, time.monotonic_ns(), Gst.CLOCK_TIME_NONE)
+                buffer.add_reference_timestamp_meta(frame_id_caps, frame_count, Gst.CLOCK_TIME_NONE)
+
+                buffer.offset = frame_count
+
             # Push the buffer to appsrc
             ret = appsrc.emit('push-buffer', buffer)
             if ret == Gst.FlowReturn.FLUSHING:

@@ -397,10 +397,16 @@ class Detection:
     track_id : int|None = 0
 
 @dataclass(slots=True, frozen=True)
+class FrameMetadata:
+    capture_timestamp_ns : int|None = None
+    detection_timestamp_ns : int = 0
+
+@dataclass(slots=True, frozen=True)
 class Detections:
     frame_id : int
     frame : np.ndarray | None = None
     detections : list[Detection] = field(default_factory=list)
+    meta : FrameMetadata = field(default_factory=FrameMetadata)
 
 
 @dataclass(slots=True)

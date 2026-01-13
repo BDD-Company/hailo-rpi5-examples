@@ -13,6 +13,7 @@ import os
 import numpy as np
 import json
 import datetime
+import time
 
 import hailo
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
@@ -36,7 +37,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
 # -----------------------------------------------------------------------------------------------
@@ -51,9 +51,12 @@ class user_app_callback_class(app_callback_class):
 # User-defined callback function
 # -----------------------------------------------------------------------------------------------
 
+sensor_timestamp_caps = Gst.Caps.from_string("timestamp/x-picamera2-sensor")
+unix_timestamp_caps = Gst.Caps.from_string("timestamp/x-unix")
+frame_id_caps = Gst.Caps.from_string("frame-id/x-picamera2")
 
 # This is the callback function that will be called when data is available from the pipeline
-def app_callback(pad, info, user_data : user_app_callback_class):
+def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_callback_class):
     # Get the GstBuffer from the probe info
     buffer = info.get_buffer()
     # Check if the buffer is valid
@@ -67,6 +70,13 @@ def app_callback(pad, info, user_data : user_app_callback_class):
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
 
+    # sensor_timestamp_ns = None
+    sensor_timestamp_ns  = buffer.get_reference_timestamp_meta(sensor_timestamp_caps)
+    unix_timestamp_ns  = buffer.get_reference_timestamp_meta(unix_timestamp_caps)
+    frame_id = buffer.get_reference_timestamp_meta(frame_id_caps)
+    if frame_id is not None:
+        frame_id = frame_id.timestamp
+
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
     frame = None
     # if user_data.use_frame and format is not None and width is not None and height is not None:
@@ -76,6 +86,15 @@ def app_callback(pad, info, user_data : user_app_callback_class):
     # Get the detections from the buffer
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+
+    logger.debug("frame #%d buffer offset: %d, timestamps\tsensor: %s, \tscript: %s\tdetection pipeline delay: %sms \tdetections %s",
+            frame_id,
+            buffer.offset,
+            sensor_timestamp_ns.timestamp,
+            unix_timestamp_ns.timestamp,
+            (time.monotonic_ns() - unix_timestamp_ns.timestamp)/1000000,
+            len(detections)
+    )
 
     # Parse the detections
     detection_count = 0
@@ -109,7 +128,16 @@ def app_callback(pad, info, user_data : user_app_callback_class):
 
             # DEBUG_dump("bbox: ", bbox)
     # if len(detections) != 0:
-    user_data.detections_queue.put(Detections(user_data.frame_count, frame, detections_list))
+    user_data.detections_queue.put(
+        Detections(
+            user_data.frame_count,
+            frame,
+            detections_list,
+            meta = FrameMetadata(
+                capture_timestamp_ns=sensor_timestamp_ns,
+                detection_timestamp_ns=time.monotonic_ns())
+        )
+    )
 
     # if user_data.use_frame:
     #     # Note: using imshow will not work here, as the callback function is not running in the main thread
