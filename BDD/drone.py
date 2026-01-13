@@ -279,13 +279,13 @@ class DroneMover():
     #     self.__execute_move_task(_move_relative_async())
 
 
-    # async def move_to_async(self, new_pos) -> None:
-    #     # on the drone
-    #     new_pos.x *= -1
+    async def move_to_async(self, new_pos) -> None:
+        # on the drone
+        new_pos.x *= -1
 
-    #     await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
-    #     logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
-    #     # await asyncio.sleep(0.1)
+        await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
+        logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
+        # await asyncio.sleep(0.1)
 
 
     # async def move_to_center_async(self) -> None:
@@ -300,7 +300,6 @@ class DroneMover():
     async def track_target(self, x : float, y : float, forward_speed_m_s : float = 0.0) -> None:
         await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=forward_speed_m_s, right_m_s=0, down_m_s=y / 20, yawspeed_deg_s=x))
         await asyncio.sleep(0.1)
-
 
     # async def standstill(self):
     #     await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
@@ -346,6 +345,9 @@ class DroneMover():
     async def standstill(self) -> None:
         print("move_relative_async")
         await self.drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
+
+    async def goto_position(self, x, y) -> None:
+        await self.drone.offboard.set_position_ned(PositionNedYaw(x, y, -1 * self.cruise_altitude, 0))
 
 
 async def main():

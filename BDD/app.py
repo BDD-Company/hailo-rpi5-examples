@@ -25,7 +25,7 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
-from helpers import Rect, XY, configure_logging, OverwriteQueue, Detection, Detections, MoveCommand
+from helpers import FrameMetadata, Rect, XY, configure_logging, OverwriteQueue, Detection, Detections, MoveCommand
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RtspStreamerSink, RecorderSink
 from video_sink_multi import MultiSink
@@ -146,6 +146,21 @@ def drone_controlling_tread(*args, **kwargs):
 MIN_CONFIDENCE = 0.25
 MOVE_CONFIDENCE = 0.4
 
+def get_position_from_telemetry(telemetry_dict) -> XY:
+    pos = telemetry_dict.get('odometry', {}).get('position_body', None)
+    if pos:
+        return XY(pos['x_m'], pos['y_m'])
+    else:
+        return None
+
+def is_drone_moving(telemetry_dict):
+    velocity = telemetry_dict.get('odometry', {}).get('velocity_body', None)
+    if velocity:
+        return abs(velocity["x_m_s"]) > 0.01 \
+            and abs(velocity["y_m_s"]) > 0.01 \
+            and abs(velocity["y_m_s"]) > 0.01
+
+
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None):
     from math import radians
 
@@ -168,20 +183,9 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     current_attitude : EulerAngle = await drone.get_cached_attitude()
     logger.debug("GOT telemetry: %s and attitude: %s", telemetry_dict, current_attitude)
 
-    # start_time = now = datetime.datetime.now()
-    # # logger.debug("Moving forward 10m")
-    # await drone.move_xy(XY(100, 0), 0)
-    # await asyncio.sleep(1)
-    # await drone.move_xy(XY(10, 10), 45)
-    # await asyncio.sleep(1)
-    # await drone.move_xy(XY(-10, -10), -45)
-    # await asyncio.sleep(1)
-    # await drone.move_xy(XY(-20, 0), 180)
-    # await asyncio.sleep(2)
-    # await drone.move_xy(XY(50, 0), 0)
-
     # return
     moving = False
+    target_seen_at_pos = XY(0,0)
     while True:
         try:
             detections_obj = Detections(-1)
@@ -249,28 +253,39 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
                 logger.debug("target: %s", angle_to_target)
 
-                forward_speed = 0
-                if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
-                    forward_speed = 30
-                    logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
+                # await drone.move_to_async(angle_to_target)
 
-                move_command = MoveCommand(
-                    angle_to_target,
-                    forward_speed
-                )
+                # forward_speed = 0
+                # if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
+                #     forward_speed = 5
+                #     logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
 
-                logger.debug("move %s, speed: %s ms", angle_to_target, forward_speed)
-                await drone.execute_move_command(move_command)
-                logger.debug("move command sent %s", move_command)
-                moving = True
+                # target_seen_at_pos = get_position_from_telemetry(telemetry_dict)
+                # if target_seen_at_pos is not None:
+                #     logger.debug("Seen target while at pos %s", target_seen_at_pos)
 
-            else:
-                if moving:
-                    logger.debug("No viable detections, stoppig")
+                # move_command = MoveCommand(
+                #     angle_to_target,
+                #     forward_speed
+                # )
 
-                # await drone.move_xy(XY(),  current_attitude.yaw_deg)
-                await drone.standstill()
-                moving = False
+                # logger.debug("move %s", move_command)
+                # await drone.execute_move_command(move_command)
+                # logger.debug("move command sent %s", move_command)
+                # moving = True
+
+            # else:
+            #     if moving:
+            #         logger.debug("No viable detections, stoppig")
+
+            #     # await drone.move_xy(XY(),  current_attitude.yaw_deg)
+            #     if moving or is_drone_moving(telemetry_dict):
+            #         await drone.standstill()
+
+            #     if target_seen_at_pos:
+            #         await drone.goto_position(target_seen_at_pos.x, target_seen_at_pos.y)
+
+            #     moving = False
 
             # -1 means that there was no frame and no detections
             if output_queue is not None:

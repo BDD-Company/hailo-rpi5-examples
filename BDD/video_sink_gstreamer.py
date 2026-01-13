@@ -184,7 +184,7 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
 
     # internals
     def _on_media_configure(self, factory, media):
-        logger.debug("[RtspStreamerSink] media-configure: building pipeline for client")
+        # logger.debug("[RtspStreamerSink] media-configure: building pipeline for client")
         element = media.get_element()
         self._rtsp_appsrc = element.get_child_by_name("rtsp_src")
         caps = Gst.Caps.from_string(f"video/x-raw,format=RGB,width={self.w},height={self.h},framerate=0/1")
@@ -194,7 +194,7 @@ class RtspStreamerSink(interfaces.FrameSinkInterface):
         self._rtsp_appsrc.set_property("block", False)
         self._rtsp_appsrc.set_property("do-timestamp", True)
 
-        logging.debug("Got media_configure for %s", self._rtsp_appsrc.name)
+        # logging.debug("Got media_configure for %s", self._rtsp_appsrc.name)
 
 
 # ------------------------ Class 2: Segment Recorder --------------------------
