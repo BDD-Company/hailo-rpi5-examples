@@ -308,6 +308,9 @@ class App(GStreamerDetectionApp):
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         super().__init__(app_callback, user_data, parser)
 
+        #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
+        self.sync = 'false'
+
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
         record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000 * 1000 * 1000

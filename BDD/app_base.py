@@ -13,7 +13,6 @@ import numpy as np
 import time
 import queue
 
-import datetime
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib, GObject
@@ -22,8 +21,10 @@ from gi.repository import Gst, GLib, GObject
 from hailo_apps.hailo_app_python.core.common.installation_utils import detect_hailo_arch
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser, get_resource_path
 from hailo_apps.hailo_app_python.core.common.defines import DETECTION_APP_TITLE, DETECTION_PIPELINE, RESOURCES_MODELS_DIR_NAME, RESOURCES_SO_DIR_NAME, DETECTION_POSTPROCESS_SO_FILENAME, DETECTION_POSTPROCESS_FUNCTION
-from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import SOURCE_PIPELINE, INFERENCE_PIPELINE, INFERENCE_PIPELINE_WRAPPER, TRACKER_PIPELINE, USER_CALLBACK_PIPELINE, DISPLAY_PIPELINE
+from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import INFERENCE_PIPELINE, INFERENCE_PIPELINE_WRAPPER, TRACKER_PIPELINE, USER_CALLBACK_PIPELINE, DISPLAY_PIPELINE
 
+# for SOURCE_PIPELINE
+from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import QUEUE, get_camera_resulotion
 
 
 # Based on hailo_app_python/core/gstreamer/gstreamer_app.py
@@ -67,6 +68,89 @@ except ImportError:
 import logging
 
 logger = logging.getLogger("GSTApp")
+
+
+def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
+                    name='source', no_webcam_compression=False,
+                    frame_rate=30, sync=True,
+                    video_format='RGB'):
+    """
+    Creates a GStreamer pipeline string for the video source with a separate fps caps
+    for frame rate control.
+
+    Args:
+        video_source (str): The path or device name of the video source.
+        video_width (int, optional): The width of the video. Defaults to 640.
+        video_height (int, optional): The height of the video. Defaults to 640.
+        video_format (str, optional): The video format. Defaults to 'RGB'.
+        name (str, optional): The prefix name for the pipeline elements. Defaults to 'source'.
+
+    Returns:
+        str: A string representing the GStreamer pipeline for the video source.
+    """
+    source_type = get_source_type(video_source)
+
+    if source_type == 'usb':
+        if no_webcam_compression:
+            # When using uncompressed format, only low resolution is supported
+            source_element = (
+                f'v4l2src device={video_source} name={name} ! '
+                f'video/x-raw, width=640, height=480 ! '
+                'videoflip name=videoflip video-direction=horiz ! '
+            )
+        else:
+            # Use compressed format for webcam
+            width, height = get_camera_resulotion(video_width, video_height)
+            source_element = (
+                f'v4l2src device={video_source} name={name} ! image/jpeg, framerate=30/1, width={width}, height={height} ! '
+                f'{QUEUE(name=f"{name}_queue_decode")} ! '
+                f'decodebin name={name}_decodebin ! '
+                f'videoflip name=videoflip video-direction=horiz ! '
+            )
+    elif source_type == 'rpi':
+        source_element = (
+            f'appsrc name=app_source is-live=true leaky-type=downstream max-buffers=3 ! '
+            # 'videoflip name=videoflip video-direction=horiz ! '
+            f'video/x-raw, format={video_format}, width={video_width}, height={video_height} ! '
+        )
+    elif source_type == 'libcamera':
+        source_element = (
+            f'libcamerasrc name={name} ! '
+            f'video/x-raw, format={video_format}, width=1536, height=864 ! '
+        )
+    elif source_type == 'ximage':
+        source_element = (
+            f'ximagesrc xid={video_source} ! '
+            f'{QUEUE(name=f"{name}queue_scale_")} ! '
+            f'videoscale ! '
+        )
+    else:
+        source_element = (
+            f'filesrc location="{video_source}" name={name} ! '
+            f'{QUEUE(name=f"{name}_queue_decode")} ! '
+            f'decodebin name={name}_decodebin ! '
+        )
+
+    # Set up the fps caps.
+    # If sync is True, constrain the rate with the given frame_rate.
+    # Otherwise, pass through (no framerate limitation).
+    if sync:
+        fps_caps = f"video/x-raw, framerate={frame_rate}/1"
+    else:
+        fps_caps = "video/x-raw"
+
+    source_pipeline = (
+        f'{source_element} '
+        f'{QUEUE(name=f"{name}_scale_q")} ! '
+        f'videoscale name={name}_videoscale n-threads=2 ! '
+        f'{QUEUE(name=f"{name}_convert_q")} ! '
+        f'videoconvert n-threads=3 name={name}_convert qos=false ! '
+        f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, '
+        f'width={video_width}, height={video_height} '
+        # f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
+    )
+
+    return source_pipeline
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
@@ -478,6 +562,7 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
                 logger.error("Failed to push buffer: %s", ret)
                 break
             frame_count += 1
+
 
 def disable_qos(pipeline):
     """
