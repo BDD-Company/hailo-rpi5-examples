@@ -6,7 +6,7 @@ import threading
 
 from interfaces import FrameSinkInterface
 
-class OpenCVShowImageSink():
+class OpenCVShowImageSink(FrameSinkInterface):
     def __init__(self, input_handler = None, window_title = '', fps_hint = 60):
         self._window_name = str(id(self))
         self._window_title = window_title
@@ -18,7 +18,7 @@ class OpenCVShowImageSink():
             target=self.__display_thread_func
         )
 
-    def start(self):
+    def start(self, frame_size):
         self._display_thread.start()
 
     def stop(self):

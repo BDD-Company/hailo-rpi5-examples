@@ -134,7 +134,7 @@ class DroneMover():
             arming_exception = None
             for i in range(arm_attempts):
                 try:
-                    await drone.action.arm()
+                    await drone.action.arm_force()
                     arming_exception = None
                     break
                 except Exception as e:
@@ -159,9 +159,9 @@ class DroneMover():
         try:
             await drone.offboard.start()
         except:
-            logger.debug("Failed to enter Offboard mode, aborting", exc_info=True)
-            await drone.action.disarm()
-            return
+            logger.error("Failed to enter Offboard mode, aborting", exc_info=True)
+            # await drone.action.disarm()
+            raise
 
         # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
         logging.debug("Taking off to %sm...", self.cruise_altitude)

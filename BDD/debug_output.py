@@ -1,11 +1,10 @@
 #! /usr/bin/env python
 
 import subprocess
-import datetime
+import time
 from queue import Queue
 import logging
 import json
-# import re
 import dataclasses
 
 import cv2
@@ -151,25 +150,32 @@ def draw_detection(frame, detection : Detection, color, line_thickness = 1):
     #     )
 
 
-def process_output(output) -> np.ndarray:
+def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     # output = {
     #                 'detections' : detections_obj,
     #                 'selected' : selected_detection,
     #                 'move_command': command,
     #                 'telemetry': await drone.get_telemetry_async(),
     #             }
-    if output is None:
+    if detection_dict is None:
         return None
 
-    detections = output.get('detections', Detections(-1))
-    selected : Detection|None = output.get('selected', None)
-    move_command : MoveCommand | None = output.get('move_command', None)
-    telemetry : dict | None = output.get('telemetry', None)
+    detections : Detections = detection_dict.get('detections', None)
+    selected : Detection|None = detection_dict.get('selected', None)
+    move_command : MoveCommand | None = detection_dict.get('move_command', None)
+    telemetry : dict | None = detection_dict.get('telemetry', None)
 
     frame = detections.frame if detections else None
 
     if frame is None:
         return None
+
+    logger.debug("frame #%d \t delay: %sms \tdetections %s ms, frame object: %s (%s)",
+            detections.frame_id,
+            (time.monotonic_ns() - detections.meta.detection_start_timestamp_ns)/1000000,
+            len(detections.detections),
+            id(frame), hash(frame.data.tobytes())
+    )
 
     frame_size = XY(frame.shape[1], frame.shape[0])
     frame_center = frame_size / 2
@@ -207,27 +213,31 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
 
     # Get the first frame and figure out image dimensions
     frame = None
+    detection_dict = None
     while frame is None:
-        output = frame_queue.get()
-        frame : np.ndarray = output['detections'].frame
+        detection_dict = frame_queue.get()
+        frame : np.ndarray = detection_dict['detections'].frame
     frame_h, frame_w, _ = frame.shape
     logger.debug("Got first frame of size W:%u, H:%u", frame_w, frame_h)
 
     sink.start((frame_w, frame_h))
     try:
-        output = None
         while True:
             try:
-                output = frame_queue.get()
-                annotated_frame = process_output(output)
+                if detection_dict is None:
+                    detection_dict = frame_queue.get()
+                annotated_frame = annotate_frame_with_detection_info(detection_dict)
 
                 if annotated_frame is not None:
                     sink.process_frame(annotated_frame)
 
             except:
-                frame_id = output or -1
+                frame_id = -1 if detection_dict is None else detection_dict['detections'].frame_id
                 logger.exception("exception while processing frame %d", frame_id, exc_info=True, stack_info=True)
                 break
+
+            finally:
+                detection_dict = None
     finally:
         sink.stop()
 
@@ -240,8 +250,80 @@ if __name__ == '__main__':
     from video_sink_gstreamer import RtspStreamerSink, RecorderSink
     from video_sink_multi import MultiSink
     from opencv_show_image_sink import OpenCVShowImageSink
+    from helpers import configure_logging
+
+    from picamera2 import Picamera2
+    from libcamera import controls as picamera_controls
 
     output_queue = Queue()
+
+    configure_logging(logging.INFO)
+
+    def generate_frames():
+        picamera_config = None
+        picamera_controls_initial = None
+        video_format = 'RGB'
+        video_width = 800
+        video_height = 600
+        target_fps = 30
+
+        with Picamera2() as picam2:
+            if picamera_config is None:
+                # Default configuration
+                main = {'size': (1280, 720), 'format': 'RGB888'}
+                lores = {'size': (video_width, video_height), 'format': 'RGB888'}
+                controls = {'FrameRate': target_fps}
+                config = picam2.create_preview_configuration(main=main, lores=lores, controls=controls)
+            else:
+                config = picamera_config
+            # Configure the camera with the created configuration
+            picam2.configure(config)
+
+            def apply_controls(controls_dict : dict):
+                # TODO: creck that control is supported first
+                picam2.set_controls(controls_dict)
+
+            if picamera_controls_initial is not None:
+                apply_controls(picamera_controls_initial)
+
+            # Update GStreamer caps based on 'lores' stream
+            lores_stream = config['lores']
+            format_str = 'RGB' if lores_stream['format'] == 'RGB888' else video_format
+            width, height = lores_stream['size']
+            logger.debug("Picamera2 configuration: width=%s, height=%s, format=%s", width, height, format_str)
+
+            picam2.start()
+            frame_count = 0
+
+            # used to convert from absolute frame time of Picamera2 to relative of Gstreamer (starting from 0)
+            first_frame_timestamp_ns = 0
+            prev_frame_timestamp_ns = 0
+            logger.debug("picamera_process started")
+            while True:
+                request = picam2.capture_request()
+
+                frame_data = None
+                frame_meta = None
+                frame_timestamp_ns = 0
+                try:
+                    frame_data = request.make_array("lores")
+                    frame_meta = request.get_metadata()
+                finally:
+                    request.release()
+
+                frame_data = picam2.capture_array('lores')
+                # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
+                if frame_data is None:
+                    logger.error("Failed to capture frame #%s.", frame_count)
+                    break
+
+                # Convert framontigue data if necessary
+                frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+                frame = np.asarray(frame)
+                yield frame
+
+                frame_count += 1
+
 
     def producer_thread_func(n_frames = 1000, delay_between_frames_ms=100):
         frame = cv2.imread('/home/bdd/hailo-rpi5-examples/SAMPLE_800x600.jpg') # np.zeros(shape=[800, 600, 3], dtype=np.uint8)
@@ -265,8 +347,11 @@ if __name__ == '__main__':
         detections_template = Detections(0, frame=None, detections=detections)
         telemetry = json.loads('{"odometry": {"angular_velocity_body": {"pitch_rad_s": -0.0010726579930633307, "roll_rad_s": 0.0010208315216004848, "yaw_rad_s": 0.0006282856920734048}, "child_frame_id": "1 (BODY_NED)", "frame_id": "1 (BODY_NED)", "pose_covariance": {"covariance_matrix": [0.00013371351815294474, NaN, NaN, NaN, NaN, NaN, 0.00013370705710258335, NaN, NaN, NaN, NaN, 0.07561597973108292, NaN, NaN, NaN, 1.736115154926665e-05, NaN, NaN, 1.3997990208736155e-05, NaN, 0.0010160470847040415]}, "position_body": {"x_m": 0.0010958998464047909, "y_m": -0.00166346225887537, "z_m": -1.66695237159729}, "q": {"timestamp_us": 0, "w": 0.7084895968437195, "x": 0.02082471176981926, "y": 0.019742604345083237, "z": -0.7051376104354858}, "time_usec": 1102239786672, "velocity_body": {"x_m_s": 0.0006445666076615453, "y_m_s": 0.001224401406943798, "z_m_s": 0.005852778907865286}, "velocity_covariance": {"covariance_matrix": [0.0014366698451340199, NaN, NaN, NaN, NaN, NaN, 0.0014359699562191963, NaN, NaN, NaN, NaN, 0.004651403985917568, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]}}, "scaled_pressure": {"absolute_pressure_hpa": 1008.449951171875, "differential_pressure_hpa": 0.0, "differential_pressure_temperature_deg": 0.0, "temperature_deg": 36.290000915527344, "timestamp_us": 1102240195000}, "attitude_euler": {"pitch_deg": 3.287358045578003, "roll_deg": 0.0956246480345726, "timestamp_us": 1102239771000, "yaw_deg": -89.72563171386719}, "flight_mode": "7 (OFFBOARD)"}')
 
+        for frame, i in zip(generate_frames(), range(0, n_frames)):
+            logger.debug("got frame: %s", i)
+            # _, frame = camera.read()
 
-        for i in range(0, n_frames):
+            telemetry['a_frameid'] = i
             d = dataclasses.replace(detections_template, frame_id = i, frame=frame.copy())
             q = i / 10
             output_queue.put({
@@ -288,7 +373,7 @@ if __name__ == '__main__':
     sink = MultiSink([
         RtspStreamerSink(30, 8554),
         RecorderSink(10, "/home/bdd/hailo-rpi5-examples/test_recordings"),
-        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
+        OpenCVShowImageSink(window_title='DEBUG IMAGE')
     ])
 
     debug_output_thread(frame_queue=output_queue, sink=sink)

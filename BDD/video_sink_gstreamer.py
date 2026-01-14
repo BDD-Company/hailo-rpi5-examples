@@ -72,7 +72,9 @@ class _FrameQueuePusher:
                     # swallow errors to keep realtime flow
                     pass
             else:
-                logger.warning("appsrc is None")
+                # Not a problem, means no client was conneted
+                # logger.warning("appsrc is None")
+                pass
             self._q.task_done()
 
 

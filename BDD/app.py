@@ -72,7 +72,14 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
     # sensor_timestamp_ns = None
     sensor_timestamp_ns  = buffer.get_reference_timestamp_meta(sensor_timestamp_caps)
-    unix_timestamp_ns  = buffer.get_reference_timestamp_meta(unix_timestamp_caps)
+    detection_start_timestamp_ns  = buffer.get_reference_timestamp_meta(unix_timestamp_caps)
+    if detection_start_timestamp_ns is not None:
+        detection_start_timestamp_ns = detection_start_timestamp_ns.timestamp
+    else:
+        detection_start_timestamp_ns = 0
+
+    detection_end_timestamp_ns  = time.monotonic_ns()
+
     frame_id = buffer.get_reference_timestamp_meta(frame_id_caps)
     if frame_id is not None:
         frame_id = frame_id.timestamp
@@ -87,13 +94,11 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    logger.debug("frame #%d buffer offset: %d, timestamps\tsensor: %s, \tscript: %s\tdetection pipeline delay: %sms \tdetections %s",
+    logger.debug("frame #%d \t pipeline delay: %sms \t detections %s, frame object: %s (%s)",
             frame_id,
-            buffer.offset,
-            sensor_timestamp_ns.timestamp,
-            unix_timestamp_ns.timestamp,
-            (time.monotonic_ns() - unix_timestamp_ns.timestamp)/1000000,
-            len(detections)
+            (detection_end_timestamp_ns - detection_start_timestamp_ns)/1000000,
+            len(detections),
+            id(frame), hash(frame.data.tobytes())
     )
 
     # Parse the detections
@@ -114,11 +119,9 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
             if len(track) == 1:
                 track_id = track[0].get_id()
-                # DEBUG_dump("track: ", track[0])
             else:
                 track_id = None
 
-            # string_to_print += (f"Detection: ID: {track_id} Label: {label} Confidence: {confidence:.2f}\n")
             detection_count += 1
             detections_list.append(Detection(
                 bbox = Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
@@ -126,16 +129,16 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
                 track_id = track_id,
             ))
 
-            # DEBUG_dump("bbox: ", bbox)
     # if len(detections) != 0:
     user_data.detections_queue.put(
         Detections(
-            user_data.frame_count,
+            frame_id,
             frame,
             detections_list,
             meta = FrameMetadata(
                 capture_timestamp_ns=sensor_timestamp_ns,
-                detection_timestamp_ns=time.monotonic_ns())
+                detection_start_timestamp_ns = detection_start_timestamp_ns,
+                detection_end_timestamp_ns=detection_end_timestamp_ns)
         )
     )
 
@@ -201,7 +204,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     drone = DroneMover(drone_connection_string, drone_config)
 
     logger.debug("starting up drone...")
-    await drone.startup_sequence(100)
+    await drone.startup_sequence(1)
     logger.debug("drone started")
 
     logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
@@ -224,14 +227,15 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             # logger.debug("!!! awaiting detection... ")
             try:
-                detections_obj : Detections = detections_queue.get(timeout = 0.1)
+                r : Detections = detections_queue.get(timeout = 0.1)
+                if r is STOP:
+                    logger.info("stopping")
+                    break
+                detections_obj = r
+
             except Empty:
                 # No detections, not even frame with ID and image
                 continue
-
-            if detections_obj is STOP:
-                logger.info("stopping")
-                break
 
             telemetry_dict = await drone.get_telemetry_dict()
 
