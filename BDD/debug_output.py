@@ -3,8 +3,8 @@
 import subprocess
 import time
 from queue import Queue
-import logging
 import json
+import pprint
 import dataclasses
 
 import cv2
@@ -13,6 +13,7 @@ import numpy as np
 from helpers import Detections, Detection, XY, MoveCommand, Rect
 from interfaces import FrameSinkInterface
 
+import logging
 logger = logging.getLogger(__name__)
 
 
@@ -99,6 +100,19 @@ def filterdict(dirty: dict, filter_func) -> dict:
 
     return clean
 
+# Based on  - https://stackoverflow.com/a/44356856
+# Retrieved 2026-02-11, License - CC BY-SA 3.0
+class FormatPrinter(pprint.PrettyPrinter):
+
+    def __init__(self, formats, **kwrags):
+        super().__init__(**kwrags)
+        self.formats = formats
+
+    def format(self, object, context, maxlevels, level):
+        if type(object) in self.formats:
+            return self.formats[type(object)] % object, True, False
+
+        return super().format(object, context, maxlevels, level)
 
 # ceanup_json_re= re.compile(r'\s*[{}],?|"')
 def telemetry_as_text(telemetry_dict):
@@ -110,7 +124,7 @@ def telemetry_as_text(telemetry_dict):
     telemetry_dict = filterdict(telemetry_dict, lambda k, v :  not (isinstance(k, str) and 'time' in k))
 
     # convert to pretty-ish multi-line text
-    return json.dumps(telemetry_dict, sort_keys=True, indent=2)
+    return FormatPrinter({float: "%.2f"}, indent=1, sort_dicts=True).pprint(telemetry_dict)
 
 
 def draw_detection(frame, detection : Detection, color, line_thickness = 1):

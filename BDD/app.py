@@ -26,7 +26,8 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
-from helpers import FrameMetadata, Rect, XY, configure_logging, OverwriteQueue, Detection, Detections, MoveCommand
+from helpers import FrameMetadata, Rect, XY, configure_logging, Detection, Detections, MoveCommand
+from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RtspStreamerSink, RecorderSink
 from video_sink_multi import MultiSink
@@ -388,7 +389,7 @@ def main():
 
     output_thread = threading.Thread(
         target = debug_output_thread,
-        args = (output_queue,sink),
+        args = (output_queue, sink),
         name="DEBUG"
     )
     output_thread.start()

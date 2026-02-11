@@ -5,7 +5,6 @@ from collections import deque
 from functools import wraps
 import logging
 import datetime
-from queue import Queue
 
 import numpy as np
 
@@ -13,16 +12,6 @@ import numpy as np
 # Milliseconds = int
 # def get_current_time_ms() -> Milliseconds:
 #     return int(time.time_ns() / (1000 * 1000))
-
-
-class OverwriteQueue(Queue):
-    def __init__(self, maxsize=0):
-        super().__init__(maxsize=maxsize)
-        # to make sure that Queue always stores elements, effectively overwriting some older ones
-        self.maxsize = 0
-
-    def _init(self, maxsize):
-        self.queue = deque(maxlen=maxsize)
 
 
 class FPSCounter:
