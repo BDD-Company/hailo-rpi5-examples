@@ -26,6 +26,11 @@ class OverwriteQueue(Generic[T]):
             self._d.append(item)   # overwrites oldest when full
             self._cv.notify()      # 1:1 wakeup; use notify_all for many consumers
 
+    def put_nowait(self, item: T) -> None:
+        # for compatibility with Queue API
+        self.put(item)
+
+
     def get(self, timeout: float | None = None) -> T:
         with self._cv:
             if self._d:
@@ -53,6 +58,10 @@ class OverwriteQueue(Generic[T]):
     def __len__(self) -> int:
         with self._cv:
             return len(self._d)
+
+    def qsize(self) -> int:
+        return len(self)
+
 
     def clear(self) -> None:
         with self._cv:
