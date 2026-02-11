@@ -124,7 +124,7 @@ def telemetry_as_text(telemetry_dict):
     telemetry_dict = filterdict(telemetry_dict, lambda k, v :  not (isinstance(k, str) and 'time' in k))
 
     # convert to pretty-ish multi-line text
-    return FormatPrinter({float: "%.2f"}, indent=1, sort_dicts=True).pprint(telemetry_dict)
+    return FormatPrinter({float: "%.2f"}, indent=1, sort_dicts=True).pformat(telemetry_dict)
 
 
 def draw_detection(frame, detection : Detection, color, line_thickness = 1):
