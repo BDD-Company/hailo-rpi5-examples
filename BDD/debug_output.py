@@ -266,81 +266,96 @@ if __name__ == '__main__':
     from opencv_show_image_sink import OpenCVShowImageSink
     from helpers import configure_logging
 
-    from picamera2 import Picamera2
-    from libcamera import controls as picamera_controls
-
     output_queue = Queue()
 
-    configure_logging(logging.INFO)
+    configure_logging(logging.DEBUG)
 
+    # def generate_frames():
+    #     from picamera2 import Picamera2
+    #     from libcamera import controls as picamera_controls
+
+    #     picamera_config = None
+    #     picamera_controls_initial = None
+    #     video_format = 'RGB'
+    #     video_width = 800
+    #     video_height = 600
+    #     target_fps = 30
+
+    #     with Picamera2() as picam2:
+    #         if picamera_config is None:
+    #             # Default configuration
+    #             main = {'size': (1280, 720), 'format': 'RGB888'}
+    #             lores = {'size': (video_width, video_height), 'format': 'RGB888'}
+    #             controls = {'FrameRate': target_fps}
+    #             config = picam2.create_preview_configuration(main=main, lores=lores, controls=controls)
+    #         else:
+    #             config = picamera_config
+    #         # Configure the camera with the created configuration
+    #         picam2.configure(config)
+
+    #         def apply_controls(controls_dict : dict):
+    #             # TODO: creck that control is supported first
+    #             picam2.set_controls(controls_dict)
+
+    #         if picamera_controls_initial is not None:
+    #             apply_controls(picamera_controls_initial)
+
+    #         # Update GStreamer caps based on 'lores' stream
+    #         lores_stream = config['lores']
+    #         format_str = 'RGB' if lores_stream['format'] == 'RGB888' else video_format
+    #         width, height = lores_stream['size']
+    #         logger.debug("Picamera2 configuration: width=%s, height=%s, format=%s", width, height, format_str)
+
+    #         picam2.start()
+    #         frame_count = 0
+
+    #         # used to convert from absolute frame time of Picamera2 to relative of Gstreamer (starting from 0)
+    #         first_frame_timestamp_ns = 0
+    #         prev_frame_timestamp_ns = 0
+    #         logger.debug("picamera_process started")
+    #         while True:
+    #             request = picam2.capture_request()
+
+    #             frame_data = None
+    #             frame_meta = None
+    #             frame_timestamp_ns = 0
+    #             try:
+    #                 frame_data = request.make_array("lores")
+    #                 frame_meta = request.get_metadata()
+    #             finally:
+    #                 request.release()
+
+    #             frame_data = picam2.capture_array('lores')
+    #             # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
+    #             if frame_data is None:
+    #                 logger.error("Failed to capture frame #%s.", frame_count)
+    #                 break
+
+    #             # Convert framontigue data if necessary
+    #             frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+    #             frame = np.asarray(frame)
+    #             yield frame
+
+    #             frame_count += 1
     def generate_frames():
-        picamera_config = None
-        picamera_controls_initial = None
-        video_format = 'RGB'
-        video_width = 800
-        video_height = 600
-        target_fps = 30
+        video_capture = cv2.VideoCapture("/home/bdd/hailo-rpi5-examples/TEST_DATA/sample.mp4")
 
-        with Picamera2() as picam2:
-            if picamera_config is None:
-                # Default configuration
-                main = {'size': (1280, 720), 'format': 'RGB888'}
-                lores = {'size': (video_width, video_height), 'format': 'RGB888'}
-                controls = {'FrameRate': target_fps}
-                config = picam2.create_preview_configuration(main=main, lores=lores, controls=controls)
-            else:
-                config = picamera_config
-            # Configure the camera with the created configuration
-            picam2.configure(config)
+        if not video_capture.isOpened():
+            raise RuntimeError("Cannot open video")
 
-            def apply_controls(controls_dict : dict):
-                # TODO: creck that control is supported first
-                picam2.set_controls(controls_dict)
+        while True:
+            ret, frame = video_capture.read()
+            if not ret:
+                break   # end of video
+            yield frame
 
-            if picamera_controls_initial is not None:
-                apply_controls(picamera_controls_initial)
-
-            # Update GStreamer caps based on 'lores' stream
-            lores_stream = config['lores']
-            format_str = 'RGB' if lores_stream['format'] == 'RGB888' else video_format
-            width, height = lores_stream['size']
-            logger.debug("Picamera2 configuration: width=%s, height=%s, format=%s", width, height, format_str)
-
-            picam2.start()
-            frame_count = 0
-
-            # used to convert from absolute frame time of Picamera2 to relative of Gstreamer (starting from 0)
-            first_frame_timestamp_ns = 0
-            prev_frame_timestamp_ns = 0
-            logger.debug("picamera_process started")
-            while True:
-                request = picam2.capture_request()
-
-                frame_data = None
-                frame_meta = None
-                frame_timestamp_ns = 0
-                try:
-                    frame_data = request.make_array("lores")
-                    frame_meta = request.get_metadata()
-                finally:
-                    request.release()
-
-                frame_data = picam2.capture_array('lores')
-                # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
-                if frame_data is None:
-                    logger.error("Failed to capture frame #%s.", frame_count)
-                    break
-
-                # Convert framontigue data if necessary
-                frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-                frame = np.asarray(frame)
-                yield frame
-
-                frame_count += 1
+        video_capture.release()
 
 
-    def producer_thread_func(n_frames = 1000, delay_between_frames_ms=100):
-        frame = cv2.imread('/home/bdd/hailo-rpi5-examples/SAMPLE_800x600.jpg') # np.zeros(shape=[800, 600, 3], dtype=np.uint8)
+
+    def producer_thread_func(n_frames = 1000, delay_between_frames_ms=10):
+
+        # frame = cv2.imread('/home/bdd/hailo-rpi5-examples/TEST_DATA/sample.mp4') # np.zeros(shape=[800, 600, 3], dtype=np.uint8)
         detections = [
             Detection(
                 bbox = Rect.from_xyxy(0.1, 0.15, 0.2, 0.25),
@@ -365,7 +380,18 @@ if __name__ == '__main__':
             logger.debug("got frame: %s", i)
             # _, frame = camera.read()
 
+            # Just to keep numbers rolling
             telemetry['a_frameid'] = i
+            odo = telemetry['odometry']
+            odo_avb = odo['angular_velocity_body']
+            odo_avb['pitch_rad_s'] += 0.01
+            odo_avb['yaw_rad_s'] += 0.01
+            odo_pb = odo['position_body']
+            odo_pb['x_m'] += 0.05
+            odo_pb['y_m'] += 0.05
+            odo_pb['z_m'] += 0.05
+
+
             d = dataclasses.replace(detections_template, frame_id = i, frame=frame.copy())
             q = i / 10
             output_queue.put({
@@ -386,8 +412,8 @@ if __name__ == '__main__':
 
     sink = MultiSink([
         RtspStreamerSink(30, 8554),
-        RecorderSink(10, "/home/bdd/hailo-rpi5-examples/test_recordings"),
-        OpenCVShowImageSink(window_title='DEBUG IMAGE')
+        RecorderSink(10, "_TMP/test_recordings"),
+        OpenCVShowImageSink(window_title='DEBUG IMAGE', fps_hint=500)
     ])
 
     debug_output_thread(frame_queue=output_queue, sink=sink)

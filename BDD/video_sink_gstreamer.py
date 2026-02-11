@@ -9,7 +9,7 @@ import datetime
 import os
 
 import interfaces
-from helpers import OverwriteQueue
+from OverwriteQueue import OverwriteQueue
 import logging
 
 import gi
@@ -75,7 +75,7 @@ class _FrameQueuePusher:
                 # Not a problem, means no client was conneted
                 # logger.warning("appsrc is None")
                 pass
-            self._q.task_done()
+            # self._q.task_done()
 
 
 def _validate_frame(frame: np.ndarray, expect_w: int, expect_h: int):

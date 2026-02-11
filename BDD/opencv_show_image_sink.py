@@ -30,28 +30,35 @@ class OpenCVShowImageSink(FrameSinkInterface):
 
     def process_frame(self, frame):
         # current_fps = self._fps_counter.on_frame()
-        if frame is not None:
-            self._frame_queue.put(frame)
+        if frame is None:
+            return
+
+        self._frame_queue.put(frame)
+
 
 
     def __display_thread_func(self):
         cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-        cv2.setWindowTitle(self._window_name, self._window_name)
+        cv2.setWindowTitle(self._window_name, self._window_title)
+        frame_id = -1
         while True:
             try:
                 frame = self._frame_queue.get()
                 if frame is None:
                     break
+
+                frame_id += 1
                 cv2.imshow(self._window_name, frame)
                 # cv2.setWindowTitle(self._window_name, f"{self._window_title} zoom: {frame.metadata.zoom_factor} FPS: {current_fps}")
                 key = cv2.waitKeyEx(int(1000 / (self._fps_hint * 2)))
-                if key == -1:
-                    return
+                # if key == -1:
+                #     return
 
                 if self._input_handler:
                     ok_to_continue = self._input_handler(key & 0xFF)
                     if not ok_to_continue:
                         raise Exception("User requested to terminate by pressing: %s", key)
+
             except:
-                pass
+                logger.exception("exception on frame %s", frame_id, exc_info=True)
         cv2.destroyWindow(self._window_name)
