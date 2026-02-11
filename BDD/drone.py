@@ -15,7 +15,8 @@ import logging
 
 logger = logging.Logger("BDD_drone")
 
-DEFAULT_TAKEOFF_ALTITUDE_M = 20
+DEFAULT_TAKEOFF_ALTITUDE_M = 10
+SAFE_TILT_DEG = 45
 
 
 def mavsdk_msg_to_dict(msg):
@@ -314,25 +315,24 @@ class DroneMover():
         # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=move_command.move_speed_ms, right_m_s=0, down_m_s=0, yawspeed_deg_s=move_command.adjust_attitude.x))
 
 
-    # async def move_to_target_async(self, yaw_m_s : float, pitch_degree : float, forward_speed_m_s : float = 0.0) -> None:
-    #     print("move_forward_async")
-    #     try:
-    #         # -1 : here ducking nose DOWN to be able to move to target which is UP (due to how quadcopters move)
-    #         # 0.5 : doing it sligthly so target doesn't disappear from frame
-    #         # pitch_degree *= -1
-    #         # await self.drone.offboard.set_attitude(Attitude(0, pitch_deg=pitch_degree, yaw_deg=yaw_degree, thrust_value=thrust))
-    #         await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=forward_speed, 0, 0, yawspeed_deg_s=yaw_degree))
+    async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0) -> None:
+        # Keep commanded tilt within a safe envelope to avoid toppling.
 
-    #     except:
-    #         logger.exception("While moving to target with pitch: %s, yaw: %s, thrust: %s",
-    #             pitch_degree,
-    #             yaw_degree,
-    #             thrust)
 
-        # # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(speed_ms, 0, 0, 0))
-        # # await asyncio.sleep(0.5)
-        # # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
-        # logger.debug('!!! Executed move_forward')
+        def _clamp(angle: float) -> float:
+            return max(-SAFE_TILT_DEG, min(SAFE_TILT_DEG, angle))
+
+        safe_roll = _clamp(roll_degree)
+        safe_pitch = _clamp(pitch_degree)
+
+        await self.drone.offboard.set_attitude(
+            Attitude(
+                yaw_deg=0,
+                pitch_deg=safe_pitch,
+                roll_deg=safe_roll,
+                thrust_value=thrust,
+            )
+        )
 
 
     async def move_relative_async(self, dx, dy) -> None:

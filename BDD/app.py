@@ -286,7 +286,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
                 logger.debug("target: %s", angle_to_target)
 
-                # await drone.move_to_async(angle_to_target)
+                await drone.move_to_target_zenith_async(angle_to_target.y, angle_to_target.x, thrust=0.6)
 
                 # forward_speed = 0
                 # if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
