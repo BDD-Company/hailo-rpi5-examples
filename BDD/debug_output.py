@@ -115,7 +115,7 @@ class FormatPrinter(pprint.PrettyPrinter):
         return super().format(object, context, maxlevels, level)
 
 # ceanup_json_re= re.compile(r'\s*[{}],?|"')
-def telemetry_as_text(telemetry_dict):
+def telemetry_as_text(frame_id, telemetry_dict, frame_metadata):
     # remove 'covariance_matrix' which is too verbose
     telemetry_dict = filterdict(telemetry_dict, lambda k, v :  k != 'covariance_matrix')
     # remove keys with empty values entirely
@@ -124,7 +124,12 @@ def telemetry_as_text(telemetry_dict):
     telemetry_dict = filterdict(telemetry_dict, lambda k, v :  not (isinstance(k, str) and 'time' in k))
 
     # convert to pretty-ish multi-line text
-    return FormatPrinter({float: "%.2f"}, indent=1, sort_dicts=True).pformat(telemetry_dict)
+    telemetry_str = FormatPrinter({float: "%.2f"}, indent=1, sort_dicts=True).pformat(telemetry_dict)
+    telemetry_str = f"frame: {frame_id}\n" \
+        f"time: {frame_metadata.capture_timestamp_ns} detection +{(frame_metadata.detection_end_timestamp_ns - frame_metadata.detection_start_timestamp_ns) / 1000000} ms\n" \
+        f"{telemetry_str}"
+
+    return telemetry_str
 
 
 def draw_detection(frame, detection : Detection, color, line_thickness = 1):
@@ -204,7 +209,7 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     frame_center = frame_size / 2
 
     if telemetry is not None:
-        telemetry_text = telemetry_as_text(telemetry)
+        telemetry_text = telemetry_as_text(detections.frame_id, telemetry, detections.meta)
         for line_no, line in enumerate(telemetry_text.splitlines()):
             font_scale = 0.4
             draw_text(frame, line, XY(0, 20 + 40 * line_no * font_scale), font_scale=font_scale, color=FRAME_METADATA_COLOR, bg_color=FRAME_METADATA_COLOR_BG, line_width=1)
@@ -390,7 +395,7 @@ if __name__ == '__main__':
             # _, frame = camera.read()
 
             # Just to keep numbers rolling
-            telemetry['a_frameid'] = i
+            # telemetry['a_frameid'] = i
             odo = telemetry['odometry']
             odo_avb = odo['angular_velocity_body']
             odo_avb['pitch_rad_s'] += 0.01
