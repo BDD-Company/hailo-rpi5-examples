@@ -175,7 +175,7 @@ def drone_controlling_tread(*args, **kwargs):
     finally:
         loop.close()
 
-MIN_CONFIDENCE = 0.25
+MIN_CONFIDENCE = 0.3
 MOVE_CONFIDENCE = 0.4
 
 def get_position_from_telemetry(telemetry_dict) -> XY:
@@ -200,12 +200,13 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     distance_r = 0.1
     distance_r *= distance_r
     frame_angular_size = XY(120, 90)
+    seen_target = False
 
     from drone import DroneMover
     drone = DroneMover(drone_connection_string, drone_config)
 
     logger.debug("starting up drone...")
-    await drone.startup_sequence(1)
+    await drone.startup_sequence(100)
     logger.debug("drone started")
 
     logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
@@ -275,6 +276,11 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 # absolute_angle *= -1
                 # logger.debug("!!! move to %s, angle: %s, absolute: %s°, current attitude: %s", dest_xy, angle_to_target, absolute_angle, current_attitude)
 
+                drone_attitude = telemetry_dict['attitude_euler']
+                drone_pitch = drone_attitude['pitch_deg']
+                drone_roll = drone_attitude['roll_deg']
+                logger.debug("drone attitude: %s", drone_attitude)
+
                 # await drone.move_xy(XY(), yaw = absolute_angle)
                 # # await drone.track_target(angle_to_target.x / 10, angle_to_target.y / 10, forward_speed)
                 distance_to_center = detection.bbox.center.distance_squared_to(center)
@@ -284,9 +290,20 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 diff_xy = center - detection.bbox.center
                 logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
                 angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
-                logger.debug("target: %s", angle_to_target)
+                logger.debug("angle to target: %s", angle_to_target)
+                angle_to_target /= 2
+                angle_to_target += XY(drone_roll, drone_pitch)
+                logger.debug("angle to target adjusted: %s", angle_to_target)
+                seen_target = True
 
-                await drone.move_to_target_zenith_async(angle_to_target.y, angle_to_target.x, thrust=0.6)
+                await drone.move_to_target_zenith_async(-angle_to_target.x, angle_to_target.y, thrust=0.4)
+            else:
+                if seen_target:
+                    await drone.standstill()
+                else:
+                    if detections_obj.frame_id % 30 == 0:
+                        logger.debug("idling...")
+                        await drone.idle()
 
                 # forward_speed = 0
                 # if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
@@ -371,7 +388,7 @@ def main():
     output_queue = OverwriteQueue(maxsize=20)
 
     drone_config = {
-        'cruise_altitude' : 10
+        'cruise_altitude' : 1,
     }
 
     drone_thread = threading.Thread(
@@ -382,8 +399,8 @@ def main():
     drone_thread.start()
 
     sink = MultiSink([
-        RtspStreamerSink(30, 8554),
-        RecorderSink(30, "recordings", segment_seconds=10),
+        # RtspStreamerSink(30, 8554),
+        RecorderSink(30, "recordings", segment_seconds=5),
         # OpenCVShowImageSink(window_title='DEBUG IMAGE')
     ])
 
@@ -396,7 +413,7 @@ def main():
 
     user_data = user_app_callback_class(detections_queue)
     user_data.use_frame = True
-    app = App(app_callback, user_data)
+    app = App(app_callback, user_data, video_output_chunk_length_s=10)
 
     DEBUG = True
     if DEBUG:

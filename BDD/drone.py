@@ -137,7 +137,7 @@ class DroneMover():
             arming_exception = None
             for i in range(arm_attempts):
                 try:
-                    await drone.action.arm_force()
+                    await drone.action.arm()
                     arming_exception = None
                     break
                 except Exception as e:
