@@ -177,19 +177,28 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     detections : Detections = detection_dict.get('detections', None)
     selected : Detection|None = detection_dict.get('selected', None)
     move_command : MoveCommand | None = detection_dict.get('move_command', None)
-    telemetry : dict | None = detection_dict.get('telemetry', None)
+    telemetry : dict | None = detection_dict.get('telemetry', {})
 
     frame = detections.frame if detections else None
 
     if frame is None:
         return None
 
-    logger.debug("frame #%d \t delay: %sms \tdetections %s ms, frame object: %s (%s)",
-            detections.frame_id,
-            (time.monotonic_ns() - detections.meta.detection_start_timestamp_ns)/1000000,
-            len(detections.detections),
-            id(frame), hash(frame.data.tobytes())
-    )
+    # telemetry['_frame'] = {
+    #     'id' : detections.frame_id,
+    #     'meta' : {
+    #         '0 capture ts' : detections.meta.capture_timestamp_ns,
+    #         '1 detection delta ms' : (detections.meta.detection_end_timestamp_ns - detections.meta.detection_start_timestamp_ns) / 1000000,
+    #         '2 display ms' : (time.monotonic_ns() - detections.meta.capture_timestamp_ns) / 1000000
+    #     }
+    # }
+
+    # logger.debug("frame #%d \t delay: %sms \tdetections %s ms, frame object: %s (%s)",
+    #         detections.frame_id,
+    #         (time.monotonic_ns() - detections.meta.detection_start_timestamp_ns)/1000000,
+    #         len(detections.detections),
+    #         id(frame), hash(frame.data.tobytes())
+    # )
 
     frame_size = XY(frame.shape[1], frame.shape[0])
     frame_center = frame_size / 2

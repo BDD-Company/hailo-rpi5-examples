@@ -581,7 +581,7 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
                     if first_frame_timestamp_ns == 0:
                         first_frame_timestamp_ns = sensor_timestamp_ns
                     frame_timestamp_ns = sensor_timestamp_ns - first_frame_timestamp_ns
-                    logging.debug("frame #%d\ttimestamp from sensor: %s, frame timestamp: %s", frame_count, sensor_timestamp_ns, frame_timestamp_ns)
+                    # logging.debug("frame #%d\ttimestamp from sensor: %s, frame timestamp: %s", frame_count, sensor_timestamp_ns, frame_timestamp_ns)
 
                 buffer.pts = frame_timestamp_ns
                 buffer.dts = frame_timestamp_ns

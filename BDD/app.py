@@ -95,12 +95,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    logger.debug("frame #%d \t pipeline delay: %sms \t detections %s, frame object: %s (%s)",
-            frame_id,
-            (detection_end_timestamp_ns - detection_start_timestamp_ns)/1000000,
-            len(detections),
-            id(frame), hash(frame.data.tobytes())
-    )
+    # logger.debug("frame #%d \t pipeline delay: %sms \t detections %s, frame object: %s (%s)",
+    #         frame_id,
+    #         (detection_end_timestamp_ns - detection_start_timestamp_ns)/1000000,
+    #         len(detections),
+    #         id(frame), hash(frame.data.tobytes())
+    # )
 
     # Parse the detections
     detection_count = 0
