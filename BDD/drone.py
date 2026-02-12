@@ -16,7 +16,8 @@ import logging
 logger = logging.Logger("BDD_drone")
 
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
-SAFE_TILT_DEG = 45
+SAFE_TILT_DEG = 40
+IDLE_THRUST = 0.1
 
 
 def mavsdk_msg_to_dict(msg):
@@ -71,6 +72,7 @@ class DroneMover():
             # "battery",
             "health",
             "odometry",
+            "landed_state"
             # "attitude_angular_velocity_body",
         ]
         self._telemetry_tasks : dict[str, asyncio.Task] = {}
@@ -164,15 +166,33 @@ class DroneMover():
             # await drone.action.disarm()
             raise
 
-        # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
-        logging.debug("Taking off to %sm...", self.cruise_altitude)
-        await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
-        await asyncio.sleep(5) #self.cruise_altitude / 2) # 2m/s climb rate approx
+        # # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
+        # logging.debug("Taking off to %sm...", self.cruise_altitude)
+        # await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
+        # await asyncio.sleep(5) #self.cruise_altitude / 2) # 2m/s climb rate approx
 
         self.offboard = drone.offboard
-        logging.debug("took off")
+        # logging.debug("took off")
+        # await self.standstill()
+        # await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, 0.0, 0.0))
+        # await asyncio.sleep(1)
+        await self.idle()
+        # await self.move_to_target_zenith_async(0, 0, IDLE_THRUST)
+        # await asyncio.sleep(0.5)
+        # await self.move_to_target_zenith_async(0, 0, 0.00)
+        # await asyncio.sleep(0.5)
+        # await self.move_to_target_zenith_async(0, 0, 0.05)
+        await asyncio.sleep(0.5)
+        # await self.standstill()
+        logging.debug("offboard mode: %s", await self.offboard.is_active())
 
         await self._ensure_telemetry_cache()
+
+
+        # await self.move_to_target_zenith_async(0, -30, thrust=0.5)
+        # await asyncio.sleep(1)
+        # await self.standstill()
+        # await asyncio.sleep(1)
 
         # # NOTE(vnemkov): not required, just visual indicator for the pilot
         # THRUST_VALUE = 0.1
@@ -317,8 +337,6 @@ class DroneMover():
 
     async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0) -> None:
         # Keep commanded tilt within a safe envelope to avoid toppling.
-
-
         def _clamp(angle: float) -> float:
             return max(-SAFE_TILT_DEG, min(SAFE_TILT_DEG, angle))
 
@@ -335,16 +353,28 @@ class DroneMover():
         )
 
 
-    async def move_relative_async(self, dx, dy) -> None:
-        print("move_relative_async")
-        await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
-        await asyncio.sleep(0.1)
-        logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
+    # async def move_relative_async(self, dx, dy) -> None:
+    #     print("move_relative_async")
+    #     await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
+    #     await asyncio.sleep(0.1)
+    #     logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
 
 
     async def standstill(self) -> None:
-        print("move_relative_async")
+        print("standstill")
         await self.drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
+
+
+    async def idle(self):
+        for i in range(0, 3):
+            await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
+            await asyncio.sleep(0.2)
+            await self.move_to_target_zenith_async(0, 0, IDLE_THRUST)
+            await asyncio.sleep(0.05)
+            await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
+
+        await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
+
 
     async def goto_position(self, x, y) -> None:
         await self.drone.offboard.set_position_ned(PositionNedYaw(x, y, -1 * self.cruise_altitude, 0))
