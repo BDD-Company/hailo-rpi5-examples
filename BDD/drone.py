@@ -79,14 +79,6 @@ class DroneMover():
         self._telemetry_ready : dict[str, asyncio.Event] = {}
         self._telemetry_latest : dict[str, object] = {}
 
-        # self.telemetry_data = {}
-        # self.telemetry_thread = None
-
-        # asyncio.run(self.__startup_sequence(drone_connection_string))
-
-        # Just to kick off telemetry collection
-        # self.status()
-
 
     def __del__(self):
         async def __await_tasks():
@@ -170,51 +162,12 @@ class DroneMover():
             # await drone.action.disarm()
             raise
 
-        # # await asyncio.sleep(0.1) # TODO(vnemkov): maybe remove?
-        # logging.debug("Taking off to %sm...", self.cruise_altitude)
-        # await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
-        # await asyncio.sleep(5) #self.cruise_altitude / 2) # 2m/s climb rate approx
-
         self.offboard = drone.offboard
-        # logging.debug("took off")
-        # await self.standstill()
-        # await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, 0.0, 0.0))
-        # await asyncio.sleep(1)
         await self.idle()
-        # await self.move_to_target_zenith_async(0, 0, IDLE_THRUST)
-        # await asyncio.sleep(0.5)
-        # await self.move_to_target_zenith_async(0, 0, 0.00)
-        # await asyncio.sleep(0.5)
-        # await self.move_to_target_zenith_async(0, 0, 0.05)
         await asyncio.sleep(0.5)
-        # await self.standstill()
         logging.debug("offboard mode: %s", await self.offboard.is_active())
 
         await self._ensure_telemetry_cache()
-
-
-        # await self.move_to_target_zenith_async(0, -30, thrust=0.5)
-        # await asyncio.sleep(1)
-        # await self.standstill()
-        # await asyncio.sleep(1)
-
-        # # NOTE(vnemkov): not required, just visual indicator for the pilot
-        # THRUST_VALUE = 0.1
-        # logging.debug("Little silly dance with thrust value: %s", THRUST_VALUE)
-        # await self.drone.offboard.set_attitude_rate(AttitudeRate(0, 0, yaw_deg_s=90, thrust_value=THRUST_VALUE))
-        # await asyncio.sleep(0.5)
-        # await self.drone.offboard.set_attitude_rate(AttitudeRate(0, 0, yaw_deg_s=-90, thrust_value=THRUST_VALUE))
-        # await asyncio.sleep(1)
-        # await self.drone.offboard.set_attitude_rate(AttitudeRate(0, 0, 0, thrust_value=THRUST_VALUE))
-        # await asyncio.sleep(0.5)
-        # await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, -1 * self.cruise_altitude, 0.0))
-
-        # # NOTE(vnemkov): not required, just visual indicator for the pilot
-        # logging.debug("Just a little dance")
-        # self.move_relative(-90, 0)
-        # await asyncio.sleep(1)
-        # self.move_relative(90, 0)
-        # await asyncio.sleep(1)
 
         return
 

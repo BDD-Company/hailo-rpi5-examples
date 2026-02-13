@@ -442,3 +442,109 @@ def DEBUG_dump(prefix, obj):
 
 #
 # =============================================================================
+
+
+def _safe_repr(value, max_length: int = 160) -> str:
+    text = repr(value)
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3] + "..."
+
+
+class _DebugCallProxy:
+    """
+    Transparent proxy that records the last invoked method call and forwards
+    all operations to the wrapped object.
+    """
+
+    def __init__(self, wrapped, object_name: str, history_max_size = 3):
+        object.__setattr__(self, "_wrapped", wrapped)
+        object.__setattr__(self, "_object_name", object_name)
+        object.__setattr__(self, "_last_command", "")
+        object.__setattr__(self, "_command_history", deque(maxlen = history_max_size))
+
+    def _format_call(self, method_name: str, callable_obj, args, kwargs) -> str:
+        try:
+            signature = inspect.signature(callable_obj)
+            bound = signature.bind_partial(*args, **kwargs)
+            params = [f"{name}={_safe_repr(value)}" for name, value in bound.arguments.items()]
+        except Exception:
+            positional = [f"arg{i + 1}={_safe_repr(value)}" for i, value in enumerate(args)]
+            keyword = [f"{name}={_safe_repr(value)}" for name, value in kwargs.items()]
+            params = positional + keyword
+
+        return f"{self._object_name}.{method_name}({', '.join(params)})"
+
+    def _record_call(self, method_name: str, callable_obj, args, kwargs):
+        command = self._format_call(method_name, callable_obj, args, kwargs)
+        object.__setattr__(self, "_last_command", command)
+        self._command_history.append(command)
+
+    def last_command(self) -> str:
+        return self._last_command
+
+    def command_history(self) -> list[str]:
+        return list(self._command_history)
+
+    def clear_command_history(self) -> None:
+        self._command_history.clear()
+        object.__setattr__(self, "_last_command", "")
+
+    def unwrap(self):
+        return self._wrapped
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._wrapped, name)
+        if not callable(attr):
+            return attr
+
+        method_name = getattr(attr, "__name__", name)
+
+        if inspect.iscoroutinefunction(attr):
+            @wraps(attr)
+            async def async_wrapper(*args, **kwargs):
+                self._record_call(method_name, attr, args, kwargs)
+                return await attr(*args, **kwargs)
+
+            return async_wrapper
+
+        @wraps(attr)
+        def sync_wrapper(*args, **kwargs):
+            self._record_call(method_name, attr, args, kwargs)
+            return attr(*args, **kwargs)
+
+        return sync_wrapper
+
+    def __setattr__(self, name, value):
+        if name.startswith("_") or hasattr(type(self), name):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._wrapped, name, value)
+
+    def __delattr__(self, name):
+        if name.startswith("_") or hasattr(type(self), name):
+            object.__delattr__(self, name)
+        else:
+            delattr(self._wrapped, name)
+
+    def __dir__(self):
+        return sorted(set(dir(self._wrapped) + list(type(self).__dict__.keys())))
+
+    def __repr__(self):
+        return f"{type(self).__name__}(wrapped={self._wrapped!r}, object_name={self._object_name!r})"
+
+
+def debug_collect_call_info(obj, object_name: str | None = None, history_max_size = 0):
+    """
+    Wrap any object so method calls are logged as strings like:
+    `drone.move_to_target_zenith_async(roll_degree=1.0, pitch_degree=2.0, thrust=0.4)`
+    """
+    if isinstance(obj, _DebugCallProxy):
+        return obj
+
+    if object_name is None:
+        object_name = type(obj).__name__
+        if "drone" in object_name.lower():
+            object_name = "drone"
+
+    return _DebugCallProxy(obj, object_name=object_name, history_max_size = history_max_size)

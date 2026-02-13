@@ -235,6 +235,7 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         add_line('angular_velocity_body', odo_dict)
         add_line('attitude_euler        ', debug_info)
         add_line('mode', debug_info)
+        add_line('action', debug_info)
 
 
         for line_no, line in enumerate(lines):
