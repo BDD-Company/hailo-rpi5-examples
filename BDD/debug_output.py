@@ -115,21 +115,24 @@ class FormatPrinter(pprint.PrettyPrinter):
         return super().format(object, context, maxlevels, level)
 
 # ceanup_json_re= re.compile(r'\s*[{}],?|"')
-def telemetry_as_text(frame_id, telemetry_dict, frame_metadata):
+def make_debug_info_dict(frame_id, telemetry_dict, frame_metadata):
+    result = dict(**telemetry_dict)
     # remove 'covariance_matrix' which is too verbose
-    telemetry_dict = filterdict(telemetry_dict, lambda k, v :  k != 'covariance_matrix')
+    result = filterdict(result, lambda k, v :  k != 'covariance_matrix')
     # remove keys with empty values entirely
-    telemetry_dict = filterdict(telemetry_dict, lambda k, v :  not (hasattr(v, '__len__') and len(v) == 0))
+    result = filterdict(result, lambda k, v :  not (hasattr(v, '__len__') and len(v) == 0))
     # remove various timestamps
-    telemetry_dict = filterdict(telemetry_dict, lambda k, v :  not (isinstance(k, str) and 'time' in k))
+    result = filterdict(result, lambda k, v :  not (isinstance(k, str) and 'time' in k))
+    result['frame'] = frame_id
 
-    # convert to pretty-ish multi-line text
-    telemetry_str = FormatPrinter({float: "%.2f"}, indent=1, sort_dicts=True).pformat(telemetry_dict)
-    telemetry_str = f"frame: {frame_id}\n" \
-        f"time: {frame_metadata.capture_timestamp_ns} detection +{(frame_metadata.detection_end_timestamp_ns - frame_metadata.detection_start_timestamp_ns) / 1000000} ms\n" \
-        f"{telemetry_str}"
+    detection_delay = (frame_metadata.detection_end_timestamp_ns - frame_metadata.detection_start_timestamp_ns) / 1000000
+    result['time'] = {
+        'captured at': frame_metadata.capture_timestamp_ns,
+        'detection delay': detection_delay
+    }
+    result['state'] = telemetry_dict.get('landed_state', '')
 
-    return telemetry_str
+    return result
 
 
 def draw_detection(frame, detection : Detection, color, line_thickness = 1):
@@ -167,7 +170,6 @@ def draw_detection(frame, detection : Detection, color, line_thickness = 1):
     #         bg_color = shadow_color(color),
     #         line_width = line_thickness
     #     )
-
 
 def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     # output = {
@@ -209,8 +211,33 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     frame_center = frame_size / 2
 
     if telemetry is not None:
-        telemetry_text = telemetry_as_text(detections.frame_id, telemetry, detections.meta)
-        for line_no, line in enumerate(telemetry_text.splitlines()):
+        debug_info = make_debug_info_dict(detections.frame_id, telemetry, detections.meta)
+
+        lines = []
+        printer = FormatPrinter({float: "%.2f"}, indent=0, sort_dicts=True, compact=True)
+        def add_line(key : str, dict_with_values, default=''):
+            value = dict_with_values.get(key.strip(), default)
+            value_str : str = printer.pformat(value)
+            value_str = value_str.replace(":", "=")
+            value_str = value_str.replace("'", "")
+            value_str = value_str.replace("{", "")
+            value_str = value_str.replace("}", "")
+            value_str = value_str.replace("\n", "")
+
+            lines.append(f'{key}: {value_str}')
+
+        odo_dict = debug_info.get("odometry", {})
+        add_line('frame', debug_info)
+        add_line('time  ',  debug_info)
+        add_line('state ', debug_info)
+        add_line('position_body', odo_dict)
+        add_line('velocity_body ', odo_dict)
+        add_line('angular_velocity_body', odo_dict)
+        add_line('attitude_euler        ', debug_info)
+        add_line('mode', debug_info)
+
+
+        for line_no, line in enumerate(lines):
             font_scale = 0.4
             draw_text(frame, line, XY(0, 20 + 40 * line_no * font_scale), font_scale=font_scale, color=FRAME_METADATA_COLOR, bg_color=FRAME_METADATA_COLOR_BG, line_width=1)
 
