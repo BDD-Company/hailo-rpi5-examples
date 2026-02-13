@@ -364,11 +364,12 @@ def log_execution_time(logger=logging.debug, threshold = datetime.timedelta(micr
 def configure_logging(level=logging.NOTSET, process_prefix=""):
     class _ExcludeGrpcCallInitFilter(logging.Filter):
         def filter(self, record):
-            return not (
-                record.filename == "_call.py"
-                and record.lineno == 562
-                and record.funcName == "__init__"
-            )
+            return not (record.module == "_call")
+            # return not (
+            #     record.filename == "_call.py"
+            #     and record.lineno == 562
+            #     and record.funcName == "__init__"
+            # )
 
     process_prefix = f"{process_prefix}-" if process_prefix else ""
     logging.basicConfig(level=level,
