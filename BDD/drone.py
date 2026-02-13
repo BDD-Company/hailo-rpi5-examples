@@ -113,7 +113,7 @@ class DroneMover():
         asyncio.run(__shutdown_async())
 
 
-    async def startup_sequence(self, arm_attempts = 100):
+    async def startup_sequence(self, arm_attempts = 100, force_arm=False):
         logging.info("Connecting to drone... %s", self.drone_connection_string)
         await self.drone.connect(system_address = self.drone_connection_string)
         arm_attempts = max(3, arm_attempts)
@@ -137,7 +137,11 @@ class DroneMover():
             arming_exception = None
             for i in range(arm_attempts):
                 try:
-                    await drone.action.arm()
+                    if force_arm:
+                        await drone.action.arm_force()
+                    else:
+                        await drone.action.arm()
+
                     arming_exception = None
                     break
                 except Exception as e:
