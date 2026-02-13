@@ -214,6 +214,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
     logger.debug("starting up drone...")
     # TODO(nemkov): remove in the field
+    global DEBUG
     if DEBUG:
         await drone.startup_sequence(1, force_arm=True)
     else:
@@ -250,6 +251,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             except Empty:
                 # No detections, not even frame with ID and image
+                logger.warning("No frames, no detections, input queue empty?")
                 continue
 
             telemetry_dict = await drone.get_telemetry_dict()
@@ -258,10 +260,6 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             detections, frame = detections_obj.detections, detections_obj.frame
             detection = None
 
-            # TODO just assign current_attitude ? not sure if cached_attitude can be None at this point, since we've already fetched a value previously
-            # cached_attitude = await drone.get_cached_attitude(wait_for_first=False)
-            # if cached_attitude is not None:
-            #     current_attitude = cached_attitude
             current_attitude = await drone.get_cached_attitude(wait_for_first=False)
             # so telemetry action doesn't get into the logs
             drone.clear_command_history()
@@ -328,49 +326,15 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     moving = False
                     debug_info["mode"] = "hower"
                 else:
+                    debug_info["mode"] = "idle"
                     if detections_obj.frame_id % 30 == 0:
-                        logger.debug("idling...")
                         moving = False
-                        debug_info["mode"] = "idle"
                         await drone.idle()
 
-                last_command = drone.last_command() or '<<== NO ==>>'
-                debug_info["action"] = last_command
-                mode = debug_info.get('mode', '')
-                if last_command:
-                    logger.warning("MODE: %s, ACTION: %s", mode, last_command)
-
-                # forward_speed = 0
-                # if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
-                #     forward_speed = 5
-                #     logger.debug("drone is in front of us: moving towards it with speed: %s m/s", forward_speed)
-
-                # target_seen_at_pos = get_position_from_telemetry(telemetry_dict)
-                # if target_seen_at_pos is not None:
-                #     logger.debug("Seen target while at pos %s", target_seen_at_pos)
-
-                # move_command = MoveCommand(
-                #     angle_to_target,
-                #     forward_speed
-                # )
-
-                # logger.debug("move %s", move_command)
-                # await drone.execute_move_command(move_command)
-                # logger.debug("move command sent %s", move_command)
-                # moving = True
-
-            # else:
-            #     if moving:
-            #         logger.debug("No viable detections, stoppig")
-
-            #     # await drone.move_xy(XY(),  current_attitude.yaw_deg)
-            #     if moving or is_drone_moving(telemetry_dict):
-            #         await drone.standstill()
-
-            #     if target_seen_at_pos:
-            #         await drone.goto_position(target_seen_at_pos.x, target_seen_at_pos.y)
-
-            #     moving = False
+            last_command = drone.last_command() or '<<== NO ==>>'
+            debug_info["action"] = last_command
+            mode = debug_info.get('mode', '')
+            logger.warning("MODE: %s, ACTION: %s", mode, last_command)
 
             # -1 means that there was no frame and no detections
             if output_queue is not None:
@@ -406,10 +370,6 @@ class App(GStreamerDetectionApp):
         '''
 
 def main():
-    if "--DEBUG" in sys.argv:
-        DEBUG=True
-        print("Will run in DEBUG mode, behaviour might differ from production")
-
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
     env_path_str = str(env_file)
@@ -420,6 +380,17 @@ def main():
     # shushing verbose loggers
     logging.getLogger("picamera2").setLevel(logging.WARNING)
     logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
+
+    global DEBUG
+    if "--DEBUG" in sys.argv:
+        DEBUG=True
+
+    if DEBUG:
+        logger.error('')
+        logger.error("!!! ============================================================== !!!")
+        logger.error("!!! Will run in DEBUG mode, behaviour might differ from production !!!")
+        logger.error("!!! ============================================================== !!!")
+        logger.error('')
 
     detections_queue = OverwriteQueue(maxsize=2)
     output_queue = OverwriteQueue(maxsize=20)
