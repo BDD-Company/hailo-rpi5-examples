@@ -180,9 +180,6 @@ def drone_controlling_tread(*args, **kwargs):
     finally:
         loop.close()
 
-MIN_CONFIDENCE = 0.3
-MOVE_CONFIDENCE = 0.4
-
 def get_position_from_telemetry(telemetry_dict) -> XY:
     pos = telemetry_dict.get('odometry', {}).get('position_body', None)
     if pos:
@@ -198,6 +195,10 @@ def is_drone_moving(telemetry_dict):
             and abs(velocity["y_m_s"]) > 0.01
 
 DEBUG = False
+MIN_CONFIDENCE = 0.3
+MOVE_CONFIDENCE = 0.4
+MAX_THRUST = 0.5
+MIN_THRUST = 0.3
 
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None):
     from math import radians
@@ -222,7 +223,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
     logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
 
-    logger.debug("!!! getting telemetry")
+    # logger.debug("!!! getting telemetry")
     telemetry_dict = await drone.get_telemetry_dict(True)
     current_attitude : EulerAngle = await drone.get_cached_attitude()
     logger.debug("GOT telemetry: %s and attitude: %s", telemetry_dict, current_attitude)
@@ -269,7 +270,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             detection = detections[0] if len(detections) > 0 else Detection()
             if detection.confidence >= MIN_CONFIDENCE:
-                logger.debug("!!! Detection: %s, current atitude: %s", detection, current_attitude)
+                logger.debug("!!! Detection: %s", detection)
 
                 drone_attitude = telemetry_dict['attitude_euler']
                 drone_pitch = drone_attitude['pitch_deg']
@@ -278,19 +279,47 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 distance_to_center = detection.bbox.center.distance_to(center)
                 logger.debug("distance to center: %s", distance_to_center)
-                horizontal_distance = detection.bbox.center.x - center.x
 
                 diff_xy = center - detection.bbox.center
                 logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
                 angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
                 logger.debug("angle to target: %s", angle_to_target)
-                angle_to_target /= 2
-                angle_to_target += XY(drone_roll, drone_pitch)
+
+                mode = "follow"
+
+                # Adjusting how much drone can pitch or roll based on distance to target
+                if detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
+                    # Drone is close
+                    max_angle_divisor = 2
+                    mode += " NEAR"
+                elif detection.bbox.width > 0.2 or detection.bbox.height > 0.2:
+                    # Drone is mid-range
+                    max_angle_divisor = 1.5
+                    mode += " MID "
+                else:
+                    # Drone is far
+                    max_angle_divisor = 1
+                    mode += " FAR "
+
+                angle_to_target /= max_angle_divisor
+                # angle_to_target += XY(drone_roll, drone_pitch)
                 logger.debug("angle to target adjusted: %s", angle_to_target)
                 seen_target = True
 
-                await drone.move_to_target_zenith_async(-angle_to_target.x, angle_to_target.y, thrust=0.4)
-                debug_info["mode"] = "follow"
+                thrust = MIN_THRUST
+
+                if distance_to_center < 0.1:
+                    thrust= MAX_THRUST
+                    mode += " GREEN"
+                elif distance_to_center < 0.2:
+                    thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
+                    mode += " YELLOW"
+                else:
+                    thrust= MIN_THRUST
+                    mode += " RED"
+
+                await drone.move_to_target_zenith_async(-angle_to_target.x, angle_to_target.y, thrust)
+                debug_info["mode"] = mode
 
                 moving = True
             else:
@@ -305,10 +334,11 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                         debug_info["mode"] = "idle"
                         await drone.idle()
 
-                last_command = drone.last_command()
+                last_command = drone.last_command() or '<<== NO ==>>'
                 debug_info["action"] = last_command
+                mode = debug_info.get('mode', '')
                 if last_command:
-                    logger.warning("ACTION: %s", last_command)
+                    logger.warning("MODE: %s, ACTION: %s", mode, last_command)
 
                 # forward_speed = 0
                 # if detection.confidence >= MOVE_CONFIDENCE and horizontal_distance < distance_r:
