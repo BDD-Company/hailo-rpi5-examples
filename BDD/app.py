@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import math
 
 import os
+import sys
 import numpy as np
 import json
 import datetime
@@ -31,7 +32,7 @@ from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RtspStreamerSink, RecorderSink
 from video_sink_multi import MultiSink
-# from opencv_show_image_sink import OpenCVShowImageSink
+from opencv_show_image_sink import OpenCVShowImageSink
 
 
 import logging
@@ -56,6 +57,16 @@ sensor_timestamp_caps = Gst.Caps.from_string("timestamp/x-picamera2-sensor")
 unix_timestamp_caps = Gst.Caps.from_string("timestamp/x-unix")
 frame_id_caps = Gst.Caps.from_string("frame-id/x-picamera2")
 
+
+def normalized_timestamp(ts):
+    if ts is not None:
+        if isinstance(ts, Gst.ReferenceTimestampMeta):
+            return ts.timestamp
+        else:
+            return int(ts)
+    else:
+        return 0
+
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_callback_class):
     # Get the GstBuffer from the probe info
@@ -71,14 +82,8 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
 
-    # sensor_timestamp_ns = None
-    sensor_timestamp_ns  = buffer.get_reference_timestamp_meta(sensor_timestamp_caps)
-    detection_start_timestamp_ns  = buffer.get_reference_timestamp_meta(unix_timestamp_caps)
-    if detection_start_timestamp_ns is not None:
-        detection_start_timestamp_ns = detection_start_timestamp_ns.timestamp
-    else:
-        detection_start_timestamp_ns = 0
-
+    sensor_timestamp_ns  = normalized_timestamp(buffer.get_reference_timestamp_meta(sensor_timestamp_caps))
+    detection_start_timestamp_ns  = normalized_timestamp(buffer.get_reference_timestamp_meta(unix_timestamp_caps))
     detection_end_timestamp_ns  = time.monotonic_ns()
 
     frame_id = buffer.get_reference_timestamp_meta(frame_id_caps)
@@ -192,6 +197,7 @@ def is_drone_moving(telemetry_dict):
             and abs(velocity["y_m_s"]) > 0.01 \
             and abs(velocity["y_m_s"]) > 0.01
 
+DEBUG = False
 
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None):
     from math import radians
@@ -206,7 +212,12 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     drone = DroneMover(drone_connection_string, drone_config)
 
     logger.debug("starting up drone...")
-    await drone.startup_sequence(100)
+    # TODO(nemkov): remove in the field
+    if DEBUG:
+        await drone.startup_sequence(1, force_arm=True)
+    else:
+        await drone.startup_sequence(100)
+
     logger.debug("drone started")
 
     logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
@@ -370,9 +381,11 @@ class App(GStreamerDetectionApp):
             ! splitmuxsink name=smx max-size-time={video_output_chunk_length_ns} muxer-factory=mp4mux async-finalize=true location="{self.video_output_directory}/RAW_{record_start_time_str}_%05d.mp4"
         '''
 
-
-
 def main():
+    if "--DEBUG" in sys.argv:
+        DEBUG=True
+        print("Will run in DEBUG mode, behaviour might differ from production")
+
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
     env_path_str = str(env_file)
@@ -400,7 +413,7 @@ def main():
 
     sink = MultiSink([
         # RtspStreamerSink(30, 8554),
-        RecorderSink(30, "recordings", segment_seconds=5),
+        RecorderSink(30, "recordings", segment_seconds=5, filename_base="debug"),
         # OpenCVShowImageSink(window_title='DEBUG IMAGE')
     ])
 
