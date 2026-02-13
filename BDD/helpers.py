@@ -3,11 +3,13 @@
 from dataclasses import dataclass, field
 from collections import deque
 from functools import wraps
-import logging
+import inspect
 import datetime
+import math
 
 import numpy as np
 
+import logging
 
 # Milliseconds = int
 # def get_current_time_ms() -> Milliseconds:
@@ -113,6 +115,9 @@ class XY:
 
     def distance_squared_to(self, other: 'XY') -> float:
         return (self.x - other.x)**2 + (self.y - other.y)**2
+
+    def distance_to(self, other: 'XY') -> float:
+        return math.sqrt(self.distance_squared_to(other))
 
     def to_intXY(self) -> 'XY':
         return self.__class__(round(self.x), round(self.y))
@@ -357,10 +362,22 @@ def log_execution_time(logger=logging.debug, threshold = datetime.timedelta(micr
 
 
 def configure_logging(level=logging.NOTSET, process_prefix=""):
+    class _ExcludeGrpcCallInitFilter(logging.Filter):
+        def filter(self, record):
+            return not (
+                record.filename == "_call.py"
+                and record.lineno == 562
+                and record.funcName == "__init__"
+            )
+
     process_prefix = f"{process_prefix}-" if process_prefix else ""
     logging.basicConfig(level=level,
         format="%(asctime)s.%(msecs)03d [" + process_prefix + "%(threadName)s] @ { %(filename)s:%(lineno)s : %(funcName)20s() } <%(levelname)s> :\t%(message)s",
         datefmt="%Y-%m-%d %H:%M:%S")
+
+    exclude_grpc_call_init_filter = _ExcludeGrpcCallInitFilter()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(exclude_grpc_call_init_filter)
 
     # based on https://stackoverflow.com/a/7995762
     logging.addLevelName(logging.INFO, "\033[1;34m%s\033[1;0m" % logging.getLevelName(logging.INFO))
