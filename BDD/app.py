@@ -276,7 +276,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             # so telemetry action doesn't get into the logs
             drone.clear_command_history()
 
-            detections.sort(reverse=True, key = lambda d : d.confidence)
+            # track_id latest detections
+            detections.sort(reverse=True, key = lambda d : d.track_id)
 
             detection = detections[0] if len(detections) > 0 else Detection()
             if detection.confidence >= MIN_CONFIDENCE:
