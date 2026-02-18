@@ -331,7 +331,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     thrust= MIN_THRUST
                     mode += " RED"
 
-                await drone.move_to_target_zenith_async(-angle_to_target.x, angle_to_target.y, thrust)
+                await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust)
                 debug_info["mode"] = mode
 
                 moving = True
