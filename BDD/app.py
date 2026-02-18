@@ -267,7 +267,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     logger.info("!!! IN AIR: %s", takeoff_time_ns)
             else:
                 flight_time_ns = time.monotonic_ns() - takeoff_time_ns
-                logger.info("!!! flight time: %ss", flight_time_ns / 1000_000_000)
+                # logger.info("!!! flight time: %ss", flight_time_ns / 1000_000_000)
 
             detections, frame = detections_obj.detections, detections_obj.frame
             detection = None
@@ -343,7 +343,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 if seen_target:
                     await drone.standstill()
                     moving = False
-                    debug_info["mode"] = "hower"
+                    debug_info["mode"] = "hover"
                 else:
                     debug_info["mode"] = "idle"
                     if detections_obj.frame_id % 30 == 0:
