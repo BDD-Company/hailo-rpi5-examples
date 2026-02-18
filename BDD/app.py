@@ -298,34 +298,33 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 mode = "follow"
 
-                flight_time_s = flight_time_ns / 1000000000
-                max_angle_divisor = 3
+                flight_altitude = -1 * telemetry_dict.get('odometry', {}).get('position_body', {}).get("z_m", 0)
+                max_angle_divisor = 4
                 # # Adjusting how much drone can pitch or roll based on distance to target
-                # if flight_time_s > 0.4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
-                #     # Drone is close
-                #     max_angle_divisor = 1
-                #     mode += " FLIGHT  "
-                # elif flight_time_s > 0.3: #detection.bbox.width > 0.15 or detection.bbox.height > 0.15:
-                #     # Drone is mid-range
-                #     max_angle_divisor = 2
-                #     mode += " SPEEDUP "
-                # else:
-                #     # Drone is far
-                #     max_angle_divisor = 4
-                #     mode += " TAKEOFF "
+                if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
+                    # Drone is close
+                    max_angle_divisor = 1
+                    mode += " FLIGHT  "
+                elif flight_altitude > 3: #detection.bbox.width > 0.15 or detection.bbox.height > 0.15:
+                    # Drone is mid-range
+                    max_angle_divisor = 2
+                    mode += " SPEEDUP "
+                else:
+                    # Drone is far
+                    max_angle_divisor = 4
+                    mode += " TAKEOFF "
+
 
                 logger.warning('!!!! max_angle_divisor: %s', max_angle_divisor)
-                angle_to_target /= max_angle_divisor
-                # angle_to_target += XY(drone_roll, drone_pitch)
-                logger.debug("angle to target adjusted: %s", angle_to_target)
+                logger.debug("angle to target adjusted for mode: %s", angle_to_target)
+
                 seen_target = True
 
                 thrust = MIN_THRUST
-
-                if distance_to_center < 0.15:
+                if distance_to_center < 0.2:
                     thrust= MAX_THRUST
                     mode += " GREEN"
-                elif distance_to_center < 0.3:
+                elif distance_to_center < 0.4:
                     thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
                     mode += " YELLOW"
                 else:
