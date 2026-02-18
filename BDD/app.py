@@ -198,7 +198,7 @@ DEBUG = False
 MIN_CONFIDENCE = 0.3
 MOVE_CONFIDENCE = 0.4
 MAX_THRUST = 0.5
-MIN_THRUST = 0.3
+MIN_THRUST = 0.4
 
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None):
     from math import radians
@@ -209,7 +209,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     frame_angular_size = XY(120, 90)
     seen_target = False
 
-    from drone import DroneMover
+    from drone import DroneMover, is_in_air
     drone = DroneMover(drone_connection_string, drone_config)
 
     logger.debug("starting up drone...")
@@ -233,6 +233,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     moving = False
     target_seen_at_pos = XY(0,0)
     drone = debug_collect_call_info(drone, history_max_size=3)
+    flight_time_ns = 0
+    takeoff_time_ns = None
     while True:
         try:
             detections_obj = Detections(-1)
@@ -255,7 +257,17 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 continue
 
             telemetry_dict = await drone.get_telemetry_dict()
+            # logger.debug("telemetry: %s", telemetry_dict)
             debug_info = telemetry_dict
+
+            ## Check if take off
+            if takeoff_time_ns == None:
+                if moving:
+                    takeoff_time_ns = time.monotonic_ns()
+                    logger.info("!!! IN AIR: %s", takeoff_time_ns)
+            else:
+                flight_time_ns = time.monotonic_ns() - takeoff_time_ns
+                logger.info("!!! flight time: %ss", flight_time_ns / 1000_000_000)
 
             detections, frame = detections_obj.detections, detections_obj.frame
             detection = None
@@ -271,8 +283,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 logger.debug("!!! Detection: %s", detection)
 
                 drone_attitude = telemetry_dict['attitude_euler']
-                drone_pitch = drone_attitude['pitch_deg']
-                drone_roll = drone_attitude['roll_deg']
+                # drone_pitch = drone_attitude['pitch_deg']
+                # drone_roll = drone_attitude['roll_deg']
                 logger.debug("drone attitude: %s", drone_attitude)
 
                 distance_to_center = detection.bbox.center.distance_to(center)
@@ -285,20 +297,23 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 mode = "follow"
 
-                # Adjusting how much drone can pitch or roll based on distance to target
-                if detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
-                    # Drone is close
-                    max_angle_divisor = 2
-                    mode += " NEAR"
-                elif detection.bbox.width > 0.2 or detection.bbox.height > 0.2:
-                    # Drone is mid-range
-                    max_angle_divisor = 1.5
-                    mode += " MID "
-                else:
-                    # Drone is far
-                    max_angle_divisor = 1
-                    mode += " FAR "
+                flight_time_s = flight_time_ns / 1000000000
+                max_angle_divisor = 3
+                # # Adjusting how much drone can pitch or roll based on distance to target
+                # if flight_time_s > 0.4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
+                #     # Drone is close
+                #     max_angle_divisor = 1
+                #     mode += " FLIGHT  "
+                # elif flight_time_s > 0.3: #detection.bbox.width > 0.15 or detection.bbox.height > 0.15:
+                #     # Drone is mid-range
+                #     max_angle_divisor = 2
+                #     mode += " SPEEDUP "
+                # else:
+                #     # Drone is far
+                #     max_angle_divisor = 4
+                #     mode += " TAKEOFF "
 
+                logger.warning('!!!! max_angle_divisor: %s', max_angle_divisor)
                 angle_to_target /= max_angle_divisor
                 # angle_to_target += XY(drone_roll, drone_pitch)
                 logger.debug("angle to target adjusted: %s", angle_to_target)
@@ -306,10 +321,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 thrust = MIN_THRUST
 
-                if distance_to_center < 0.1:
+                if distance_to_center < 0.15:
                     thrust= MAX_THRUST
                     mode += " GREEN"
-                elif distance_to_center < 0.2:
+                elif distance_to_center < 0.3:
                     thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
                     mode += " YELLOW"
                 else:
@@ -320,6 +335,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 debug_info["mode"] = mode
 
                 moving = True
+                if takeoff_time_ns == None:
+                    takeoff_time_ns = time.monotonic_ns()
+                    logger.info("!!! IN AIR since: %s", takeoff_time_ns)
+
             else:
                 if seen_target:
                     await drone.standstill()

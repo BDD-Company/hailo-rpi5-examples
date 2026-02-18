@@ -7,7 +7,7 @@ from enum import Enum
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate
 from mavsdk import System
-from mavsdk.telemetry import Telemetry, EulerAngle
+from mavsdk.telemetry import Telemetry, EulerAngle, LandedState
 
 from helpers import MoveCommand, dotdict, XY
 
@@ -18,6 +18,9 @@ logger = logging.Logger("BDD_drone")
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
 SAFE_TILT_DEG = 40
 IDLE_THRUST = 0.1
+
+def is_in_air(state : LandedState):
+    return state == LandedState.IN_AIR
 
 
 def mavsdk_msg_to_dict(msg):
@@ -318,7 +321,7 @@ class DroneMover():
 
 
     async def standstill(self) -> None:
-        print("standstill")
+        # print("standstill")
         await self.drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
 
 

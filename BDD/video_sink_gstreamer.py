@@ -232,7 +232,7 @@ class RecorderSink(interfaces.FrameSinkInterface):
         self._pipeline = None
         self._appsrc = None
         self._splitmux = None
-        self._pusher = _FrameQueuePusher(lambda: self._appsrc, drop_if_error=False, queue_size = max(1, int(self.fps * 2)))
+        self._pusher = _FrameQueuePusher(lambda: self._appsrc, drop_if_error=False, overwriting_queue=True)
 
     # public API
     def start(self, frame_size):
