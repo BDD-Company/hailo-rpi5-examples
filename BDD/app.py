@@ -418,6 +418,7 @@ def main():
     global DEBUG
     if "--DEBUG" in sys.argv:
         DEBUG=True
+        sys.argv.remove('--DEBUG')
 
     if DEBUG:
         logger.error('')
