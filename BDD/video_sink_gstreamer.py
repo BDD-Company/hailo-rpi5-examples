@@ -227,7 +227,7 @@ class RecorderSink(interfaces.FrameSinkInterface):
         self.filename_pattern = filename_pattern
 
         # test filename_pattern, allow to crash early
-        assert self._on_format_location(None, 0)
+        # assert self._on_format_location(None, 0)
 
         self._pipeline = None
         self._appsrc = None
@@ -239,24 +239,41 @@ class RecorderSink(interfaces.FrameSinkInterface):
         self.w, self.h = map(int, frame_size)
         # Build pipeline
         # NOTE: appsrc block=true to naturally backpressure if disk/encoder is slow
-        pattern_path = str(self.out_dir / "clip-%05d.mp4")  # initial; we override via format-location
+        pattern_path = str(self.out_dir / f"{self.filename_base}_%05d.mkv")
         launch = (
-            f'appsrc name=rec_src is-live=true block=true format=time do-timestamp=true '
-            f'caps=video/x-raw,format=RGB,width={self.w},height={self.h} '
-            f'! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast '
-            f'bitrate={self.bitrate} key-int-max={self.keyint} '
-            f'! h264parse config-interval=1 '
-            f'! splitmuxsink name=smx max-size-time={self.segment_ns} muxer-factory=mp4mux async-finalize=true '
-            f'location="{pattern_path}"'
+            f'''
+            appsrc
+                name=rec_src
+                is-live=true
+                block=true
+                format=time
+                do-timestamp=true
+                caps=video/x-raw,format=RGB,width={self.w},height={self.h}
+            ! videoconvert
+            ! x264enc
+                tune=zerolatency
+                speed-preset=ultrafast
+                bitrate={self.bitrate}
+                key-int-max={self.keyint}
+            ! h264parse
+                config-interval=1
+            ! splitmuxsink
+                name=smx
+                muxer-factory=matroskamux
+                muxer-properties="properties,streamable=true"
+                max-size-time={self.segment_ns}
+                async-finalize=true
+                location="{pattern_path}"
+            '''
         )
         self._pipeline = Gst.parse_launch(launch)
         self._appsrc = self._pipeline.get_by_name("rec_src")
         self._splitmux = self._pipeline.get_by_name("smx")
-        self._splitmux.connect("format-location", self._on_format_location)
+        # self._splitmux.connect("format-location", self._on_format_location)
 
         self._pipeline.set_state(Gst.State.PLAYING)
         self._pusher.start()
-        logger.info(f"[RecorderSink] Writing ~{self.segment_ns/1e9:.0f}s MP4 segments to {self.out_dir}")
+        logger.info(f"[RecorderSink] Writing ~{self.segment_ns/1e9:.0f}s MKV segments to {self.out_dir}")
 
     def process_frame(self, frame):
         _validate_frame(frame, self.w, self.h)
@@ -275,10 +292,10 @@ class RecorderSink(interfaces.FrameSinkInterface):
             self._pipeline.set_state(Gst.State.NULL)
 
     # internals
-    def _on_format_location(self, splitmux, fragment_id: int):
-        # Build timestamped filename with fragment counter
-        filename = datetime.datetime.now().strftime(self.filename_pattern) % (self.filename_base, fragment_id)
-        return str(self.out_dir / filename)
+    # def _on_format_location(self, splitmux, fragment_id: int):
+    #     # Build timestamped filename with fragment counter
+    #     filename = datetime.datetime.now().strftime(self.filename_pattern) % (self.filename_base, fragment_id)
+    #     return str(self.out_dir / filename)
 
 
 # ----------------------------- Example usage ---------------------------------

@@ -376,9 +376,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_file_basename=None):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
+        self.video_file_basename = video_file_basename
         super().__init__(app_callback, user_data, parser)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
@@ -386,11 +387,20 @@ class App(GStreamerDetectionApp):
 
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
         record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        video_file_name = Path(self.video_file_basename if self.video_file_basename else f"RAW_{record_start_time_str}.mkv")
+
+        # add "_%05d" so we get multiple files w/o overwriting anything
+        video_file_name = video_file_name.stem + "_%05d" + video_file_name.suffix
+
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000 * 1000 * 1000
         return f'''
             videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast \
             ! h264parse config-interval=1 \
-            ! splitmuxsink name=smx max-size-time={video_output_chunk_length_ns} muxer-factory=mp4mux async-finalize=true location="{self.video_output_directory}/RAW_{record_start_time_str}_%05d.mp4"
+            ! splitmuxsink \
+                muxer-factory=matroskamux \
+                muxer-properties="properties,streamable=true" \
+                max-size-time={video_output_chunk_length_ns} async-finalize=true \
+                location="{self.video_output_directory}/{video_file_name}"
         '''
 
 def main():
@@ -423,6 +433,8 @@ def main():
         'cruise_altitude' : 1,
     }
 
+    start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
     drone_thread = threading.Thread(
         target = drone_controlling_tread,
         args = ('udp://:14550', drone_config, detections_queue, output_queue),
@@ -432,7 +444,7 @@ def main():
 
     sink = MultiSink([
         # RtspStreamerSink(30, 8554),
-        RecorderSink(30, "recordings", segment_seconds=5, filename_base="debug"),
+        RecorderSink(30, "recordings", segment_seconds=5, filename_base=f"debug_{start_time_str}"),
         # OpenCVShowImageSink(window_title='DEBUG IMAGE')
     ])
 
@@ -445,7 +457,7 @@ def main():
 
     user_data = user_app_callback_class(detections_queue)
     user_data.use_frame = True
-    app = App(app_callback, user_data, video_output_chunk_length_s=10)
+    app = App(app_callback, user_data, video_output_chunk_length_s=10, video_file_basename=f"RAW_{start_time_str}")
 
     DEBUG = True
     if DEBUG:
