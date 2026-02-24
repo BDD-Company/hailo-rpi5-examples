@@ -314,7 +314,12 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     max_angle_divisor = 4
                     mode += " TAKEOFF "
 
+                if True: # move sideways more
+                    roll_pitch_adjust = XY(1.5, 1)
+                    angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
+                    logger.debug("angle to target adjusted: %s", angle_to_target)
 
+                angle_to_target /= max_angle_divisor
                 logger.warning('!!!! max_angle_divisor: %s', max_angle_divisor)
                 logger.debug("angle to target adjusted for mode: %s", angle_to_target)
 
@@ -331,7 +336,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     thrust= MIN_THRUST
                     mode += " RED"
 
-                await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust)
+                await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
                 debug_info["mode"] = mode
 
                 moving = True
