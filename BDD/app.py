@@ -27,7 +27,8 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
-from helpers import FrameMetadata, Rect, XY, configure_logging, Detection, Detections, MoveCommand, debug_collect_call_info
+from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
+
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RtspStreamerSink, RecorderSink
@@ -35,8 +36,15 @@ from video_sink_multi import MultiSink
 from opencv_show_image_sink import OpenCVShowImageSink
 
 
+# logging and debugging stuff
+from helpers import (
+    configure_logging,
+    debug_collect_call_info,
+    LoggerWithPrefix
+)
 import logging
 logger = logging.getLogger(__name__)
+global_logger = logger # a hack
 
 
 # -----------------------------------------------------------------------------------------------
@@ -203,6 +211,10 @@ MIN_THRUST = 0.4
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None):
     from math import radians
 
+    # will owerwrite logger here many times, make sure that rest of the systems are not affected
+    global global_logger
+    logger = global_logger
+
     center = XY(0.5, 0.5)
     distance_r = 0.1
     distance_r *= distance_r
@@ -211,7 +223,6 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
     from drone import DroneMover, is_in_air
     drone = DroneMover(drone_connection_string, drone_config)
-
     logger.debug("starting up drone...")
     # TODO(nemkov): remove in the field
     global DEBUG
@@ -235,6 +246,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     drone = debug_collect_call_info(drone, history_max_size=3)
     flight_time_ns = 0
     takeoff_time_ns = None
+
     while True:
         try:
             detections_obj = Detections(-1)
@@ -243,6 +255,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             forward_speed = 0
             move_command = MoveCommand()
 
+            logger = global_logger
             # logger.debug("!!! awaiting detection... ")
             try:
                 r : Detections = detections_queue.get(timeout = 0.1)
@@ -255,6 +268,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 # No detections, not even frame with ID and image
                 logger.warning("No frames, no detections, input queue empty?")
                 continue
+
+            logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
 
             telemetry_dict = await drone.get_telemetry_dict()
             # logger.debug("telemetry: %s", telemetry_dict)
@@ -358,7 +373,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             last_command = drone.last_command() or '<<== NO ==>>'
             debug_info["action"] = last_command
             mode = debug_info.get('mode', '')
-            logger.warning("MODE: %s, ACTION: %s", mode, last_command)
+            logger.info("MODE: %s, ACTION: %s", mode, last_command)
 
             # -1 means that there was no frame and no detections
             if output_queue is not None:

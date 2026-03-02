@@ -441,6 +441,20 @@ def full_classname(obj):
 def DEBUG_dump(prefix, obj):
     print(prefix, obj, full_classname(obj), dir(obj))
 
+
+# Source - https://stackoverflow.com/a/70397050
+# Posted by timfjord
+# Retrieved 2026-03-02, License - CC BY-SA 4.0
+class LoggerWithPrefix(logging.LoggerAdapter):
+    def __init__(self, logger: logging.Logger, prefix = '') -> None:
+        super().__init__(logger, None)
+        self.prefix = prefix
+
+    def process(self, msg, kwargs):
+        return f"{self.prefix} {msg}", kwargs
+
+
+
 #
 # =============================================================================
 
