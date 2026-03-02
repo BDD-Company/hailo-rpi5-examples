@@ -73,7 +73,9 @@ logger = logging.getLogger("GSTApp")
 def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
                     name='source', no_webcam_compression=False,
                     frame_rate=30, sync=True,
-                    video_format='RGB'):
+                    video_format='RGB',
+                    do_timestamp=False,
+                    force_framerate=None):
     """
     Creates a GStreamer pipeline string for the video source with a separate fps caps
     for frame rate control.
@@ -108,10 +110,19 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
                 f'videoflip name=videoflip video-direction=horiz ! '
             )
     elif source_type == 'rpi':
+        do_timestamp_clause = ''
+        if do_timestamp:
+            do_timestamp_clause=" do-timestamp=true format=time "
+
+        framere_clause=''
+        if force_framerate is not None:
+            framerate= int(force_framerate)
+            framere_clause=f',framerate={framerate}/1'
+
         source_element = (
-            f'appsrc name=app_source is-live=true leaky-type=downstream max-buffers=3 ! '
+            f'appsrc name=app_source is-live=true leaky-type=downstream max-buffers=3 {do_timestamp_clause} ! '
             # 'videoflip name=videoflip video-direction=horiz ! '
-            f'video/x-raw, format={video_format}, width={video_width}, height={video_height} ! '
+            f'video/x-raw, format={video_format}, width={video_width}, height={video_height} {framere_clause} ! '
         )
     elif source_type == 'libcamera':
         source_element = (
@@ -140,13 +151,12 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
         fps_caps = "video/x-raw"
 
     source_pipeline = (
-        f'{source_element} '
-        f'{QUEUE(name=f"{name}_scale_q")} ! '
-        f'videoscale name={name}_videoscale n-threads=2 ! '
-        f'{QUEUE(name=f"{name}_convert_q")} ! '
-        f'videoconvert n-threads=3 name={name}_convert qos=false ! '
-        f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, '
-        f'width={video_width}, height={video_height} '
+        f'{source_element.removesuffix("! ")} '
+        # f'{QUEUE(name=f"{name}_scale_q")} ! '
+        # f'videoscale name={name}_videoscale n-threads=2 ! '
+        # f'{QUEUE(name=f"{name}_convert_q")} ! '
+        # f'videoconvert n-threads=3 name={name}_convert qos=false ! '
+        # f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, width={video_width}, height={video_height} '
         # f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
     )
 
@@ -714,7 +724,7 @@ class GStreamerDetectionApp(GStreamerApp):
             config_json=self.labels_json,
             additional_params=self.thresholds_str)
         detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
-        tracker_pipeline = TRACKER_PIPELINE(class_id=1)
+        tracker_pipeline = TRACKER_PIPELINE(class_id=1, keep_past_metadata='false', qos='false')
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
         display_pipeline = self.get_output_pipeline_string(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
 
