@@ -326,7 +326,7 @@ class DroneMover():
 
 
     async def idle(self):
-        for i in range(0, 3):
+        for i in range(0, 0):
             await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
             await asyncio.sleep(0.2)
             await self.move_to_target_zenith_async(0, 0, IDLE_THRUST)
