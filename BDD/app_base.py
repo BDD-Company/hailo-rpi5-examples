@@ -17,22 +17,27 @@ import queue
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib, GObject
 
-
 from hailo_apps.hailo_app_python.core.common.installation_utils import detect_hailo_arch
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser, get_resource_path
 from hailo_apps.hailo_app_python.core.common.defines import DETECTION_APP_TITLE, DETECTION_PIPELINE, RESOURCES_MODELS_DIR_NAME, RESOURCES_SO_DIR_NAME, DETECTION_POSTPROCESS_SO_FILENAME, DETECTION_POSTPROCESS_FUNCTION
-from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import INFERENCE_PIPELINE, INFERENCE_PIPELINE_WRAPPER, TRACKER_PIPELINE, USER_CALLBACK_PIPELINE, DISPLAY_PIPELINE
+from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import DISPLAY_PIPELINE
 
-# for SOURCE_PIPELINE
-from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import QUEUE, get_camera_resulotion
+from pipelines import (
+    SOURCE_PIPELINE,
+    INFERENCE_PIPELINE,
+    INFERENCE_PIPELINE_WRAPPER,
+    TRACKER_PIPELINE,
+    USER_CALLBACK_PIPELINE
+)
 
 
 # Based on hailo_app_python/core/gstreamer/gstreamer_app.py
 
-# Absolute import for your local helper
+
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import (
     get_source_type,
 )
+
 
 # Absolute imports for your common utilities
 from hailo_apps.hailo_app_python.core.common.defines import (
@@ -70,97 +75,6 @@ import logging
 logger = logging.getLogger("GSTApp")
 
 
-def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
-                    name='source', no_webcam_compression=False,
-                    frame_rate=30, sync=True,
-                    video_format='RGB',
-                    do_timestamp=False,
-                    force_framerate=None):
-    """
-    Creates a GStreamer pipeline string for the video source with a separate fps caps
-    for frame rate control.
-
-    Args:
-        video_source (str): The path or device name of the video source.
-        video_width (int, optional): The width of the video. Defaults to 640.
-        video_height (int, optional): The height of the video. Defaults to 640.
-        video_format (str, optional): The video format. Defaults to 'RGB'.
-        name (str, optional): The prefix name for the pipeline elements. Defaults to 'source'.
-
-    Returns:
-        str: A string representing the GStreamer pipeline for the video source.
-    """
-    source_type = get_source_type(video_source)
-
-    if source_type == 'usb':
-        if no_webcam_compression:
-            # When using uncompressed format, only low resolution is supported
-            source_element = (
-                f'v4l2src device={video_source} name={name} ! '
-                f'video/x-raw, width=640, height=480 ! '
-                'videoflip name=videoflip video-direction=horiz ! '
-            )
-        else:
-            # Use compressed format for webcam
-            width, height = get_camera_resulotion(video_width, video_height)
-            source_element = (
-                f'v4l2src device={video_source} name={name} ! image/jpeg, framerate=30/1, width={width}, height={height} ! '
-                f'{QUEUE(name=f"{name}_queue_decode")} ! '
-                f'decodebin name={name}_decodebin ! '
-                f'videoflip name=videoflip video-direction=horiz ! '
-            )
-    elif source_type == 'rpi':
-        do_timestamp_clause = ''
-        if do_timestamp:
-            do_timestamp_clause=" do-timestamp=true format=time "
-
-        framere_clause=''
-        if force_framerate is not None:
-            framerate= int(force_framerate)
-            framere_clause=f',framerate={framerate}/1'
-
-        source_element = (
-            f'appsrc name=app_source is-live=true leaky-type=downstream max-buffers=3 {do_timestamp_clause} ! '
-            # 'videoflip name=videoflip video-direction=horiz ! '
-            f'video/x-raw, format={video_format}, width={video_width}, height={video_height} {framere_clause} ! '
-        )
-    elif source_type == 'libcamera':
-        source_element = (
-            f'libcamerasrc name={name} ! '
-            f'video/x-raw, format={video_format}, width=1536, height=864 ! '
-        )
-    elif source_type == 'ximage':
-        source_element = (
-            f'ximagesrc xid={video_source} ! '
-            f'{QUEUE(name=f"{name}queue_scale_")} ! '
-            f'videoscale ! '
-        )
-    else:
-        source_element = (
-            f'filesrc location="{video_source}" name={name} ! '
-            f'{QUEUE(name=f"{name}_queue_decode")} ! '
-            f'decodebin name={name}_decodebin ! '
-        )
-
-    # Set up the fps caps.
-    # If sync is True, constrain the rate with the given frame_rate.
-    # Otherwise, pass through (no framerate limitation).
-    if sync:
-        fps_caps = f"video/x-raw, framerate={frame_rate}/1"
-    else:
-        fps_caps = "video/x-raw"
-
-    source_pipeline = (
-        f'{source_element.removesuffix("! ")} '
-        # f'{QUEUE(name=f"{name}_scale_q")} ! '
-        # f'videoscale name={name}_videoscale n-threads=2 ! '
-        # f'{QUEUE(name=f"{name}_convert_q")} ! '
-        # f'videoconvert n-threads=3 name={name}_convert qos=false ! '
-        # f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, width={video_width}, height={video_height} '
-        # f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
-    )
-
-    return source_pipeline
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
@@ -713,9 +627,14 @@ class GStreamerDetectionApp(GStreamerApp):
         return DISPLAY_PIPELINE(video_sink=video_sink, sync=sync, show_fps=show_fps)
 
     def get_pipeline_string(self):
-        source_pipeline = SOURCE_PIPELINE(video_source=self.video_source,
-                                          video_width=self.video_width, video_height=self.video_height,
-                                          frame_rate=self.frame_rate, sync=self.sync)
+        source_pipeline = SOURCE_PIPELINE(
+                video_source=self.video_source,
+                video_width=self.video_width,
+                video_height=self.video_height,
+                frame_rate=self.frame_rate,
+                sync=self.sync,
+                # do_timestamp=True
+        )
         detection_pipeline = INFERENCE_PIPELINE(
             hef_path=self.hef_path,
             post_process_so=self.post_process_so,
@@ -724,7 +643,13 @@ class GStreamerDetectionApp(GStreamerApp):
             config_json=self.labels_json,
             additional_params=self.thresholds_str)
         detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
-        tracker_pipeline = TRACKER_PIPELINE(class_id=1, keep_past_metadata='false', qos='false')
+        tracker_pipeline = TRACKER_PIPELINE(
+            class_id=1,
+            keep_past_metadata='false',
+            qos='false',
+            # attempt to remove outdated detections
+            keep_tracked_frames=0
+        )
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
         display_pipeline = self.get_output_pipeline_string(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
 
