@@ -182,7 +182,8 @@ class GStreamerApp:
         self.show_fps = self.options_menu.show_fps
 
         if self.options_menu.dump_dot:
-            os.environ["GST_DEBUG_DUMP_DOT_DIR"] = os.getcwd()
+            # pass
+            os.environ["GST_DEBUG_DUMP_DOT_DIR"] = "/home/bdd/hailo-rpi5-examples/_DEBUG/pipeline/" #os.getcwd()
 
         self.webrtc_frames_queue = None  # for appsink & GUI mode
 
@@ -334,7 +335,7 @@ class GStreamerApp:
 
     def dump_dot_file(self):
         logger.debug("Dumping dot file...")
-        Gst.debug_bin_to_dot_file(self.pipeline, Gst.DebugGraphDetails.ALL, "pipeline")
+        Gst.debug_bin_to_dot_file(self.pipeline, Gst.DebugGraphDetails.VERBOSE, "/home/bdd/hailo-rpi5-examples/_DEBUG/pipeline")
         return False
 
 
