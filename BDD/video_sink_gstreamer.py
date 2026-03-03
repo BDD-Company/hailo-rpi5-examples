@@ -273,7 +273,7 @@ class RecorderSink(interfaces.FrameSinkInterface):
 
         self._pipeline.set_state(Gst.State.PLAYING)
         self._pusher.start()
-        logger.info(f"[RecorderSink] Writing ~{self.segment_ns/1e9:.0f}s MKV segments to {self.out_dir}")
+        logger.info(f"[RecorderSink] Writing ~{self.segment_ns/1e9:.0f}s MKV segments to {pattern_path}")
 
     def process_frame(self, frame):
         _validate_frame(frame, self.w, self.h)

@@ -473,7 +473,12 @@ def main():
 
     user_data = user_app_callback_class(detections_queue)
     user_data.use_frame = True
-    app = App(app_callback, user_data, video_output_chunk_length_s=10, video_file_basename=f"RAW_{start_time_str}")
+    app = App(
+        app_callback,
+        user_data,
+        video_output_chunk_length_s=10,
+        video_output_path='./recordings',
+        video_file_basename=f"RAW_{start_time_str}.mkv")
 
     DEBUG = True
     if DEBUG:
