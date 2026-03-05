@@ -407,7 +407,12 @@ class App(GStreamerDetectionApp):
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000 * 1000 * 1000
         return f'''
-            videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast \
+            videoconvert \
+            ! x264enc \
+                key-int-max=30 \
+                bframes=0 \
+                tune=zerolatency \
+                speed-preset=ultrafast \
             ! h264parse config-interval=1 \
             ! splitmuxsink \
                 muxer-factory=matroskamux \

@@ -269,3 +269,48 @@ def TRACKER_PIPELINE(class_id, kalman_dist_thr=0.8, iou_thr=0.9, init_iou_thr=0.
         f'{QUEUE(name=f"{name}_q")} '
     )
     return tracker_pipeline
+
+
+def OVERLAY_PIPELINE(name='hailo_overlay'):
+    """
+    Creates a GStreamer pipeline string for the hailooverlay element.
+    This pipeline is used to draw bounding boxes and labels on the video.
+
+    Args:
+        name (str, optional): The prefix name for the pipeline elements. Defaults to 'hailo_overlay'.
+
+    Returns:
+        str: A string representing the GStreamer pipeline for the hailooverlay element.
+    """
+    # Construct the overlay pipeline string
+    overlay_pipeline = (
+        f'{QUEUE(name=f"{name}_q")} ! '
+        f'hailooverlay name={name} '
+    )
+
+    return overlay_pipeline
+
+def DISPLAY_PIPELINE(video_sink=GST_VIDEO_SINK, sync='true', show_fps='false', name='hailo_display'):
+    """
+    Creates a GStreamer pipeline string for displaying the video.
+    It includes the hailooverlay plugin to draw bounding boxes and labels on the video.
+
+    Args:
+        video_sink (str, optional): The video sink element to use. Defaults to 'autovideosink'.
+        sync (str, optional): The sync property for the video sink. Defaults to 'true'.
+        show_fps (str, optional): Whether to show the FPS on the video sink. Should be 'true' or 'false'. Defaults to 'false'.
+        name (str, optional): The prefix name for the pipeline elements. Defaults to 'hailo_display'.
+
+    Returns:
+        str: A string representing the GStreamer pipeline for displaying the video.
+    """
+    # Construct the display pipeline string
+    display_pipeline = (
+        # f'{OVERLAY_PIPELINE(name=f"{name}_overlay")} ! '
+        f'{QUEUE(name=f"{name}_videoconvert_q")} ! '
+        f'videoconvert name={name}_videoconvert n-threads=2 qos=false ! '
+        f'{QUEUE(name=f"{name}_q")} ! '
+        f'fpsdisplaysink name={name} video-sink={video_sink} sync={sync} text-overlay={show_fps} signal-fps-measurements=true '
+    )
+
+    return display_pipeline

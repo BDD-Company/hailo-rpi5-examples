@@ -253,6 +253,7 @@ class RecorderSink(interfaces.FrameSinkInterface):
             ! x264enc
                 tune=zerolatency
                 speed-preset=ultrafast
+                bframes=0
                 bitrate={self.bitrate}
                 key-int-max={self.keyint}
             ! h264parse
