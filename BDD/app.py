@@ -11,8 +11,6 @@ import math
 
 import os
 import sys
-import numpy as np
-import json
 import datetime
 import time
 
