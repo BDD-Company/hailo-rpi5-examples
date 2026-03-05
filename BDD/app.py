@@ -414,6 +414,11 @@ class App(GStreamerDetectionApp):
                 tune=zerolatency \
                 speed-preset=ultrafast \
             ! h264parse config-interval=1 \
+            ! queue name=raw_video_output_queue \
+                leaky=downstream \
+                max-size-buffers=300 \
+                max-size-bytes=0 \
+                max-size-time=10000000000 \
             ! splitmuxsink \
                 muxer-factory=matroskamux \
                 muxer-properties="properties,streamable=true" \
