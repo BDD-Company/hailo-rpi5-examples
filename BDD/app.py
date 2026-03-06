@@ -470,9 +470,8 @@ def main():
         # RtspStreamerSink(30, 8554),
         RecorderSink(30,
             "recordings",
-            segment_seconds=5,
+            segment_seconds=10,
             filename_base=f"debug_{start_time_str}",
-            # filename_pattern="_%d.mkv"
         ),
         # OpenCVShowImageSink(window_title='DEBUG IMAGE')
     ])
