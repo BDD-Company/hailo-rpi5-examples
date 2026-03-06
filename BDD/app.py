@@ -95,6 +95,8 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     frame_id = buffer.get_reference_timestamp_meta(frame_id_caps)
     if frame_id is not None:
         frame_id = frame_id.timestamp
+    else:
+        frame_id = -1
 
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
     frame = None
