@@ -492,7 +492,6 @@ def main():
         video_output_path='./recordings',
         video_filename_base=f"RAW_{start_time_str}")
 
-    DEBUG = True
     if DEBUG:
         for i in range(3):
             detections_queue.put(
