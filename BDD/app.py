@@ -405,7 +405,7 @@ class App(GStreamerDetectionApp):
         video_file_name = Path(self.video_filename_base if self.video_filename_base else f"RAW_{record_start_time_str}.mkv")
 
         # add "_%05d" so we get multiple files w/o overwriting anything
-        video_file_name = video_file_name.stem + "_%05d" + video_file_name.suffix
+        video_file_name = video_file_name.stem + "_%05d" + (video_file_name.suffix if video_file_name.suffix else '.mkv')
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000 * 1000 * 1000
         return f'''
