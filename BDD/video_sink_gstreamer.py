@@ -14,10 +14,10 @@ import logging
 
 import gi
 gi.require_version("Gst", "1.0")
-gi.require_version("GstRtspServer", "1.0")
+# gi.require_version("GstRtspServer", "1.0")
 from gi.repository import Gst
 from gi.repository import GLib
-from gi.repository import GstRtspServer
+# from gi.repository import GstRtspServer
 
 Gst.init(None)
 
@@ -88,115 +88,115 @@ def _validate_frame(frame: np.ndarray, expect_w: int, expect_h: int):
 
 # --------------------------- Class 1: RTSP -----------------------------------
 
-class RtspStreamerSink(interfaces.FrameSinkInterface):
-    """
-    Serve frames over RTSP:
-      - URL: rtsp://<host>:<port><path>
+# class RtspStreamerSink(interfaces.FrameSinkInterface):
+#     """
+#     Serve frames over RTSP:
+#       - URL: rtsp://<host>:<port><path>
 
-    Interface: start(), submit(frame), stop()
-    """
-    def __init__(self,
-                 fps_hint: float = 30.0,
-                 port: int = 8554,
-                 path: str = "/stream",
-                 bitrate_kbps: int = 4000,
-                 keyint_seconds: int = 2):
-        self.w, self.h = map(int, (0, 0))
-        self.fps = float(fps_hint) if fps_hint and fps_hint > 0 else 30.0
-        self.port = int(port)
-        self.path = path if path.startswith("/") else "/" + path
-        self.bitrate = int(bitrate_kbps)
-        self.keyint = max(1, int(self.fps * keyint_seconds))
+#     Interface: start(), submit(frame), stop()
+#     """
+#     def __init__(self,
+#                  fps_hint: float = 30.0,
+#                  port: int = 8554,
+#                  path: str = "/stream",
+#                  bitrate_kbps: int = 4000,
+#                  keyint_seconds: int = 2):
+#         self.w, self.h = map(int, (0, 0))
+#         self.fps = float(fps_hint) if fps_hint and fps_hint > 0 else 30.0
+#         self.port = int(port)
+#         self.path = path if path.startswith("/") else "/" + path
+#         self.bitrate = int(bitrate_kbps)
+#         self.keyint = max(1, int(self.fps * keyint_seconds))
 
-        self._mainctx = None
-        self._mainloop = None
-        self._mainloop_thr = None
-        self._server = None
-        self._factory = None
-        self._rtsp_appsrc = None
-        self._address = "0.0.0.0"  # bind explicitly on IPv4 to avoid IPv6-only binds
+#         self._mainctx = None
+#         self._mainloop = None
+#         self._mainloop_thr = None
+#         self._server = None
+#         self._factory = None
+#         self._rtsp_appsrc = None
+#         self._address = "0.0.0.0"  # bind explicitly on IPv4 to avoid IPv6-only binds
 
-        self._pusher = _FrameQueuePusher(lambda: self._rtsp_appsrc, drop_if_error=True, overwriting_queue = True, queue_size = max(1, int(self.fps / 2)))
+#         self._pusher = _FrameQueuePusher(lambda: self._rtsp_appsrc, drop_if_error=True, overwriting_queue = True, queue_size = max(1, int(self.fps / 2)))
 
-    # public API
-    def start(self, frame_size):
-        self.w, self.h = map(int, frame_size)
-        # GLib loop
-        self._mainctx = GLib.MainContext.new()
-        self._mainloop = GLib.MainLoop(context=self._mainctx)
-        self._mainloop_thr = threading.Thread(target=self._mainloop.run, daemon=True)
+#     # public API
+#     def start(self, frame_size):
+#         self.w, self.h = map(int, frame_size)
+#         # GLib loop
+#         self._mainctx = GLib.MainContext.new()
+#         self._mainloop = GLib.MainLoop(context=self._mainctx)
+#         self._mainloop_thr = threading.Thread(target=self._mainloop.run, daemon=True)
 
-        # RTSP server
-        self._server = GstRtspServer.RTSPServer.new()
-        self._server.props.service = str(self.port)
-        # bind explicitly; some envs default to IPv6-only and VLC with 127.0.0.1 won’t reach it
-        try:
-            self._server.set_address(self._address)
-        except Exception:
-            pass  # API exists on all recent builds; ignore if older
-        # attach to the same context the mainloop will run in
-        self._server.attach(self._mainctx)
+#         # RTSP server
+#         self._server = GstRtspServer.RTSPServer.new()
+#         self._server.props.service = str(self.port)
+#         # bind explicitly; some envs default to IPv6-only and VLC with 127.0.0.1 won’t reach it
+#         try:
+#             self._server.set_address(self._address)
+#         except Exception:
+#             pass  # API exists on all recent builds; ignore if older
+#         # attach to the same context the mainloop will run in
+#         self._server.attach(self._mainctx)
 
-        mounts = self._server.get_mount_points()
-        self._factory = GstRtspServer.RTSPMediaFactory.new()
-        self._factory.set_shared(True)
+#         mounts = self._server.get_mount_points()
+#         self._factory = GstRtspServer.RTSPMediaFactory.new()
+#         self._factory.set_shared(True)
 
-        launch = (
-            f'appsrc name=rtsp_src is-live=true block=false format=time do-timestamp=true '
-            f'caps=video/x-raw,format=RGB,width={self.w},height={self.h},framerate=0/1 '
-            f'! queue max-size-buffers=10 leaky=downstream '
-            f'! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast '
-            f'bitrate={self.bitrate} key-int-max={self.keyint} '
-            f'! h264parse config-interval=1 '
-            f'! rtph264pay config-interval=1 name=pay0 pt=96 '
-        )
-        # IMPORTANT: add spaces inside the parentheses so the parser
-        # doesn't “stick” the ) to the previous token.
-        self._factory.set_launch(f'( {launch} )')
-        self._factory.connect("media-configure", self._on_media_configure)
+#         launch = (
+#             f'appsrc name=rtsp_src is-live=true block=false format=time do-timestamp=true '
+#             f'caps=video/x-raw,format=RGB,width={self.w},height={self.h},framerate=0/1 '
+#             f'! queue max-size-buffers=10 leaky=downstream '
+#             f'! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast '
+#             f'bitrate={self.bitrate} key-int-max={self.keyint} '
+#             f'! h264parse config-interval=1 '
+#             f'! rtph264pay config-interval=1 name=pay0 pt=96 '
+#         )
+#         # IMPORTANT: add spaces inside the parentheses so the parser
+#         # doesn't “stick” the ) to the previous token.
+#         self._factory.set_launch(f'( {launch} )')
+#         self._factory.connect("media-configure", self._on_media_configure)
 
-        mounts.add_factory(self.path, self._factory)
+#         mounts.add_factory(self.path, self._factory)
 
-        self._pusher.start()
-        self._mainloop_thr.start()
+#         self._pusher.start()
+#         self._mainloop_thr.start()
 
-        logger.debug(f"[RtspStreamerSink] RTSP at rtsp://0.0.0.0:{self.port}{self.path}")
+#         logger.debug(f"[RtspStreamerSink] RTSP at rtsp://0.0.0.0:{self.port}{self.path}")
 
-    def process_frame(self, frame):
-        if not hasattr(self, "frame_id"):
-            self.frame_id = 0
+#     def process_frame(self, frame):
+#         if not hasattr(self, "frame_id"):
+#             self.frame_id = 0
 
-        _validate_frame(frame, self.w, self.h)
-        self._pusher.submit(frame)
+#         _validate_frame(frame, self.w, self.h)
+#         self._pusher.submit(frame)
 
-        # logger.debug("[RtspStreamerSink] %s%s\tpushed frame %s", self.port, self.path, self.frame_id)
-        self.frame_id += 1
+#         # logger.debug("[RtspStreamerSink] %s%s\tpushed frame %s", self.port, self.path, self.frame_id)
+#         self.frame_id += 1
 
 
-    def stop(self):
-        self._pusher.stop()
-        # No persistent pipeline to EOS — created per-client; just stop mainloop.
-        if self._mainloop:
-            try:
-                self._mainloop.quit()
-            except Exception:
-                pass
-        if self._mainloop_thr:
-            self._mainloop_thr.join(timeout=2.0)
+#     def stop(self):
+#         self._pusher.stop()
+#         # No persistent pipeline to EOS — created per-client; just stop mainloop.
+#         if self._mainloop:
+#             try:
+#                 self._mainloop.quit()
+#             except Exception:
+#                 pass
+#         if self._mainloop_thr:
+#             self._mainloop_thr.join(timeout=2.0)
 
-    # internals
-    def _on_media_configure(self, factory, media):
-        # logger.debug("[RtspStreamerSink] media-configure: building pipeline for client")
-        element = media.get_element()
-        self._rtsp_appsrc = element.get_child_by_name("rtsp_src")
-        caps = Gst.Caps.from_string(f"video/x-raw,format=RGB,width={self.w},height={self.h},framerate=0/1")
-        self._rtsp_appsrc.set_property("caps", caps)
-        self._rtsp_appsrc.set_property("is-live", True)
-        self._rtsp_appsrc.set_property("format", Gst.Format.TIME)
-        self._rtsp_appsrc.set_property("block", False)
-        self._rtsp_appsrc.set_property("do-timestamp", True)
+#     # internals
+#     def _on_media_configure(self, factory, media):
+#         # logger.debug("[RtspStreamerSink] media-configure: building pipeline for client")
+#         element = media.get_element()
+#         self._rtsp_appsrc = element.get_child_by_name("rtsp_src")
+#         caps = Gst.Caps.from_string(f"video/x-raw,format=RGB,width={self.w},height={self.h},framerate=0/1")
+#         self._rtsp_appsrc.set_property("caps", caps)
+#         self._rtsp_appsrc.set_property("is-live", True)
+#         self._rtsp_appsrc.set_property("format", Gst.Format.TIME)
+#         self._rtsp_appsrc.set_property("block", False)
+#         self._rtsp_appsrc.set_property("do-timestamp", True)
 
-        # logging.debug("Got media_configure for %s", self._rtsp_appsrc.name)
+#         # logging.debug("Got media_configure for %s", self._rtsp_appsrc.name)
 
 
 # ------------------------ Class 2: Segment Recorder --------------------------

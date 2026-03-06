@@ -29,7 +29,7 @@ from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
 
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
-from video_sink_gstreamer import RtspStreamerSink, RecorderSink
+from video_sink_gstreamer import RecorderSink
 from video_sink_multi import MultiSink
 from opencv_show_image_sink import OpenCVShowImageSink
 
