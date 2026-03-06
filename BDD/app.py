@@ -389,10 +389,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_file_basename=None):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
-        self.video_file_basename = video_file_basename
+        self.video_filename_base = video_filename_base
         super().__init__(app_callback, user_data, parser)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
@@ -400,7 +400,7 @@ class App(GStreamerDetectionApp):
 
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
         record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        video_file_name = Path(self.video_file_basename if self.video_file_basename else f"RAW_{record_start_time_str}.mkv")
+        video_file_name = Path(self.video_filename_base if self.video_filename_base else f"RAW_{record_start_time_str}.mkv")
 
         # add "_%05d" so we get multiple files w/o overwriting anything
         video_file_name = video_file_name.stem + "_%05d" + video_file_name.suffix
@@ -491,7 +491,7 @@ def main():
         user_data,
         video_output_chunk_length_s=10,
         video_output_path='./recordings',
-        video_file_basename=f"RAW_{start_time_str}.mkv")
+        video_filename_base=f"RAW_{start_time_str}")
 
     DEBUG = True
     if DEBUG:
