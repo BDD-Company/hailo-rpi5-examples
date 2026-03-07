@@ -280,7 +280,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
 
-            telemetry_dict = await drone.get_telemetry_dict()
+            # telemetry_dict = await drone.get_telemetry_dict()
             # logger.debug("telemetry: %s", telemetry_dict)
             debug_info = telemetry_dict
 
@@ -307,10 +307,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             if detection.confidence >= MIN_CONFIDENCE:
                 logger.debug("!!! Detection: %s", detection)
 
-                drone_attitude = telemetry_dict['attitude_euler']
+                # drone_attitude = telemetry_dict.get('attitude_euler', 0)
                 # drone_pitch = drone_attitude['pitch_deg']
                 # drone_roll = drone_attitude['roll_deg']
-                logger.debug("drone attitude: %s", drone_attitude)
+                # logger.debug("drone attitude: %s", drone_attitude)
 
                 distance_to_center = detection.bbox.center.distance_to(center)
                 logger.debug("distance to center: %s", distance_to_center)
@@ -322,7 +322,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 mode = "follow"
 
-                flight_altitude = -1 * telemetry_dict.get('odometry', {}).get('position_body', {}).get("z_m", 0)
+                odometry = telemetry_dict.get('odometry', {}) or {}
+                flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
                 max_angle_divisor = 4
                 # # Adjusting how much drone can pitch or roll based on distance to target
                 if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:

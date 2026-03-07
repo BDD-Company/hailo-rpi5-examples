@@ -216,17 +216,23 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         lines = []
         printer = FormatPrinter({float: "%.2f"}, indent=0, sort_dicts=True, compact=True)
         def add_line(key : str, dict_with_values, default=''):
-            value = dict_with_values.get(key.strip(), default)
-            value_str : str = printer.pformat(value)
-            value_str = value_str.replace(":", "=")
-            value_str = value_str.replace("'", "")
-            value_str = value_str.replace("{", "")
-            value_str = value_str.replace("}", "")
-            value_str = value_str.replace("\n", "")
+            if dict_with_values is None:
+                value_str = ''
+            else:
+                value = dict_with_values.get(key.strip(), default)
+                if value is None:
+                    value_str = ''
+                else:
+                    value_str : str = printer.pformat(value)
+                    value_str = value_str.replace(":", "=")
+                    value_str = value_str.replace("'", "")
+                    value_str = value_str.replace("{", "")
+                    value_str = value_str.replace("}", "")
+                    value_str = value_str.replace("\n", "")
 
             lines.append(f'{key}: {value_str}')
 
-        odo_dict = debug_info.get("odometry", {})
+        odo_dict = debug_info.get("odometry", {}) or {}
         add_line('frame', debug_info)
         add_line('time  ',  debug_info)
         add_line('state ', debug_info)
