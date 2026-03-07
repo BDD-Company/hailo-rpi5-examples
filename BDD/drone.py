@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import asyncio
-import nest_asyncio
+# import nest_asyncio
 import dataclasses
 from enum import Enum
 
