@@ -273,17 +273,18 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
 
 def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
 
-    # Get the first frame and figure out image dimensions
-    frame = None
-    detection_dict = None
-    while frame is None:
-        detection_dict = frame_queue.get()
-        frame : np.ndarray = detection_dict['detections'].frame
-    frame_h, frame_w, _ = frame.shape
-    logger.debug("Got first frame of size W:%u, H:%u", frame_w, frame_h)
-
-    sink.start((frame_w, frame_h))
     try:
+        # Get the first frame and figure out image dimensions
+        frame = None
+        detection_dict = None
+        while frame is None:
+            detection_dict = frame_queue.get()
+            frame : np.ndarray = detection_dict['detections'].frame
+        frame_h, frame_w, _ = frame.shape
+        logger.debug("Got first frame of size W:%u, H:%u", frame_w, frame_h)
+
+        sink.start((frame_w, frame_h))
+
         while True:
             try:
                 if detection_dict is None:
@@ -300,6 +301,8 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
 
             finally:
                 detection_dict = None
+    except Exception as e:
+        logger.exception("!!! frame: %s", frame, exc_info=True, stack_info=True)
     finally:
         sink.stop()
 
