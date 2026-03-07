@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import QUEUE, get_camera_resulotion
+from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import get_camera_resulotion
 
 # Absolute import for your local helper
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import (
@@ -20,6 +20,25 @@ Set of pipelines based on hailo default examples.
 
 This set is tweaked to minimize latency from capturing frame to consuming detection results.
 """
+
+
+def QUEUE(name, max_size_buffers=3, max_size_bytes=0, max_size_time=0, leaky='no'):
+    """
+    Creates a GStreamer queue element string with the specified parameters.
+
+    Args:
+        name (str): The name of the queue element.
+        max_size_buffers (int, optional): The maximum number of buffers that the queue can hold. Defaults to 3.
+        max_size_bytes (int, optional): The maximum size in bytes that the queue can hold. Defaults to 0 (unlimited).
+        max_size_time (int, optional): The maximum size in time that the queue can hold. Defaults to 0 (unlimited).
+        leaky (str, optional): The leaky type of the queue. Can be 'no', 'upstream', or 'downstream'. Defaults to 'no'.
+
+    Returns:
+        str: A string representing the GStreamer queue element with the specified parameters.
+    """
+    q_string = f'queue name={name} leaky={leaky} max-size-buffers={max_size_buffers} max-size-bytes={max_size_bytes} max-size-time={max_size_time} '
+    return q_string
+
 
 def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
                     name='source', no_webcam_compression=False,
@@ -90,6 +109,7 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
     else:
         source_element = (
             f'filesrc location="{video_source}" name={name} ! '
+            f' qtdemux name=demux demux.video_0 ! '
             f'{QUEUE(name=f"{name}_queue_decode")} ! '
             f'decodebin name={name}_decodebin ! '
         )
@@ -103,13 +123,14 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
         fps_caps = "video/x-raw"
 
     source_pipeline = (
-        f'{source_element.removesuffix("! ")} '
-        # f'{QUEUE(name=f"{name}_scale_q")} ! '
-        # f'videoscale name={name}_videoscale n-threads=2 ! '
-        # f'{QUEUE(name=f"{name}_convert_q")} ! '
-        # f'videoconvert n-threads=3 name={name}_convert qos=false ! '
-        # f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, width={video_width}, height={video_height} '
-        # f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
+        f'{source_element} '
+        f'{QUEUE(name=f"{name}_scale_q")} ! '
+        f'videoscale name={name}_videoscale n-threads=2 ! '
+        f'{QUEUE(name=f"{name}_convert_q")} ! '
+        f'videoconvert n-threads=3 name={name}_convert qos=false ! '
+        f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, '
+        f'width={video_width}, height={video_height} ! '
+        f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
     )
 
     return source_pipeline

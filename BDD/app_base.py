@@ -653,7 +653,12 @@ class GStreamerDetectionApp(GStreamerApp):
             keep_tracked_frames=0
         )
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
-        display_pipeline = self.get_output_pipeline_string(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
+        if self.source_type == 'rpi':
+            # production case == video from camera, use custom pipeline
+            display_pipeline = self.get_output_pipeline_string(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
+        else:
+            # here custom pipeline might break rewinding of initial source, use default display pipeline
+            display_pipeline = DISPLAY_PIPELINE(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
 
         pipeline_string = (
             f'{source_pipeline} ! '
