@@ -4,10 +4,13 @@ from math import nan
 from pathlib import Path
 import asyncio
 
-from queue import Queue, Empty
-from collections import deque
+from queue import Empty, Queue
+# from collections import deque
 from dataclasses import dataclass, field
-import math
+# import math
+
+import threading
+import asyncio
 
 import os
 import sys
@@ -96,7 +99,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     if frame_id is not None:
         frame_id = frame_id.timestamp
     else:
-        frame_id = -1
+        frame_id = time.monotonic_ns()
 
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
     frame = None
@@ -127,21 +130,21 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         bbox = detection.get_bbox()
 
         confidence = detection.get_confidence()
-        if label == "person":
-            # Get track ID
-            track_id = 0
-            track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-            if len(track) == 1:
-                track_id = track[0].get_id()
-            else:
-                track_id = None
+        # if label == "person":
+        # Get track ID
+        track_id = 0
+        track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+        if len(track) == 1:
+            track_id = track[0].get_id()
+        else:
+            track_id = None
 
-            detection_count += 1
-            detections_list.append(Detection(
-                bbox = Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
-                confidence = confidence,
-                track_id = track_id,
-            ))
+        detection_count += 1
+        detections_list.append(Detection(
+            bbox = Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
+            confidence = confidence,
+            track_id = track_id,
+        ))
 
     # if len(detections) != 0:
     user_data.detections_queue.put(
@@ -172,9 +175,6 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     return Gst.PadProbeReturn.OK
 
 
-import threading
-import asyncio
-
 class StopSignal:
     pass
 STOP = StopSignal()
@@ -185,6 +185,8 @@ def drone_controlling_tread(*args, **kwargs):
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(drone_controlling_tread_async(*args, **kwargs))
+    except Exception as e:
+        logger.error("in drone event loop", exc_info=True, stack_info=True)
     finally:
         loop.close()
 
@@ -208,7 +210,7 @@ MOVE_CONFIDENCE = 0.4
 MAX_THRUST = 0.5
 MIN_THRUST = 0.4
 
-async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None):
+async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None, signal_event_when_ready = None):
     from math import radians
 
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
@@ -233,12 +235,19 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
     logger.debug("drone started")
 
-    logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
+    # logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
 
     # logger.debug("!!! getting telemetry")
-    telemetry_dict = await drone.get_telemetry_dict(True)
-    current_attitude : EulerAngle = await drone.get_cached_attitude()
-    logger.debug("GOT telemetry: %s and attitude: %s", telemetry_dict, current_attitude)
+    telemetry_dict = await drone.get_telemetry_dict(False)
+    # current_attitude : EulerAngle = await drone.get_cached_attitude(wait_for_first=False)
+    # logger.debug("GOT telemetry: %s and attitude: %s", telemetry_dict, current_attitude)
+
+    #logger.debug("!!! detections_queue: %s (%s items)", detections_queue, detections_queue.qsize())
+
+    if signal_event_when_ready:
+        signal_event_when_ready.set()
+
+    #logger.debug("!!! detections_queue: %s (%s items)", detections_queue, detections_queue.qsize())
 
     # return
     moving = False
@@ -428,6 +437,14 @@ class App(GStreamerDetectionApp):
                 location="{self.video_output_directory}/{video_file_name}"
         '''
 
+    def run(self, wait_event_before_starting=None):
+        if wait_event_before_starting:
+            wait_event_before_starting.wait()
+        logger.info("!!! Starting the application (and generating frames with detections)")
+
+        super().run()
+
+
 def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -461,9 +478,19 @@ def main():
 
     start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
+    event = threading.Event()
+    user_data = user_app_callback_class(detections_queue)
+    user_data.use_frame = True
+    app = App(
+        app_callback,
+        user_data,
+        video_output_chunk_length_s=10,
+        video_output_path='./recordings',
+        video_filename_base=f"RAW_{start_time_str}")
+
     drone_thread = threading.Thread(
         target = drone_controlling_tread,
-        args = ('udp://:14550', drone_config, detections_queue, output_queue),
+        args = ('udp://:14550', drone_config, detections_queue, output_queue, event),
         name = "Drone"
     )
     drone_thread.start()
@@ -471,7 +498,7 @@ def main():
     sink = MultiSink([
         # RtspStreamerSink(30, 8554),
         RecorderSink(30,
-            "recordings",
+            "./recordings",
             segment_seconds=10,
             filename_base=f"debug_{start_time_str}",
         ),
@@ -485,41 +512,32 @@ def main():
     )
     output_thread.start()
 
-    user_data = user_app_callback_class(detections_queue)
-    user_data.use_frame = True
-    app = App(
-        app_callback,
-        user_data,
-        video_output_chunk_length_s=10,
-        video_output_path='./recordings',
-        video_filename_base=f"RAW_{start_time_str}")
+    # if DEBUG:
+    #     for i in range(3):
+    #         detections_queue.put(
+    #             Detections(-1,
+    #                 frame = None,
+    #                 detections = [
+    #                     Detection(
+    #                         bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+    #                         confidence = 0.1,
+    #                         track_id = 1
+    #                     ),
+    #                     Detection(
+    #                         bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+    #                         confidence = 0.9,
+    #                         track_id = 2
+    #                     ),
+    #                     Detection(
+    #                         bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+    #                         confidence = 0.7,
+    #                         track_id = 3
+    #                     ),
+    #                 ],
+    #             )
+    #         )
 
-    if DEBUG:
-        for i in range(3):
-            detections_queue.put(
-                Detections(-1,
-                    frame = None,
-                    detections = [
-                        Detection(
-                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                            confidence = 0.1,
-                            track_id = 1
-                        ),
-                        Detection(
-                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                            confidence = 0.9,
-                            track_id = 2
-                        ),
-                        Detection(
-                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                            confidence = 0.7,
-                            track_id = 3
-                        ),
-                    ],
-                )
-            )
-
-    app.run()
+    app.run(event)
     print("Done !!!")
     detections_queue.put(STOP)
     drone_thread.join()
