@@ -4,6 +4,7 @@ import asyncio
 # import nest_asyncio
 import dataclasses
 from enum import Enum
+import time
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate
 from mavsdk import System
@@ -81,6 +82,22 @@ class DroneMover():
         self._telemetry_tasks : dict[str, asyncio.Task] = {}
         self._telemetry_ready : dict[str, asyncio.Event] = {}
         self._telemetry_latest : dict[str, object] = {}
+        self.__sticks = {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "r": 0.0,
+            "last_set_time": time.monotonic_ns(),
+        }
+
+    @staticmethod
+    def _log_background_task_result(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Background task '%s' failed", task.get_name())
 
 
     def __del__(self):
@@ -101,11 +118,53 @@ class DroneMover():
 
         async def __shutdown_async():
             # TODO: maybe try to land first?
-            if self.offboard:
-                await self.offboard.stop()
+            # if self.offboard:
+            #     await self.offboard.stop()
             await self.drone.action.disarm()
 
         asyncio.run(__shutdown_async())
+
+    async def __manual_input_loop(self) -> None:
+        """
+        Sends manual control input continuously.
+        MAVSDK docs recommend at least 10 Hz.
+        x: pitch   (-1..1)
+        y: roll    (-1..1)
+        z: thrust  (0..1)
+        r: yaw     (-1..1)
+        """
+        try:
+            logger.info("!!! Started manual input loop")
+            while True:
+                sticks = self.__sticks
+                logger.debug("!!! manual input: %s", sticks)
+
+                now_ns = time.monotonic_ns()
+                since_last_command_ms = (now_ns - sticks.get('last_set_time', 0)) / 1_000_000
+                target_x = sticks["x"]
+                target_y = sticks["y"]
+                target_z = sticks["z"]
+                target_r = sticks.get("r", 0)
+
+                # OLD commands must eventually fade to 0
+                reduce_factor = since_last_command_ms / 100
+                # if reduce_factor > 1:
+                #     target_x /= reduce_factor
+                #     target_y /= reduce_factor
+                #     target_z /= reduce_factor
+                #     target_r /= reduce_factor
+
+                logger.debug("set_manual_control_input: %s, since_last_command_ms: %s, reduced by factor: %s",
+                        (target_x, target_y, target_z, target_r),
+                        since_last_command_ms,
+                        reduce_factor)
+
+                await self.drone.manual_control.set_manual_control_input(
+                    target_x, target_y, target_z, target_r
+                )
+                await asyncio.sleep(0.1)  # 10 Hz
+        except:
+            logger.exception("manual inpt loop", exc_info=True, stack_info=True)
 
 
     async def startup_sequence(self, arm_attempts = 100, force_arm=False):
@@ -127,8 +186,25 @@ class DroneMover():
                 logging.debug("seems armable")
             break
 
+        await self.move_to_xy(XY(0, 0), 0)
+        manual_input_task = asyncio.create_task(self.__manual_input_loop(), name="manual_input_loop")
+        manual_input_task.add_done_callback(self._log_background_task_result)
+        self.tasks.append(manual_input_task)
+        await asyncio.sleep(0.3)
+        await self.move_to_xy(XY(0, 0), 0)
+
+        await drone.manual_control.start_altitude_control()
+
+
         async def arm():
             logging.info("arming")
+
+            # Enable arming without GPS
+            await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
+            await drone.param.set_param_int("COM_RC_IN_MODE", 2)
+            # keep armed even if not took off for long time (1000 seconds)
+            await drone.param.set_param_float("COM_DISARM_PRFLT", 1000.0)
+
             arming_exception = None
             for i in range(arm_attempts):
                 try:
@@ -142,7 +218,7 @@ class DroneMover():
                 except Exception as e:
                     arming_exception = e
                     logging.warning(f"retrying to arm, attempt {i}")
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.3)
 
             if arming_exception is not None:
                 logging.warning(f"Failed to arm, latest exception", exc_info=arming_exception)
@@ -151,24 +227,10 @@ class DroneMover():
 
         logging.info("armed")
 
-        await asyncio.sleep(1) # TODO(vnemkov): maybe remove?
-
-        # Важно: перед включением Offboard нужно отправить хотя бы одну команду
-        # NED: Z вниз → 0 = текущая высота
-        await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, 0.0, 0.0))
-
-        logger.debug("Entering Offboard mode...")
-        try:
-            await drone.offboard.start()
-        except:
-            logger.error("Failed to enter Offboard mode, aborting", exc_info=True)
-            # await drone.action.disarm()
-            raise
-
-        self.offboard = drone.offboard
-        await self.idle()
-        await asyncio.sleep(0.5)
-        logging.debug("offboard mode: %s", await self.offboard.is_active())
+        # await asyncio.sleep(0.5) # TODO(vnemkov): maybe remove?
+        await self.move_to_xy(XY(0, 0), IDLE_THRUST)
+        # await asyncio.sleep(0.5)
+        # logging.debug("offboard mode: %s", await self.offboard.is_active())
 
         await self._ensure_telemetry_cache()
 
@@ -227,117 +289,33 @@ class DroneMover():
         return asyncio.run(self.get_telemetry_dict(wait))
 
 
-    # def move_to(self, new_pos) -> None:
-    #     print("move_to")
-    #     new_pos.x *= -1
-
-    #     async def _move_to_async():
-    #         await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
-    #         logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
-    #         await asyncio.sleep(0.1)
-
-    #     self.__execute_move_task(_move_to_async())
-
-    # def move_forward(self, speed_ms : float = 1.0) -> None:
-    #     print("move_forward")
-    #     async def _move_forward():
-    #         await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(speed_ms, 0, 0, 0))
-    #         await asyncio.sleep(0.2)
-    #         await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
-    #         logger.debug('!!! Executed move_forward')
-    #     self.__execute_move_task(_move_forward())
-
-
-    # def move_relative(self, dx, dy) -> None:
-    #     print("move_relative")
-    #     async def _move_relative_async():
-    #         logger.debug("_move_relative_async")
-    #         await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
-    #         # await asyncio.sleep(0.1)
-    #         logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
-
-    #         # await self.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, dx))
-    #     self.__execute_move_task(_move_relative_async())
-
-
-    async def move_to_async(self, new_pos) -> None:
-        # on the drone
-        new_pos.x *= -1
-
-        await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, new_pos.x))
-        logger.debug('!!! Executed move_to (new_pos: %s)', new_pos)
-        # await asyncio.sleep(0.1)
-
-
-    # async def move_to_center_async(self) -> None:
-    #     # this should move drone to initial pos
-
-    #     await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, 0))
-    #     # self.drone_controller.goto_position(self.initial_pos.latitude_deg, self.initial_pos.longitude_deg, self.initial_pos.altitude_m, self.initial_yaw)
-    #     await asyncio.sleep(0.1)
-    #     logger.debug('!!! Executed move_to_center')
-
-
-    async def track_target(self, x : float, y : float, forward_speed_m_s : float = 0.0) -> None:
-        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=forward_speed_m_s, right_m_s=0, down_m_s=y / 20, yawspeed_deg_s=x))
-        await asyncio.sleep(0.1)
-
-    # async def standstill(self):
-    #     await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0, 0, 0, 0))
-
-
-    async def execute_move_command(self, move_command : MoveCommand) -> None:
-        await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=move_command.move_speed_ms, right_m_s=0, down_m_s=0, yawspeed_deg_s=move_command.adjust_attitude.x))
-
-
-    async def move_xy(self, xy : XY, yaw = 0) -> None:
-        await self.drone.offboard.set_position_ned(PositionNedYaw(xy.x, xy.y, -1 * self.cruise_altitude, yaw))
-        # await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(forward_m_s=move_command.move_speed_ms, right_m_s=0, down_m_s=0, yawspeed_deg_s=move_command.adjust_attitude.x))
-
-
-    async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0) -> None:
+    async def move_to_xy(self, xy : XY, thrust : float = 0.0) -> None:
         # Keep commanded tilt within a safe envelope to avoid toppling.
-        def _clamp(angle: float) -> float:
-            return max(-SAFE_TILT_DEG, min(SAFE_TILT_DEG, angle))
+        SAFE_MANUAL_VALUES = 0.9
+        def _clamp(value: float) -> float:
+            return max(-SAFE_MANUAL_VALUES, min(SAFE_MANUAL_VALUES, value))
 
-        safe_roll = _clamp(roll_degree)
-        safe_pitch = _clamp(pitch_degree)
+        # x : float
+        #      value between -1. to 1. negative -> backwards, positive -> forwards
 
-        await self.drone.offboard.set_attitude(
-            Attitude(
-                yaw_deg=0,
-                pitch_deg=safe_pitch,
-                roll_deg=safe_roll,
-                thrust_value=thrust,
-            )
-        )
+        # y : float
+        #      value between -1. to 1. negative -> left, positive -> right
 
+        # z : float
+        #      value between -1. to 1. negative -> down, positive -> up (usually for now, for multicopter 0 to 1 is expected)
 
-    # async def move_relative_async(self, dx, dy) -> None:
-    #     print("move_relative_async")
-    #     await self.drone.offboard.set_position_ned(PositionNedYaw(0, 0, -1 * self.cruise_altitude, dx))
-    #     await asyncio.sleep(0.1)
-    #     logger.debug('!!! Executed move_relative (dx: %s, dy: %s)', dx, dy)
+        self.__sticks["x"] = _clamp(xy.y)
+        self.__sticks["y"] = _clamp(xy.x)
+        self.__sticks["z"] = _clamp(thrust)
+        self.__sticks["r"] = 0
+        self.__sticks["last_set_time"] = time.monotonic_ns()
 
 
     async def standstill(self) -> None:
-        # print("standstill")
-        await self.drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
-
+        await self.move_to_xy(XY(0, 0), 0)
 
     async def idle(self):
-        for i in range(0, 0):
-            await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
-            await asyncio.sleep(0.2)
-            await self.move_to_target_zenith_async(0, 0, IDLE_THRUST)
-            await asyncio.sleep(0.05)
-            await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
-
-        await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
-
-
-    async def goto_position(self, x, y) -> None:
-        await self.drone.offboard.set_position_ned(PositionNedYaw(x, y, -1 * self.cruise_altitude, 0))
+        await self.move_to_xy(XY(0, 0), 0.0)
 
 
 async def main():

@@ -205,10 +205,10 @@ def is_drone_moving(telemetry_dict):
             and abs(velocity["y_m_s"]) > 0.01
 
 DEBUG = False
-MIN_CONFIDENCE = 0.3
+MIN_CONFIDENCE = 0.1
 MOVE_CONFIDENCE = 0.4
-MAX_THRUST = 0.5
-MIN_THRUST = 0.4
+MAX_THRUST = 0.8
+MIN_THRUST = 0.5
 
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None, signal_event_when_ready = None):
     from math import radians
@@ -318,7 +318,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 diff_xy = center - detection.bbox.center
                 logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
-                angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
+                angle_to_target  = diff_xy #.multiplied_by_XY(frame_angular_size)
                 logger.debug("angle to target: %s", angle_to_target)
 
                 mode = "follow"
@@ -327,42 +327,42 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
                 max_angle_divisor = 4
                 # # Adjusting how much drone can pitch or roll based on distance to target
-                if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
-                    # Drone is close
-                    max_angle_divisor = 1
-                    mode += " FLIGHT  "
-                elif flight_altitude > 3: #detection.bbox.width > 0.15 or detection.bbox.height > 0.15:
-                    # Drone is mid-range
-                    max_angle_divisor = 2
-                    mode += " SPEEDUP "
-                else:
-                    # Drone is far
-                    max_angle_divisor = 4
-                    mode += " TAKEOFF "
+                # if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
+                #     # Drone is close
+                #     max_angle_divisor = 1
+                #     mode += " FLIGHT  "
+                # elif flight_altitude > 3: #detection.bbox.width > 0.15 or detection.bbox.height > 0.15:
+                #     # Drone is mid-range
+                #     max_angle_divisor = 2
+                #     mode += " SPEEDUP "
+                # else:
+                #     # Drone is far
+                #     max_angle_divisor = 4
+                #     mode += " TAKEOFF "
 
-                if True: # move sideways more
-                    roll_pitch_adjust = XY(1.5, 1)
-                    angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
-                    logger.debug("angle to target adjusted: %s", angle_to_target)
+                # if True: # move sideways more
+                #     roll_pitch_adjust = XY(1.5, 1)
+                #     angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
+                #     logger.debug("angle to target adjusted: %s", angle_to_target)
 
-                angle_to_target /= max_angle_divisor
-                logger.warning('!!!! max_angle_divisor: %s', max_angle_divisor)
+                # angle_to_target /= max_angle_divisor
+                # logger.warning('!!!! max_angle_divisor: %s', max_angle_divisor)
                 logger.debug("angle to target adjusted for mode: %s", angle_to_target)
 
                 seen_target = True
 
                 thrust = MIN_THRUST
-                if distance_to_center < 0.2:
-                    thrust= MAX_THRUST
-                    mode += " GREEN"
-                elif distance_to_center < 0.4:
-                    thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
-                    mode += " YELLOW"
-                else:
-                    thrust= MIN_THRUST
-                    mode += " RED"
+                # if distance_to_center < 0.2:
+                #     thrust= MAX_THRUST
+                #     mode += " GREEN"
+                # elif distance_to_center < 0.4:
+                #     thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
+                #     mode += " YELLOW"
+                # else:
+                #     thrust= MIN_THRUST
+                #     mode += " RED"
 
-                await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
+                await drone.move_to_xy(angle_to_target * -1, thrust=thrust)
                 debug_info["mode"] = mode
 
                 moving = True
