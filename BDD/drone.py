@@ -323,6 +323,9 @@ class DroneMover():
     async def idle(self):
         await self.move_to_xy(XY(0, 0), 0.0)
 
+    def ABORT(self):
+        self.drone = None
+
 
 async def main():
     from helpers import configure_logging, XY

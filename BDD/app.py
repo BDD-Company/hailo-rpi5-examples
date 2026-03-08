@@ -35,6 +35,7 @@ from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
 from video_sink_multi import MultiSink
 from opencv_show_image_sink import OpenCVShowImageSink
+from drone_killswitch import kill_on_rc_switch_on_channel
 
 
 # logging and debugging stuff
@@ -234,6 +235,13 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
         await drone.startup_sequence(100)
 
     logger.debug("drone started")
+
+    udp_port = 14560 #5Hz channel  #int(drone_connection_string.split(':')[-1])
+    killdrone_thread = threading.Thread(
+        target = kill_on_rc_switch_on_channel,
+        args = (udp_port, 6, drone)
+    )
+    killdrone_thread.start()
 
     # logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
 

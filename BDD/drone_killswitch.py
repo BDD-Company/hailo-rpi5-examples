@@ -3,12 +3,13 @@
 import time
 from pymavlink import mavutil
 
-# Listen on the companion computer.
-# Change port if your PX4 MAVLink instance uses a different one.
-MAVLINK_UDP_IN = "udpin:0.0.0.0:14550"
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 RC_HZ = 20.0
-SWITCH_CH = 7   # example: AUX1 on CH7
+# SWITCH_CH = 7   # example: AUX1 on CH7
 
 
 def request_message_interval(master, message_id: int, hz: float) -> None:
@@ -26,9 +27,9 @@ def request_message_interval(master, message_id: int, hz: float) -> None:
     # Wait for ACK so you know PX4 accepted/rejected it
     ack = master.recv_match(type="COMMAND_ACK", blocking=True, timeout=2.0)
     if ack:
-        print(f"COMMAND_ACK: command={ack.command} result={ack.result}")
+        logger.debug(f"COMMAND_ACK: command={ack.command} result={ack.result}")
     else:
-        print("No COMMAND_ACK received")
+        logger.debug("No COMMAND_ACK received")
 
 
 def classify_3pos(pwm: int) -> str:
@@ -41,10 +42,17 @@ def classify_3pos(pwm: int) -> str:
     return "MID"
 
 
-def main():
-    master = mavutil.mavlink_connection(MAVLINK_UDP_IN)
+def kill_on_rc_switch_on_channel(mavlink_udp_port : int, killswitch_channel, drone):
+    try:
+        __kill_on_rc_switch_on_channel(mavlink_udp_port, killswitch_channel, drone)
+    except:
+        logger.exception("RC killswitch", exc_info=True)
+
+
+def __kill_on_rc_switch_on_channel(mavlink_udp_port : int, killswitch_channel, drone):
+    master = mavutil.mavlink_connection(f"udpin:0.0.0.0:{mavlink_udp_port}")
     master.wait_heartbeat()
-    print(f"Connected to sys={master.target_system} comp={master.target_component}")
+    logger.debug("!!! Connected to sys=%s comp=%s", master.target_system, master.target_component)
 
     request_message_interval(
         master,
@@ -53,8 +61,7 @@ def main():
     )
 
     last_state = None
-    last_print = 0.0
-
+    last_print = 0
     while True:
         msg = master.recv_match(type="RC_CHANNELS", blocking=True, timeout=1.0)
         if msg is None:
@@ -68,34 +75,32 @@ def main():
             msg.chan17_raw, msg.chan18_raw,
         ]
 
-        pwm = channels[SWITCH_CH - 1]
+        pwm = channels[killswitch_channel - 1]
         state = classify_3pos(pwm)
 
         if state != last_state:
-            print(f"CH{SWITCH_CH}: pwm={pwm} state={state}")
+            logger.debug(f"CH{killswitch_channel}: pwm={pwm} state={state}")
             last_state = state
 
-            if state == "HIGH":
-                print(">>> operator requested takeover / abort")
-                # Example:
-                # - stop sending MAVSDK manual_control inputs
-                # - set a shared asyncio/threading flag
-                # - switch your app state machine
+            if state == "HIGH" or state == "MID":
+                logger.debug(">>> operator requested takeover / abort")
+                drone.ABORT()
 
-            elif state == "MID":
-                print(">>> operator requested pause / hold")
+            # elif state == "MID":
+            #     drone.PAUSE()
+            #     logger.debug(">>> operator requested pause / hold")
 
             elif state == "LOW":
-                print(">>> operator requested script enable")
+                logger.debug(">>> operator requested script enable")
 
         now = time.time()
         if now - last_print > 1.0:
-            print(
+            logger.warning(
                 f"ch1={channels[0]} ch2={channels[1]} ch3={channels[2]} ch4={channels[3]} "
                 f"ch5={channels[4]} ch6={channels[5]} ch7={channels[6]} ch8={channels[7]}"
             )
             last_print = now
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
