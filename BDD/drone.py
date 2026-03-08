@@ -190,18 +190,19 @@ class DroneMover():
         manual_input_task = asyncio.create_task(self.__manual_input_loop(), name="manual_input_loop")
         manual_input_task.add_done_callback(self._log_background_task_result)
         self.tasks.append(manual_input_task)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
         await self.move_to_xy(XY(0, 0), 0)
 
-        await drone.manual_control.start_altitude_control()
-
+        # await drone.manual_control.start_altitude_control()
 
         async def arm():
             logging.info("arming")
 
             # Enable arming without GPS
             await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
-            await drone.param.set_param_int("COM_RC_IN_MODE", 2)
+            await drone.param.set_param_int("COM_RC_IN_MODE", 1) # 1 == drone flies autonomously
+            await drone.param.set_param_int("COM_RC_OVERRIDE", 1)
+
             # keep armed even if not took off for long time (1000 seconds)
             await drone.param.set_param_float("COM_DISARM_PRFLT", 1000.0)
 
@@ -229,7 +230,9 @@ class DroneMover():
 
         # await asyncio.sleep(0.5) # TODO(vnemkov): maybe remove?
         await self.move_to_xy(XY(0, 0), IDLE_THRUST)
-        # await asyncio.sleep(0.5)
+        await asyncio.sleep(0.5)
+        await self.move_to_xy(XY(0.5, 0.5), 0.2, allow_unsafe=True)
+        await asyncio.sleep(1)
         # logging.debug("offboard mode: %s", await self.offboard.is_active())
 
         await self._ensure_telemetry_cache()
@@ -289,11 +292,14 @@ class DroneMover():
         return asyncio.run(self.get_telemetry_dict(wait))
 
 
-    async def move_to_xy(self, xy : XY, thrust : float = 0.0) -> None:
+    async def move_to_xy(self, xy : XY, thrust : float = 0.0, allow_unsafe = True) -> None:
         # Keep commanded tilt within a safe envelope to avoid toppling.
         SAFE_MANUAL_VALUES = 0.9
         def _clamp(value: float) -> float:
+            if allow_unsafe == True:
+                return value
             return max(-SAFE_MANUAL_VALUES, min(SAFE_MANUAL_VALUES, value))
+
 
         # x : float
         #      value between -1. to 1. negative -> backwards, positive -> forwards
