@@ -22,7 +22,7 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_p
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from app_base import GStreamerDetectionApp
 
-from mavsdk.telemetry import EulerAngle
+# from mavsdk.telemetry import EulerAngle
 
 import gi
 gi.require_version('Gst', '1.0')

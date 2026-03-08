@@ -17,8 +17,8 @@ import logging
 logger = logging.getLogger("BDD_drone")
 
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
-SAFE_TILT_DEG = 90
-IDLE_THRUST = 0.1
+SAFE_TILT_DEG = 40
+IDLE_THRUST = 0.01
 
 def is_in_air(state : LandedState):
     return state == LandedState.IN_AIR

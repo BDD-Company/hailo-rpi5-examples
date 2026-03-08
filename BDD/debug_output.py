@@ -273,9 +273,9 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
 
 def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
 
+    frame = None
     try:
         # Get the first frame and figure out image dimensions
-        frame = None
         detection_dict = None
         while frame is None:
             detection_dict = frame_queue.get()
