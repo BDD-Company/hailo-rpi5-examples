@@ -227,7 +227,14 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     from drone import DroneMover, is_in_air
     drone = DroneMover(drone_connection_string, drone_config)
     logger.debug("starting up drone...")
-    # TODO(nemkov): remove in the field
+
+    udp_port = 14560
+    killdrone_thread = threading.Thread(
+        target = kill_on_rc_switch_on_channel,
+        args = (udp_port, 6, drone)
+    )
+    killdrone_thread.start()
+
     global DEBUG
     if DEBUG:
         await drone.startup_sequence(1, force_arm=True)
@@ -235,13 +242,6 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
         await drone.startup_sequence(100)
 
     logger.debug("drone started")
-
-    udp_port = 14560 #5Hz channel  #int(drone_connection_string.split(':')[-1])
-    killdrone_thread = threading.Thread(
-        target = kill_on_rc_switch_on_channel,
-        args = (udp_port, 6, drone)
-    )
-    killdrone_thread.start()
 
     # logger.debug("raw telemetry (NO-WAIT): %s", await drone.get_telemetry_dict(False))
 

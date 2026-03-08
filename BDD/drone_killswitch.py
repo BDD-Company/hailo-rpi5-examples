@@ -79,11 +79,11 @@ def __kill_on_rc_switch_on_channel(mavlink_udp_port : int, killswitch_channel, d
         state = classify_3pos(pwm)
 
         if state != last_state:
-            logger.debug(f"CH{killswitch_channel}: pwm={pwm} state={state}")
+            logger.info(f"CH{killswitch_channel}: pwm={pwm} state={state}")
             last_state = state
 
             if state == "HIGH" or state == "MID":
-                logger.debug(">>> operator requested takeover / abort")
+                logger.warning(">>> operator requested takeover / abort")
                 drone.ABORT()
 
             # elif state == "MID":
@@ -91,15 +91,15 @@ def __kill_on_rc_switch_on_channel(mavlink_udp_port : int, killswitch_channel, d
             #     logger.debug(">>> operator requested pause / hold")
 
             elif state == "LOW":
-                logger.debug(">>> operator requested script enable")
+                logger.warning(">>> operator requested script enable")
 
-        now = time.time()
-        if now - last_print > 1.0:
-            logger.warning(
-                f"ch1={channels[0]} ch2={channels[1]} ch3={channels[2]} ch4={channels[3]} "
-                f"ch5={channels[4]} ch6={channels[5]} ch7={channels[6]} ch8={channels[7]}"
-            )
-            last_print = now
+        # now = time.time()
+        # if now - last_print > 1.0:
+        #     logger.debug(
+        #         f"ch1={channels[0]} ch2={channels[1]} ch3={channels[2]} ch4={channels[3]} "
+        #         f"ch5={channels[4]} ch6={channels[5]} ch7={channels[6]} ch8={channels[7]}"
+        #     )
+        #     last_print = now
 
 
 # if __name__ == "__main__":

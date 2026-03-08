@@ -69,6 +69,7 @@ class DroneMover():
         self.cruise_altitude = self.config.get('cruise_altitude', DEFAULT_TAKEOFF_ALTITUDE_M)
         self.tasks : list[asyncio.Task] = []
         self.drone_connection_string = drone_connection_string
+        self.aborted = False
 
         # Telemetry aspects to keep cached; edit this list to add/remove streams.
         self.telemetry_aspects = [
@@ -136,8 +137,15 @@ class DroneMover():
         try:
             logger.info("!!! Started manual input loop")
             while True:
+                if self.aborted:
+                    logger.info("!!! Aborted, returning control to the RC...")
+                    await self.drone.param.set_param_int("COM_RC_IN_MODE", 0)
+                    await self.drone.param.set_param_int("COM_RC_OVERRIDE", 0)
+                    logger.info("!!! Aborted done")
+                    return
+
                 sticks = self.__sticks
-                logger.debug("!!! manual input: %s", sticks)
+                # logger.debug("!!! manual input: %s", sticks)
 
                 now_ns = time.monotonic_ns()
                 since_last_command_ms = (now_ns - sticks.get('last_set_time', 0)) / 1_000_000
@@ -154,15 +162,15 @@ class DroneMover():
                 #     target_z /= reduce_factor
                 #     target_r /= reduce_factor
 
-                logger.debug("set_manual_control_input: %s, since_last_command_ms: %s, reduced by factor: %s",
-                        (target_x, target_y, target_z, target_r),
-                        since_last_command_ms,
-                        reduce_factor)
+                # logger.debug("!!! set_manual_control_input: %s, since_last_command_ms: %s, reduced by factor: %s",
+                #         (target_x, target_y, target_z, target_r),
+                #         since_last_command_ms,
+                #         reduce_factor)
 
                 await self.drone.manual_control.set_manual_control_input(
                     target_x, target_y, target_z, target_r
                 )
-                await asyncio.sleep(0.1)  # 10 Hz
+                await asyncio.sleep(0.2)  # 10 Hz
         except:
             logger.exception("manual inpt loop", exc_info=True, stack_info=True)
 
@@ -231,8 +239,18 @@ class DroneMover():
         # await asyncio.sleep(0.5) # TODO(vnemkov): maybe remove?
         await self.move_to_xy(XY(0, 0), IDLE_THRUST)
         await asyncio.sleep(0.5)
-        await self.move_to_xy(XY(0.5, 0.5), 0.2, allow_unsafe=True)
-        await asyncio.sleep(1)
+        for i in range(0, 10):
+            logging.info("initial dance: %s", i)
+            await self.move_to_xy(XY(0.5, 0.5), 0.2, allow_unsafe=True)
+            await asyncio.sleep(1)
+            await self.move_to_xy(XY(0.5, -0.5), 0.2, allow_unsafe=True)
+            await asyncio.sleep(1)
+            await self.move_to_xy(XY(-0.5, 0.5), 0.2, allow_unsafe=True)
+            await asyncio.sleep(1)
+            await self.move_to_xy(XY(-0.5, -0.5), 0.2, allow_unsafe=True)
+            await asyncio.sleep(1)
+
+        # await asyncio.sleep(1)
         # logging.debug("offboard mode: %s", await self.offboard.is_active())
 
         await self._ensure_telemetry_cache()
@@ -318,13 +336,15 @@ class DroneMover():
 
 
     async def standstill(self) -> None:
-        await self.move_to_xy(XY(0, 0), 0)
+        # await self.move_to_xy(XY(0, 0), 0)
+        pass
 
     async def idle(self):
-        await self.move_to_xy(XY(0, 0), 0.0)
+        # await self.move_to_xy(XY(0, 0), 0.0)
+        pass
 
     def ABORT(self):
-        self.drone = None
+        self.aborted = True
 
 
 async def main():
