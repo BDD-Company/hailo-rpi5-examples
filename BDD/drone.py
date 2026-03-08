@@ -13,7 +13,7 @@ from helpers import MoveCommand, dotdict, XY
 
 import logging
 
-logger = logging.Logger("BDD_drone")
+logger = logging.getLogger("BDD_drone")
 
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
 SAFE_TILT_DEG = 90
