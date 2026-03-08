@@ -22,7 +22,7 @@ This set is tweaked to minimize latency from capturing frame to consuming detect
 """
 
 
-def QUEUE(name, max_size_buffers=3, max_size_bytes=0, max_size_time=0, leaky='no'):
+def QUEUE(name, max_size_buffers=3, max_size_bytes=0, max_size_time=100_000_000, leaky='downstream'):
     """
     Creates a GStreamer queue element string with the specified parameters.
 
