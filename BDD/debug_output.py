@@ -17,7 +17,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-DETECTED_OBJECT_COLOR = (255, 0, 0)    # blue
+DETECTED_OBJECT_COLOR = (100, 0, 0)    # blue
 SELECTED_OBJECT_COLOR = (255, 0, 255)  # magenta
 NEUTRAL_RECT_COLOR    = (0, 255, 0)    # green
 CROSSHAIR_COLOR = SELECTED_OBJECT_COLOR
@@ -263,9 +263,9 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         frame,
         frame_center.to_tuple(int),
         CROSSHAIR_COLOR,
-        cv2.MARKER_CROSS,
+        cv2.MARKER_TILTED_CROSS,
         30,
-        2
+        1
     )
 
     return frame
@@ -312,7 +312,7 @@ if __name__ == '__main__':
     import time
     import math
 
-    from video_sink_gstreamer import RtspStreamerSink, RecorderSink
+    from video_sink_gstreamer import RecorderSink
     from video_sink_multi import MultiSink
     from opencv_show_image_sink import OpenCVShowImageSink
     from helpers import configure_logging
@@ -462,7 +462,7 @@ if __name__ == '__main__':
     producer_thread.start()
 
     sink = MultiSink([
-        RtspStreamerSink(30, 8554),
+        # RtspStreamerSink(30, 8554),
         RecorderSink(10, "_TMP/test_recordings"),
         OpenCVShowImageSink(window_title='DEBUG IMAGE', fps_hint=500)
     ])
