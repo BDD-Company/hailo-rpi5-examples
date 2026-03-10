@@ -322,7 +322,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 odometry = telemetry_dict.get('odometry', {}) or {}
                 flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
-                max_angle_divisor = 0.2
+                max_angle_divisor = 1
                 # max_angle_divisor = 4
                 # # # Adjusting how much drone can pitch or roll based on distance to target
                 # if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
@@ -360,8 +360,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     thrust= MIN_THRUST
                     mode += " RED"
 
-                await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
-                # await drone.move_to_target_zenith_async(roll_degree=angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
+                # await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
+                await drone.move_to_target_zenith_async(roll_degree=angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
                 debug_info["mode"] = mode
 
 
@@ -487,7 +487,7 @@ def main():
         app_callback,
         user_data,
         video_output_chunk_length_s=10,
-        video_output_path='./recordings',
+        video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}")
 
     drone_thread = threading.Thread(
@@ -500,7 +500,7 @@ def main():
     sink = MultiSink([
         # RtspStreamerSink(30, 8554),
         RecorderSink(30,
-            "./recordings",
+            "./_DEBUG",
             segment_seconds=10,
             filename_base=f"debug_{start_time_str}",
         ),

@@ -11,7 +11,7 @@ from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, Velo
 from mavsdk import System
 from mavsdk.telemetry import Telemetry, EulerAngle, LandedState
 
-from helpers import MoveCommand, dotdict, XY
+from helpers import MoveCommand, dotdict, XY, debug_collect_call_info
 
 import logging
 
@@ -208,7 +208,7 @@ class DroneMover():
             logging.info("arming")
 
             # # Enable arming without GPS
-            # await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
+            await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
             # await drone.param.set_param_int("COM_RC_IN_MODE", 1) # 1 == drone flies autonomously
             # await drone.param.set_param_int("COM_RC_OVERRIDE", 1)
 
@@ -235,6 +235,7 @@ class DroneMover():
             else:
                 logging.info("armed")
 
+
         await arm()
 
 
@@ -257,26 +258,28 @@ class DroneMover():
 
         self.offboard = drone.offboard
 
+        DURATION=3
+        THRUST=0.3
         logger.debug("A little dance")
-        await self.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=0.2)
-        await asyncio.sleep(3)
-        await self.move_to_target_zenith_async(roll_degree=  0,  pitch_degree=0, thrust=0.2)
-        await asyncio.sleep(1)
-        await self.move_to_target_zenith_async(roll_degree= 45, pitch_degree=0, thrust=0.2)
-        await asyncio.sleep(3)
+        await self.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=THRUST)
+        await asyncio.sleep(DURATION)
+        await self.move_to_target_zenith_async(roll_degree=  0,  pitch_degree=0, thrust=THRUST)
+        await asyncio.sleep(DURATION / 3)
+        await self.move_to_target_zenith_async(roll_degree= 45, pitch_degree=0, thrust=THRUST)
+        await asyncio.sleep(DURATION)
 
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=0.2)
-        await asyncio.sleep(1)
+        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=THRUST / 2)
+        await asyncio.sleep(DURATION / 3)
 
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=-45, thrust=0.2)
-        await asyncio.sleep(3)
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=  0, thrust=0.2)
-        await asyncio.sleep(1)
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree= 45, thrust=0.2)
-        await asyncio.sleep(3)
+        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=-45, thrust=THRUST)
+        await asyncio.sleep(DURATION)
+        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=  0, thrust=THRUST)
+        await asyncio.sleep(DURATION / 3)
+        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree= 45, thrust=THRUST)
+        await asyncio.sleep(DURATION)
 
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=0.2)
-        await asyncio.sleep(3)
+        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=THRUST / 2)
+        await asyncio.sleep(DURATION / 3)
 
         # await asyncio.sleep(0.5) # TODO(vnemkov): maybe remove?
         # await self.move_to_xy(XY(0, 0), IDLE_THRUST)
@@ -385,15 +388,18 @@ class DroneMover():
 
         safe_roll = _clamp(roll_degree)
         safe_pitch = _clamp(pitch_degree)
+        drone_offboard = debug_collect_call_info(self.drone.offboard)
 
-        await self.drone.offboard.set_attitude_rate(
+        await drone_offboard.set_attitude_rate(
             AttitudeRate(
-                roll_deg_s=safe_roll/2,
-                pitch_deg_s=safe_pitch/2,
+                roll_deg_s=safe_roll,
+                pitch_deg_s=safe_pitch,
                 yaw_deg_s=0,
                 thrust_value=thrust,
             )
         )
+
+        logger.info("!!! executing: %s ", drone_offboard.last_command())
 
         # await self.drone.offboard.set_attitude(
         #     Attitude(
@@ -403,14 +409,14 @@ class DroneMover():
         #         thrust_value=thrust,
         #     )
         # )
-        await self.drone.offboard.set_velocity_body(
-            VelocityBodyYawspeed(
-                forward_m_s=safe_pitch,
-                right_m_s=safe_roll,
-                down_m_s=thrust * 10,
-                yawspeed_deg_s=0
-            )
-        )
+        # await self.drone.offboard.set_velocity_body(
+        #     VelocityBodyYawspeed(
+        #         forward_m_s=safe_pitch,
+        #         right_m_s=safe_roll,
+        #         down_m_s=thrust * 10,
+        #         yawspeed_deg_s=0
+        #     )
+        # )
 
     async def standstill(self) -> None:
         await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
