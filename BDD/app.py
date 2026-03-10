@@ -160,17 +160,6 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         )
     )
 
-    # if user_data.use_frame:
-    #     # Note: using imshow will not work here, as the callback function is not running in the main thread
-    #     # Let's print the detection count to the frame
-    #     cv2.putText(frame, f"Detections: {detection_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-    #     # Example of how to use the new_variable and new_function from the user_data
-    #     # Let's print the new_variable and the result of the new_function to the frame
-    #     cv2.putText(frame, f"{user_data.new_function()} {user_data.new_variable}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-    #     # Convert the frame to BGR
-    #     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    #     user_data.set_frame(frame)
-
     if string_to_print:
         print(string_to_print)
     return Gst.PadProbeReturn.OK
@@ -208,8 +197,8 @@ def is_drone_moving(telemetry_dict):
 DEBUG = False
 MIN_CONFIDENCE = 0.1
 MOVE_CONFIDENCE = 0.4
-MAX_THRUST = 0.8
-MIN_THRUST = 0.5
+MAX_THRUST = 0.2
+MIN_THRUST = 0.1
 
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None, signal_event_when_ready = None):
     from math import radians
@@ -297,7 +286,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             if takeoff_time_ns == None:
                 if moving:
                     takeoff_time_ns = time.monotonic_ns()
-                    logger.info("!!! IN AIR: %s", takeoff_time_ns)
+                    # logger.info("!!! IN AIR: %s", takeoff_time_ns)
             else:
                 flight_time_ns = time.monotonic_ns() - takeoff_time_ns
                 # logger.info("!!! flight time: %ss", flight_time_ns / 1000_000_000)
@@ -314,7 +303,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             detection = detections[0] if len(detections) > 0 else Detection()
             if detection.confidence >= MIN_CONFIDENCE:
-                logger.debug("!!! Detection: %s", detection)
+                # logger.debug("!!! Detection: %s", detection)
 
                 # drone_attitude = telemetry_dict.get('attitude_euler', 0)
                 # drone_pitch = drone_attitude['pitch_deg']
@@ -322,19 +311,20 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 # logger.debug("drone attitude: %s", drone_attitude)
 
                 distance_to_center = detection.bbox.center.distance_to(center)
-                logger.debug("distance to center: %s", distance_to_center)
+                # logger.debug("distance to center: %s", distance_to_center)
 
                 diff_xy = center - detection.bbox.center
-                logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
-                angle_to_target  = diff_xy #.multiplied_by_XY(frame_angular_size)
+                # logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
+                angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
                 logger.debug("angle to target: %s", angle_to_target)
 
                 mode = "follow"
 
                 odometry = telemetry_dict.get('odometry', {}) or {}
                 flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
-                max_angle_divisor = 4
-                # # Adjusting how much drone can pitch or roll based on distance to target
+                max_angle_divisor = 0.2
+                # max_angle_divisor = 4
+                # # # Adjusting how much drone can pitch or roll based on distance to target
                 # if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
                 #     # Drone is close
                 #     max_angle_divisor = 1
@@ -353,30 +343,32 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
                 #     logger.debug("angle to target adjusted: %s", angle_to_target)
 
-                # angle_to_target /= max_angle_divisor
-                # logger.warning('!!!! max_angle_divisor: %s', max_angle_divisor)
+                angle_to_target /= max_angle_divisor
+                logger.warning('!!!! max_angle_divisor: %s', max_angle_divisor)
                 logger.debug("angle to target adjusted for mode: %s", angle_to_target)
 
                 seen_target = True
 
                 thrust = MIN_THRUST
-                # if distance_to_center < 0.2:
-                #     thrust= MAX_THRUST
-                #     mode += " GREEN"
-                # elif distance_to_center < 0.4:
-                #     thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
-                #     mode += " YELLOW"
-                # else:
-                #     thrust= MIN_THRUST
-                #     mode += " RED"
+                if distance_to_center < 0.2:
+                    thrust= MAX_THRUST
+                    mode += " GREEN"
+                elif distance_to_center < 0.4:
+                    thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
+                    mode += " YELLOW"
+                else:
+                    thrust= MIN_THRUST
+                    mode += " RED"
 
-                await drone.move_to_xy(angle_to_target * -1, thrust=thrust)
+                await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
+                # await drone.move_to_target_zenith_async(roll_degree=angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
                 debug_info["mode"] = mode
+
 
                 moving = True
                 if takeoff_time_ns == None:
                     takeoff_time_ns = time.monotonic_ns()
-                    logger.info("!!! IN AIR since: %s", takeoff_time_ns)
+                    # logger.info("!!! IN AIR since: %s", takeoff_time_ns)
 
             else:
                 if seen_target:
@@ -479,8 +471,8 @@ def main():
         logger.error("!!! ============================================================== !!!")
         logger.error('')
 
-    detections_queue = OverwriteQueue(maxsize=2)
-    output_queue = OverwriteQueue(maxsize=20)
+    detections_queue = Queue(maxsize=20)
+    output_queue = Queue(maxsize=200)
 
     drone_config = {
         'cruise_altitude' : 1,
