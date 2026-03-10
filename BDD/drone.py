@@ -258,28 +258,28 @@ class DroneMover():
 
         self.offboard = drone.offboard
 
-        DURATION=3
-        THRUST=0.3
-        logger.debug("A little dance")
-        await self.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=THRUST)
-        await asyncio.sleep(DURATION)
-        await self.move_to_target_zenith_async(roll_degree=  0,  pitch_degree=0, thrust=THRUST)
-        await asyncio.sleep(DURATION / 3)
-        await self.move_to_target_zenith_async(roll_degree= 45, pitch_degree=0, thrust=THRUST)
-        await asyncio.sleep(DURATION)
+        # DURATION=3
+        # THRUST=0.3
+        # logger.debug("A little dance")
+        # await self.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=THRUST)
+        # await asyncio.sleep(DURATION)
+        # await self.move_to_target_zenith_async(roll_degree=  0,  pitch_degree=0, thrust=THRUST)
+        # await asyncio.sleep(DURATION / 3)
+        # await self.move_to_target_zenith_async(roll_degree= 45, pitch_degree=0, thrust=THRUST)
+        # await asyncio.sleep(DURATION)
 
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=THRUST / 2)
-        await asyncio.sleep(DURATION / 3)
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=THRUST / 2)
+        # await asyncio.sleep(DURATION / 3)
 
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=-45, thrust=THRUST)
-        await asyncio.sleep(DURATION)
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=  0, thrust=THRUST)
-        await asyncio.sleep(DURATION / 3)
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree= 45, thrust=THRUST)
-        await asyncio.sleep(DURATION)
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=-45, thrust=THRUST)
+        # await asyncio.sleep(DURATION)
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=  0, thrust=THRUST)
+        # await asyncio.sleep(DURATION / 3)
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree= 45, thrust=THRUST)
+        # await asyncio.sleep(DURATION)
 
-        await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=THRUST / 2)
-        await asyncio.sleep(DURATION / 3)
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=THRUST / 2)
+        # await asyncio.sleep(DURATION / 3)
 
         # await asyncio.sleep(0.5) # TODO(vnemkov): maybe remove?
         # await self.move_to_xy(XY(0, 0), IDLE_THRUST)

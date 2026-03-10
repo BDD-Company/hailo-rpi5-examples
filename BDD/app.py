@@ -197,8 +197,8 @@ def is_drone_moving(telemetry_dict):
 DEBUG = False
 MIN_CONFIDENCE = 0.1
 MOVE_CONFIDENCE = 0.4
-MAX_THRUST = 0.2
-MIN_THRUST = 0.1
+MAX_THRUST = 0.3
+MIN_THRUST = 0.2
 
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None, signal_event_when_ready = None):
     from math import radians
@@ -252,6 +252,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     drone = debug_collect_call_info(drone, history_max_size=3)
     flight_time_ns = 0
     takeoff_time_ns = None
+    prev_angle_to_target = XY()
+    fade_coeff = 0.95
 
     while True:
         try:
@@ -265,7 +267,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             # logger.debug("!!! awaiting detection... ")
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
-                r : Detections = await asyncio.to_thread(detections_queue.get, True, 0.1)
+                r : Detections = await asyncio.to_thread(detections_queue.get, 0.1)
                 if r is STOP:
                     logger.info("stopping")
                     break
@@ -322,7 +324,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 odometry = telemetry_dict.get('odometry', {}) or {}
                 flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
-                max_angle_divisor = 1
+                max_angle_divisor = 0.4
                 # max_angle_divisor = 4
                 # # # Adjusting how much drone can pitch or roll based on distance to target
                 # if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
@@ -344,6 +346,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     logger.debug("angle to target adjusted: %s", angle_to_target)
 
                 angle_to_target /= max_angle_divisor
+                prev_angle_to_target = angle_to_target
                 logger.warning('!!!! max_angle_divisor: %s', max_angle_divisor)
                 logger.debug("angle to target adjusted for mode: %s", angle_to_target)
 
@@ -361,7 +364,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     mode += " RED"
 
                 # await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
-                await drone.move_to_target_zenith_async(roll_degree=angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
+                await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
                 debug_info["mode"] = mode
 
 
@@ -372,7 +375,9 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             else:
                 if seen_target:
-                    await drone.standstill()
+                    prev_angle_to_target *= fade_coeff
+                    await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
+                    # await drone.standstill()
                     moving = False
                     debug_info["mode"] = "hover"
                 else:
@@ -471,8 +476,8 @@ def main():
         logger.error("!!! ============================================================== !!!")
         logger.error('')
 
-    detections_queue = Queue(maxsize=20)
-    output_queue = Queue(maxsize=200)
+    detections_queue = OverwriteQueue(maxsize=20)
+    output_queue = OverwriteQueue(maxsize=200)
 
     drone_config = {
         'cruise_altitude' : 1,
