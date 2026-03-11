@@ -6,7 +6,7 @@ import asyncio
 
 from queue import Empty, Queue
 from dataclasses import dataclass, field
-
+from collections import deque
 import threading
 
 import os
@@ -74,6 +74,8 @@ def normalized_timestamp(ts):
     else:
         return 0
 
+seen_frames = deque(maxlen=10)
+
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_callback_class):
     # Get the GstBuffer from the probe info
@@ -99,6 +101,11 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     else:
         frame_id = time.monotonic_ns()
 
+    if frame_id in seen_frames:
+        # logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s", frame_id)
+        return Gst.PadProbeReturn.OK
+    seen_frames.append(frame_id)
+
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
     frame = None
     # if user_data.use_frame and format is not None and width is not None and height is not None:
@@ -109,10 +116,11 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    # logger.debug("frame #%d \t pipeline delay: %sms \t detections %s, frame object: %s (%s)",
+    # logger.debug("frame #%d \t pipeline delay: %sms \t detections %s (%s), frame object: %s (%s)",
     #         frame_id,
     #         (detection_end_timestamp_ns - detection_start_timestamp_ns)/1000000,
     #         len(detections),
+    #         detections,
     #         id(frame), hash(frame.data.tobytes())
     # )
 
@@ -300,7 +308,14 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 logger.warning("No frames (%d times), no detections, input queue empty? ACTION: %s", skipped_detetions, drone.last_command())
                 continue
 
+            logger.debug("!!!")
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
+            logger.debug("!!! GOT DETECTIONS, objects detected: %s (%s), detection delay: %sms, total delay: %sms",
+                    len(detections_obj.detections),
+                    detections_obj.detections,
+                    (detections_obj.meta.detection_end_timestamp_ns - detections_obj.meta.detection_start_timestamp_ns) / 1000_000,
+                    (detections_obj.meta.detection_end_timestamp_ns - detections_obj.meta.capture_timestamp_ns) / 1000_000
+                )
             skipped_detetions = 0
 
             # telemetry_dict = await drone.get_telemetry_dict()
@@ -403,7 +418,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             else:
                 if seen_target:
                     prev_angle_to_target *= FADE_COEFF
-                    await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
+                    await drone.move_to_target_zenith_async(roll_degree=-prev_angle_to_target.x, pitch_degree=prev_angle_to_target.y, thrust=thrust)
                     # await drone.standstill()
                     moving = False
                     debug_info["mode"] = "hover"
@@ -523,16 +538,17 @@ def main():
         user_data,
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
-        video_filename_base=f"RAW_{start_time_str}")
+        video_filename_base=f"RAW_{start_time_str}",
+        record_videos=False)
     
     control_config = {
         'confidence_min': 0.1,
         'confidence_move': 0.4,
-        'thrust_max': 0.5,
+        'thrust_max': 0.4,
         'thrust_min': 0.4,
-        'pd_coeff_p': 5, #12.5
-        'pd_coeff_d': 0,
-        'target_lost_fade_per_frame': 0.9,
+        'pd_coeff_p': 4.5, #12.5
+        'pd_coeff_d': 2.5,
+        'target_lost_fade_per_frame': 0.8,
     }
 
     drone_thread = threading.Thread(

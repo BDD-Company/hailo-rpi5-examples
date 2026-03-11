@@ -579,7 +579,7 @@ class GStreamerDetectionApp(GStreamerApp):
         super().__init__(parser, user_data)
         # Additional initialization code can be added here
         # Set Hailo parameters these parameters should be set based on the model used
-        self.batch_size = 2
+        self.batch_size = 1
         nms_score_threshold = 0.3
         nms_iou_threshold = 0.45
 
