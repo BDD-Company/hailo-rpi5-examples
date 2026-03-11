@@ -5,12 +5,9 @@ from pathlib import Path
 import asyncio
 
 from queue import Empty, Queue
-# from collections import deque
 from dataclasses import dataclass, field
-# import math
 
 import threading
-import asyncio
 
 import os
 import sys
@@ -29,7 +26,7 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
-
+from CommandRegulator import CommandRegulator
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
@@ -47,7 +44,7 @@ from helpers import (
 import logging
 logger = logging.getLogger(__name__)
 global_logger = logger # a hack
-
+DEBUG = False
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
@@ -127,7 +124,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
         # DEBUG_dump('detecion: ', detection)
 
-        label = detection.get_label()
+        # label = detection.get_label()
         bbox = detection.get_bbox()
 
         confidence = detection.get_confidence()
@@ -194,18 +191,21 @@ def is_drone_moving(telemetry_dict):
             and abs(velocity["y_m_s"]) > 0.01 \
             and abs(velocity["y_m_s"]) > 0.01
 
-DEBUG = False
-MIN_CONFIDENCE = 0.1
-MOVE_CONFIDENCE = 0.4
-MAX_THRUST = 0.5
-MIN_THRUST = 0.4
 
-async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None, signal_event_when_ready = None):
+async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None):
     from math import radians
 
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
     global global_logger
     logger = global_logger
+
+    MIN_CONFIDENCE  = control_config.get('confidence_min', 0.1)
+    MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
+    MAX_THRUST      = control_config.get('thrust_max', 0.5)
+    MIN_THRUST      = control_config.get('thrust_min', 0.4)
+    PD_COEFF_P      = control_config.get('pd_coeff_p', 12)
+    PD_COEFF_D      = control_config.get('pd_coeff_d', 1)
+    FADE_COEFF      = control_config.get('target_lost_fade_per_frame', 0.9)
 
     center = XY(0.5, 0.5)
     distance_r = 0.1
@@ -253,8 +253,9 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     flight_time_ns = 0
     takeoff_time_ns = None
     prev_angle_to_target = XY()
-    fade_coeff = 0.9
     skipped_detetions = 0
+
+    command_regulator = CommandRegulator(Pk = PD_COEFF_P, Pd = PD_COEFF_D)
 
     while True:
         try:
@@ -326,7 +327,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 # logger.debug("distance to center: %s", distance_to_center)
 
                 diff_xy = center - detection.bbox.center
-                # logger.debug("target: %s, frame: %s", diff_xy, frame_angular_size)
+                logger.debug("!!! target : %s", diff_xy)
+                diff_xy = command_regulator.nextCommand(diff_xy, )
+                logger.debug("!!! target after PD: %s", diff_xy)
+
                 angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
                 logger.debug("angle to target: %s", angle_to_target)
 
@@ -334,7 +338,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 odometry = telemetry_dict.get('odometry', {}) or {}
                 flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
-                max_angle_divisor = 0.08
+
                 # max_angle_divisor = 4
                 # # # Adjusting how much drone can pitch or roll based on distance to target
                 # if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
@@ -355,9 +359,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
                 #     logger.debug("angle to target adjusted: %s", angle_to_target)
 
-                angle_to_target /= max_angle_divisor
                 prev_angle_to_target = angle_to_target
-                logger.debug('!!!! max_angle_divisor: %s', max_angle_divisor)
+                # logger.debug('!!!! max_angle_divisor: %s', max_angle_divisor)
                 logger.debug("angle to target adjusted for mode: %s", angle_to_target)
 
                 seen_target = True
@@ -377,7 +380,6 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
                 debug_info["mode"] = mode
 
-
                 moving = True
                 if takeoff_time_ns == None:
                     takeoff_time_ns = time.monotonic_ns()
@@ -385,7 +387,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             else:
                 if seen_target:
-                    prev_angle_to_target *= fade_coeff
+                    prev_angle_to_target *= FADE_COEFF
                     await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
                     # await drone.standstill()
                     moving = False
@@ -417,11 +419,11 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
-        self.no_video_recording = False
+        self.record_videos = record_videos
         super().__init__(app_callback, user_data, parser)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
@@ -429,7 +431,7 @@ class App(GStreamerDetectionApp):
 
 
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
-        if self.no_video_recording:
+        if not self.record_videos:
             return "fakesink"
 
         record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -507,10 +509,25 @@ def main():
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}")
+    
+    control_config = {
+        'confidence_min': 0.1,
+        'confidence_move': 0.4,
+        'thrust_max': 0.5,
+        'thrust_min': 0.4,
+        'pd_coeff_p': 12,
+        'pd_coeff_d': 1,
+        'target_lost_fade_per_frame': 0.9,
+    }
 
     drone_thread = threading.Thread(
         target = drone_controlling_tread,
-        args = ('udp://:14550', drone_config, detections_queue, output_queue, event),
+        args = ('udp://:14550', drone_config, detections_queue),
+        kwargs= dict(
+            control_config= control_config, 
+            output_queue= output_queue,
+            signal_event_when_ready= event,
+        ),
         name = "Drone"
     )
     drone_thread.start()
