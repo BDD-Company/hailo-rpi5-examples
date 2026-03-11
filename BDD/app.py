@@ -197,8 +197,8 @@ def is_drone_moving(telemetry_dict):
 DEBUG = False
 MIN_CONFIDENCE = 0.1
 MOVE_CONFIDENCE = 0.4
-MAX_THRUST = 0.3
-MIN_THRUST = 0.2
+MAX_THRUST = 0.5
+MIN_THRUST = 0.4
 
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, output_queue = None, signal_event_when_ready = None):
     from math import radians
@@ -253,7 +253,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     flight_time_ns = 0
     takeoff_time_ns = None
     prev_angle_to_target = XY()
-    fade_coeff = 0.95
+    fade_coeff = 0.9
+    skipped_detetions = 0
 
     while True:
         try:
@@ -275,10 +276,18 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             except Empty:
                 # No detections, not even frame with ID and image
-                logger.warning("No frames, no detections, input queue empty?")
+                skipped_detetions += 1
+                drone.clear_command_history()
+                if skipped_detetions > 20 and skipped_detetions < 30:
+                    await drone.standstill()
+                elif skipped_detetions > 30:
+                    await drone.idle()
+
+                logger.warning("No frames (%d times), no detections, input queue empty? ACTION: %s", skipped_detetions, drone.last_command())
                 continue
 
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
+            skipped_detetions = 0
 
             # telemetry_dict = await drone.get_telemetry_dict()
             # logger.debug("telemetry: %s", telemetry_dict)
@@ -301,6 +310,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             drone.clear_command_history()
 
             # track_id latest detections
+            detections = [d for d in detections if d is not None]
             detections.sort(reverse=True, key = lambda d : d.track_id)
 
             detection = detections[0] if len(detections) > 0 else Detection()
@@ -324,7 +334,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 odometry = telemetry_dict.get('odometry', {}) or {}
                 flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
-                max_angle_divisor = 0.4
+                max_angle_divisor = 0.08
                 # max_angle_divisor = 4
                 # # # Adjusting how much drone can pitch or roll based on distance to target
                 # if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
@@ -347,7 +357,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 angle_to_target /= max_angle_divisor
                 prev_angle_to_target = angle_to_target
-                logger.warning('!!!! max_angle_divisor: %s', max_angle_divisor)
+                logger.debug('!!!! max_angle_divisor: %s', max_angle_divisor)
                 logger.debug("angle to target adjusted for mode: %s", angle_to_target)
 
                 seen_target = True
@@ -411,12 +421,17 @@ class App(GStreamerDetectionApp):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
+        self.no_video_recording = False
         super().__init__(app_callback, user_data, parser)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
 
+
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
+        if self.no_video_recording:
+            return "fakesink"
+
         record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         video_file_name = Path(self.video_filename_base if self.video_filename_base else f"RAW_{record_start_time_str}.mkv")
 
@@ -479,9 +494,7 @@ def main():
     detections_queue = OverwriteQueue(maxsize=20)
     output_queue = OverwriteQueue(maxsize=200)
 
-    drone_config = {
-        'cruise_altitude' : 1,
-    }
+    drone_config = {}
 
     start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 

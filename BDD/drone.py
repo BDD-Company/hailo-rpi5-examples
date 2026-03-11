@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("BDD_drone")
 
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
-SAFE_TILT_DEG = 60
+SAFE_TILT_DEG = 180
 IDLE_THRUST = 0.01
 
 def is_in_air(state : LandedState):
@@ -419,7 +419,7 @@ class DroneMover():
         # )
 
     async def standstill(self) -> None:
-        await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
+        await self.move_to_target_zenith_async(0, 0, IDLE_THRUST * 2)
 
 
     async def idle(self):
