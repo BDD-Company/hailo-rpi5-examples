@@ -254,8 +254,21 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     takeoff_time_ns = None
     prev_angle_to_target = XY()
     skipped_detetions = 0
+    prev_detection_timestamp = time.monotonic_ns()
+    current_detection_timestamp = 0
 
-    command_regulator = CommandRegulator(Pk = PD_COEFF_P, Pd = PD_COEFF_D)
+    def update_timestamps_on_detection():
+        nonlocal prev_detection_timestamp
+        nonlocal current_detection_timestamp
+
+        new_detection_timestamp = time.monotonic_ns()
+        prev_detection_timestamp = current_detection_timestamp
+        current_detection_timestamp = new_detection_timestamp
+
+        return current_detection_timestamp - prev_detection_timestamp
+
+
+    command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
 
     while True:
         try:
@@ -312,10 +325,12 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
             # track_id latest detections
             detections = [d for d in detections if d is not None]
-            detections.sort(reverse=True, key = lambda d : d.track_id)
+            # detections.sort(reverse=True, key = lambda d : d.track_id)
+            detections.sort(reverse=True, key = lambda d : d.confidence)
 
             detection = detections[0] if len(detections) > 0 else Detection()
             if detection.confidence >= MIN_CONFIDENCE:
+                delay_between_detections_ns = update_timestamps_on_detection()
                 # logger.debug("!!! Detection: %s", detection)
 
                 # drone_attitude = telemetry_dict.get('attitude_euler', 0)
@@ -328,7 +343,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 diff_xy = center - detection.bbox.center
                 logger.debug("!!! target : %s", diff_xy)
-                diff_xy = command_regulator.nextCommand(diff_xy, )
+                diff_xy = command_regulator.nextCommand(diff_xy, delay_between_detections_ns / 1000_000)
                 logger.debug("!!! target after PD: %s", diff_xy)
 
                 angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
@@ -515,8 +530,8 @@ def main():
         'confidence_move': 0.4,
         'thrust_max': 0.5,
         'thrust_min': 0.4,
-        'pd_coeff_p': 12,
-        'pd_coeff_d': 1,
+        'pd_coeff_p': 5, #12.5
+        'pd_coeff_d': 0,
         'target_lost_fade_per_frame': 0.9,
     }
 
