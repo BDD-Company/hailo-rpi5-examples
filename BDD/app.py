@@ -546,8 +546,8 @@ def main():
         'confidence_move': 0.4,
         'thrust_max': 0.4,
         'thrust_min': 0.4,
-        'pd_coeff_p': 4.5, #12.5
-        'pd_coeff_d': 2.5,
+        'pd_coeff_p': 3, #12.5
+        'pd_coeff_d': 0,
         'target_lost_fade_per_frame': 0.8,
     }
 
