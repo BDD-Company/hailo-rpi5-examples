@@ -365,6 +365,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 # drone_pitch = drone_attitude['pitch_deg']
                 # drone_roll = drone_attitude['roll_deg']
                 # logger.debug("drone attitude: %s", drone_attitude)
+                mode = ''
 
                 distance_to_center = detection.bbox.center.distance_to(center)
                 target_size = detection.bbox.area()
@@ -380,7 +381,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
                 logger.debug("angle to target: %s", angle_to_target)
 
-                mode = "follow"
+                mode = f'size: {target_size:.4}, distance: {distance_to_center:0.3}, p: {pd_coeff_p:.3} '
+                mode += "follow"
 
                 odometry = telemetry_dict.get('odometry', {}) or {}
                 flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
@@ -560,15 +562,15 @@ def main():
     control_config = {
         'confidence_min': 0.1,
         'confidence_move': 0.4,
-        'thrust_max': 0.4,
+        'thrust_max': 0.45,
         'thrust_min': 0.4,
         'pd_coeff_p': 0.48, #12.5
         'pd_coeff_d': 0,
-        'target_lost_fade_per_frame': 0.8,
+        'target_lost_fade_per_frame': 0.5,
         'pd_coeff_size_min' : 0.003,
         'pd_coeff_size_max' : 0.005,
         'pd_coeff_value_min' : 0.5,
-        'pd_coeff_value_max' : 2,
+        'pd_coeff_value_max' : 3,
     }
 
     drone_thread = threading.Thread(
