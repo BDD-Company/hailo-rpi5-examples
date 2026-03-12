@@ -10,7 +10,11 @@ class CommandRegulator:
         self.Dk = Dk
         self.previous_commands = deque(maxlen=3)
 
-    def nextCommand(self, command : XY, dt_ms : float):
+    def set_coeffs(self, Pk, Dk):
+        self.Pk = Pk
+        self.Dk = Dk
+
+    def next_command(self, command : XY, dt_ms : float):
         assert(isinstance(command, XY))
         commands = self.previous_commands
         if len(commands) == 0:

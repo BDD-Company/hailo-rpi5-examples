@@ -214,6 +214,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     PD_COEFF_P      = control_config.get('pd_coeff_p', 12)
     PD_COEFF_D      = control_config.get('pd_coeff_d', 1)
     FADE_COEFF      = control_config.get('target_lost_fade_per_frame', 0.9)
+    PD_COEFF_P_MIN_TARGET_SIZE = control_config.get('pd_coeff_p_min_target_size', 0.003)
+    PD_COEFF_P_MAX_TARGET_SIZE = control_config.get('pd_coeff_p_max_target_size', 0.005)
+    PD_COEFF_P_MIN  = control_config.get('pd_coeff_p_min', 0.5)
+    PD_COEFF_P_MAX  = control_config.get('pd_coeff_p_max', 2)
 
     center = XY(0.5, 0.5)
     distance_r = 0.1
@@ -268,13 +272,22 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     def update_timestamps_on_detection():
         nonlocal prev_detection_timestamp
         nonlocal current_detection_timestamp
-
         new_detection_timestamp = time.monotonic_ns()
         prev_detection_timestamp = current_detection_timestamp
         current_detection_timestamp = new_detection_timestamp
 
         return current_detection_timestamp - prev_detection_timestamp
 
+    def pd_coeff_p_for_target_size(target_size):
+        min_target_size = PD_COEFF_P_MIN_TARGET_SIZE
+        max_target_size = PD_COEFF_P_MAX_TARGET_SIZE
+        min_pd_coeff_p = PD_COEFF_P_MIN
+        max_pd_coeff_p = PD_COEFF_P_MAX
+
+        target_size_ratio = (target_size - min_target_size) / (max_target_size - min_target_size)
+        result = min_pd_coeff_p + target_size_ratio * (max_pd_coeff_p - min_pd_coeff_p)
+
+        return min(PD_COEFF_P_MAX * 2, max(PD_COEFF_P_MIN / 2, result))
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
 
@@ -354,11 +367,14 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 # logger.debug("drone attitude: %s", drone_attitude)
 
                 distance_to_center = detection.bbox.center.distance_to(center)
-                # logger.debug("distance to center: %s", distance_to_center)
+                target_size = detection.bbox.area()
+                pd_coeff_p = pd_coeff_p_for_target_size(target_size)
 
                 diff_xy = center - detection.bbox.center
-                logger.debug("!!! target : %s", diff_xy)
-                diff_xy = command_regulator.nextCommand(diff_xy, delay_between_detections_ns / 1000_000)
+                logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", diff_xy, target_size, pd_coeff_p)
+                command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
+
+                diff_xy = command_regulator.next_command(diff_xy, delay_between_detections_ns / 1000_000)
                 logger.debug("!!! target after PD: %s", diff_xy)
 
                 angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
@@ -546,9 +562,13 @@ def main():
         'confidence_move': 0.4,
         'thrust_max': 0.4,
         'thrust_min': 0.4,
-        'pd_coeff_p': 3, #12.5
+        'pd_coeff_p': 0.48, #12.5
         'pd_coeff_d': 0,
         'target_lost_fade_per_frame': 0.8,
+        'pd_coeff_size_min' : 0.003,
+        'pd_coeff_size_max' : 0.005,
+        'pd_coeff_value_min' : 0.5,
+        'pd_coeff_value_max' : 2,
     }
 
     drone_thread = threading.Thread(
