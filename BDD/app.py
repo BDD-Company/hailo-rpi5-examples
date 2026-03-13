@@ -285,6 +285,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
         if not PD_COEFF_P_DYNAMIC:
             return PD_COEFF_P
 
+        # avoid tipping over on hallucinations while close to the ground
+        if flight_time_ns <= 100_000_000:
+            return PD_COEFF_P_MIN
+
         min_target_size = PD_COEFF_P_MIN_TARGET_SIZE
         max_target_size = PD_COEFF_P_MAX_TARGET_SIZE
         min_pd_coeff_p = PD_COEFF_P_MIN
@@ -434,6 +438,22 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 else:
                     thrust= MIN_THRUST
                     mode += " RED"
+
+                # while still taking off, avoid dangerous moves 
+                if flight_time_ns < 100_000_000:
+                    MAX_CLOSE_TO_GROUND_ANGLES = XY(60, 60)
+                    new_angle_to_target = angle_to_target
+                    if abs(angle_to_target.x) > MAX_CLOSE_TO_GROUND_ANGLES.x:
+                        sign = angle_to_target.x / abs(angle_to_target.x)
+                        new_angle_to_target.x = min(MAX_CLOSE_TO_GROUND_ANGLES.x, abs(angle_to_target.x)) * sign
+
+                    if abs(angle_to_target.y) > MAX_CLOSE_TO_GROUND_ANGLES.y:
+                        sign = angle_to_target.y / abs(angle_to_target.y)
+                        new_angle_to_target.y = min(MAX_CLOSE_TO_GROUND_ANGLES.y, abs(angle_to_target.y)) * sign
+
+                    if new_angle_to_target != angle_to_target:
+                        logger.warning("Too steep atack close to the ground %s, clamping to %s ", angle_to_target, new_angle_to_target)
+                        angle_to_target = new_angle_to_target
 
                 # await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
                 await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
