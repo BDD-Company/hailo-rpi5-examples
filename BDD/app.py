@@ -407,7 +407,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     mode += " TAKEOFF "
 
                 if True: # move sideways more
-                    roll_pitch_adjust = XY(1, 1.25)
+                    roll_pitch_adjust = XY(0.75, 1.5)
                     angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
                     logger.debug("angle to target adjusted: %s", angle_to_target)
 
@@ -568,7 +568,7 @@ def main():
         'confidence_move': 0.4,
         'thrust_max': 0.45,
         'thrust_min': 0.4,
-        'pd_coeff_p': 0.5, #12.5
+        'pd_coeff_p': 0.6, #12.5
         'pd_coeff_d': 0,
         'target_lost_fade_per_frame': 0.5,
         'pd_coeff_p_min_target_size' : 0.001,
