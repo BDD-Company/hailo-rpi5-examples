@@ -604,9 +604,9 @@ def main():
         # Dynamically adjust P coeff based on target size.
         # P is approximated linearly between min and max, NEVER exceeding min nor max
         'pd_coeff_p_dynamic': True,
-        'pd_coeff_p_dynamic_min_target_size' : 0.001, # normalized target size w * h, where both w and are in range (0..1)
+        'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
         'pd_coeff_p_dynamic_min' : 0.6,
-        'pd_coeff_p_dynamic_max_target_size' : 0.1,  # normalized target size
+        'pd_coeff_p_dynamic_max_target_size' : 0.008,  # normalized target size
         'pd_coeff_p_dynamic_max' : 4,
     }
 
