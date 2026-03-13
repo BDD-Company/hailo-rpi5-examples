@@ -208,16 +208,19 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     logger = global_logger
 
     MIN_CONFIDENCE  = control_config.get('confidence_min', 0.1)
-    MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
+    # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
     MAX_THRUST      = control_config.get('thrust_max', 0.5)
     MIN_THRUST      = control_config.get('thrust_min', 0.4)
+    FADE_COEFF      = control_config.get('target_lost_fade_per_frame', 0.9)
+
     PD_COEFF_P      = control_config.get('pd_coeff_p', 12)
     PD_COEFF_D      = control_config.get('pd_coeff_d', 1)
-    FADE_COEFF      = control_config.get('target_lost_fade_per_frame', 0.9)
-    PD_COEFF_P_MIN_TARGET_SIZE = control_config.get('pd_coeff_p_min_target_size', 0.003)
-    PD_COEFF_P_MAX_TARGET_SIZE = control_config.get('pd_coeff_p_max_target_size', 0.005)
-    PD_COEFF_P_MIN  = control_config.get('pd_coeff_p_min', 0.5)
-    PD_COEFF_P_MAX  = control_config.get('pd_coeff_p_max', 2)
+
+    PD_COEFF_P_DYNAMIC = control_config.get('pd_coeff_p_dynamic', False)
+    PD_COEFF_P_MIN_TARGET_SIZE = control_config.get('pd_coeff_p_dynamic_min_target_size', 0.003)
+    PD_COEFF_P_MAX_TARGET_SIZE = control_config.get('pd_coeff_p_dynamic_max_target_size', 0.005)
+    PD_COEFF_P_MIN  = control_config.get('pd_coeff_p_dynamic_min', 0.5)
+    PD_COEFF_P_MAX  = control_config.get('pd_coeff_p_dynamic_max', 2)
 
     center = XY(0.5, 0.5)
     distance_r = 0.1
@@ -279,7 +282,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
         return current_detection_timestamp - prev_detection_timestamp
 
     def pd_coeff_p_for_target_size(target_size):
-        return PD_COEFF_P
+        if not PD_COEFF_P_DYNAMIC:
+            return PD_COEFF_P
 
         min_target_size = PD_COEFF_P_MIN_TARGET_SIZE
         max_target_size = PD_COEFF_P_MAX_TARGET_SIZE
@@ -407,7 +411,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     mode += " TAKEOFF "
 
                 if True: # move sideways more
-                    roll_pitch_adjust = XY(0.75, 1.5)
+                    roll_pitch_adjust = XY(
+                        0.75, # roll
+                        1.5   # pitch
+                    )
                     angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
                     logger.debug("angle to target adjusted: %s", angle_to_target)
 
@@ -564,17 +571,23 @@ def main():
         record_videos=True)
     
     control_config = {
-        'confidence_min': 0.4,
+        'confidence_min': 0.2,
         'confidence_move': 0.4,
         'thrust_max': 0.45,
         'thrust_min': 0.4,
+
+        'target_lost_fade_per_frame': 0.5,
+
         'pd_coeff_p': 0.6, #12.5
         'pd_coeff_d': 0,
-        'target_lost_fade_per_frame': 0.5,
-        'pd_coeff_p_min_target_size' : 0.001,
-        'pd_coeff_p_max_target_size' : 0.005,
-        'pd_coeff_p_min' : 0.5,
-        'pd_coeff_p_max' : 4,
+
+        # Dynamically adjust P coeff based on target size.
+        # P is approximated linearly between min and max, NEVER exceeding min nor max
+        'pd_coeff_p_dynamic': True,
+        'pd_coeff_p_dynamic_min_target_size' : 0.001, # normalized target size w * h, where both w and are in range (0..1)
+        'pd_coeff_p_dynamic_min' : 0.6,
+        'pd_coeff_p_dynamic_max_target_size' : 0.1,  # normalized target size
+        'pd_coeff_p_dynamic_max' : 4,
     }
 
     drone_thread = threading.Thread(
