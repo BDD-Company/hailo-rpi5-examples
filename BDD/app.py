@@ -279,6 +279,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
         return current_detection_timestamp - prev_detection_timestamp
 
     def pd_coeff_p_for_target_size(target_size):
+        return PD_COEFF_P
+
         min_target_size = PD_COEFF_P_MIN_TARGET_SIZE
         max_target_size = PD_COEFF_P_MAX_TARGET_SIZE
         min_pd_coeff_p = PD_COEFF_P_MIN
@@ -287,7 +289,9 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
         target_size_ratio = (target_size - min_target_size) / (max_target_size - min_target_size)
         result = min_pd_coeff_p + target_size_ratio * (max_pd_coeff_p - min_pd_coeff_p)
 
-        return min(PD_COEFF_P_MAX * 2, max(PD_COEFF_P_MIN / 2, result))
+        deviance_coeff = 1 # could be 2
+        return min(PD_COEFF_P_MAX * deviance_coeff, max(PD_COEFF_P_MIN / deviance_coeff, result))
+
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
 
@@ -402,10 +406,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     max_angle_divisor = 4
                 #     mode += " TAKEOFF "
 
-                # if True: # move sideways more
-                #     roll_pitch_adjust = XY(1.5, 1)
-                #     angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
-                #     logger.debug("angle to target adjusted: %s", angle_to_target)
+                if True: # move sideways more
+                    roll_pitch_adjust = XY(1, 1.25)
+                    angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
+                    logger.debug("angle to target adjusted: %s", angle_to_target)
 
                 prev_angle_to_target = angle_to_target
                 # logger.debug('!!!! max_angle_divisor: %s', max_angle_divisor)
@@ -557,19 +561,19 @@ def main():
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=False)
+        record_videos=True)
     
     control_config = {
         'confidence_min': 0.4,
         'confidence_move': 0.4,
         'thrust_max': 0.45,
         'thrust_min': 0.4,
-        'pd_coeff_p': 0.48, #12.5
+        'pd_coeff_p': 0.5, #12.5
         'pd_coeff_d': 0,
         'target_lost_fade_per_frame': 0.5,
         'pd_coeff_p_min_target_size' : 0.001,
-        'pd_coeff_p_max_target_size' : 0.003,
-        'pd_coeff_p_min' : 1,
+        'pd_coeff_p_max_target_size' : 0.005,
+        'pd_coeff_p_min' : 0.5,
         'pd_coeff_p_max' : 4,
     }
 
