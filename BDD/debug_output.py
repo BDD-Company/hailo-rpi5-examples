@@ -174,14 +174,14 @@ def draw_detection(frame, detection : Detection, color, line_thickness = 1):
 def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1):
     frame_size = XY(frame.shape[1], frame.shape[0])
     # since target is a diff from a frame center (0.5, 0.5) in a 0..1 frame
-    target_pos_on_frame = (target_pos + XY(0.5, 0.5)).multiplied_by_XY(frame_size)
+    target_pos_on_frame = (XY(0.5, 0.5) - target_pos).multiplied_by_XY(frame_size)
 
     frame_rect = Rect(XY(0, 0), frame_size)
     if frame_rect.is_point_inside(target_pos_on_frame):
         cv2.circle(
             frame,
             target_pos_on_frame.to_tuple(to = int),
-            line_thickness * 2 + 2, # 
+            line_thickness * 2 + 2, #
             color,
             line_thickness,
             cv2.LINE_AA
@@ -194,7 +194,7 @@ def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1
         line_thickness,
         cv2.LINE_AA
     )
-        
+
 
 def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     # output = {
@@ -274,10 +274,10 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
             draw_text(frame, line, XY(0, 20 + 40 * line_no * font_scale), font_scale=font_scale, color=FRAME_METADATA_COLOR, bg_color=FRAME_METADATA_COLOR_BG, line_width=1)
 
     for detection in detections.detections:
-        draw_detection(frame, detection, DETECTED_OBJECT_COLOR, 2)
+        draw_detection(frame, detection, DETECTED_OBJECT_COLOR, 1)
 
     if selected is not None:
-        draw_detection(frame, selected, SELECTED_OBJECT_COLOR, 1)
+        draw_detection(frame, selected, SELECTED_OBJECT_COLOR, 2)
         if target is not None:
             draw_target(frame, target, selected.bbox.center, SELECTED_OBJECT_COLOR, 1)
 
@@ -476,7 +476,8 @@ if __name__ == '__main__':
                 'detections': d,
                 'selected' : d.detections[0],
                 'move_command': MoveCommand(adjust_attitude=XY(math.cos(q) * 20, math.sin(q)* 20), move_speed_ms=10),
-                'telemetry' : telemetry
+                'telemetry' : telemetry,
+                'taget' : d.detections[0].bbox.center + XY(0.1, 0.1)
             })
             time.sleep(delay_between_frames_ms / 1000)
         output_queue.put(None) # Just to terminate by exception

@@ -356,6 +356,21 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             update_timestamps()
             logger.debug("!!!")
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
+
+            if DEBUG:
+                # NOTE: injecting fake detections to debug
+                import math
+                __tmp_delta_confidence = math.sin(detections_obj.frame_id / 100) / 10
+                __tmp_delta_x = math.sin(detections_obj.frame_id / 100) / 4
+                __tmp_delta_y = math.cos(detections_obj.frame_id / 100) / 4
+                detections_obj.detections.append(
+                            Detection(
+                                bbox = Rect.from_xywh(0.2 + __tmp_delta_x, 0.2 + __tmp_delta_y, 0.05, 0.05),
+                                confidence = 0.3 + __tmp_delta_confidence,
+                                track_id = 1
+                            )
+                )
+
             logger.debug("!!! GOT DETECTIONS, objects detected: %s (%s), detection delay: %sms, total delay: %sms",
                     len(detections_obj.detections),
                     detections_obj.detections,
@@ -384,7 +399,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             # so telemetry action doesn't get into the logs
             drone.clear_command_history()
 
-            # track_id latest detections
+            # filter out accidential Nones
             detections = [d for d in detections if d is not None]
             # detections.sort(reverse=True, key = lambda d : d.track_id)
             detections.sort(reverse=True, key = lambda d : d.confidence)
@@ -416,20 +431,24 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     # TODO maybe use frame capture time?
                     target_estimator.add_target_pos(target_relative_pos, current_frame_timestamp_ns)
 
-                    number_of_frames_to_estimate_pos = 2
-                    if estimated_distance is not None:
-                        estimated_distance_class, estimated_distance_meters = estimated_distance
-                        if estimated_distance_class == DistanceClass.FAR:
-                            number_of_frames_to_estimate_pos = 10
-                        elif estimated_distance_class == DistanceClass.MEDIUM:
-                            number_of_frames_to_estimate_pos = 5
-                        elif estimated_distance_class == DistanceClass.NEAR:
-                            number_of_frames_to_estimate_pos = 2
+                    number_of_frames_to_estimate_pos = 10
+                    # if estimated_distance is not None:
+                    #     estimated_distance_class, estimated_distance_meters = estimated_distance
+                    #     if estimated_distance_class == DistanceClass.FAR:
+                    #         number_of_frames_to_estimate_pos = 10
+                    #     elif estimated_distance_class == DistanceClass.MEDIUM:
+                    #         number_of_frames_to_estimate_pos = 5
+                    #     elif estimated_distance_class == DistanceClass.NEAR:
+                    #         number_of_frames_to_estimate_pos = 2
 
                     estimation_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
+                    target_relative_pos_old = target_relative_pos
                     target_relative_pos = target_estimator.estimate_target_pos(current_frame_timestamp_ns + estimation_delta_ns, target_relative_pos)
-                    logger.debug("!!! estimated new target pos %s, for +%sms (%d frames)", target_relative_pos, estimation_delta_ns / 1000_1000, number_of_frames_to_estimate_pos)
-
+                    logger.debug("!!! estimated new target pos %s (was %s), for +%sms (%d frames)",
+                            target_relative_pos,
+                            target_relative_pos_old,
+                            estimation_delta_ns / 1000_1000,
+                            number_of_frames_to_estimate_pos)
 
                 odometry = telemetry_dict.get('odometry', {}) or {}
                 flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
@@ -449,17 +468,17 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     max_angle_divisor = 4
                 #     mode += " TAKEOFF "
 
-                if True: # move sideways more
-                    roll_pitch_adjust = XY(
-                        0.75, # roll
-                        1.5   # pitch
-                    )
-                    angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
-                    logger.debug("angle to target adjusted: %s", angle_to_target)
+                # if True: # move sideways more
+                #     roll_pitch_adjust = XY(
+                #         0.75, # roll
+                #         1.5   # pitch
+                #     )
+                #     angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
+                #     logger.debug("angle to target adjusted: %s", angle_to_target)
 
-                prev_angle_to_target = angle_to_target
-                # logger.debug('!!!! max_angle_divisor: %s', max_angle_divisor)
-                logger.debug("angle to target adjusted for mode: %s", angle_to_target)
+                # prev_angle_to_target = angle_to_target
+                # # logger.debug('!!!! max_angle_divisor: %s', max_angle_divisor)
+                # logger.debug("angle to target adjusted for mode: %s", angle_to_target)
 
                 seen_target = True
 
@@ -477,11 +496,11 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     mode += " RED "
                     #pd_coeff_p
 
-                command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
-                if target_relative_pos is not None:
-                    logger.debug("!!! target before PD: %s", target_relative_pos)
-                    target_relative_pos = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
-                    logger.debug("!!! target after PD: %s", target_relative_pos)
+                # command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
+                # if target_relative_pos is not None:
+                #     logger.debug("!!! target before PD: %s", target_relative_pos)
+                #     target_relative_pos = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
+                #     logger.debug("!!! target after PD: %s", target_relative_pos)
 
                 angle_to_target  = target_relative_pos.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                 logger.debug("angle to target: %s", angle_to_target)
@@ -539,7 +558,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     'selected' : detection,
                     # 'move_command': move_command,
                     'telemetry': debug_info,
-                    'target' : target_relative_pos,
+                    'target' : target_relative_pos, #detection.bbox.center + XY(0.1, 0.1) if detection else XY(), # target_relative_pos
                 }
                 output_queue.put(output)
 
@@ -692,30 +711,30 @@ def main():
     )
     output_thread.start()
 
-    # if DEBUG:
-    #     for i in range(3):
-    #         detections_queue.put(
-    #             Detections(-1,
-    #                 frame = None,
-    #                 detections = [
-    #                     Detection(
-    #                         bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-    #                         confidence = 0.1,
-    #                         track_id = 1
-    #                     ),
-    #                     Detection(
-    #                         bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-    #                         confidence = 0.9,
-    #                         track_id = 2
-    #                     ),
-    #                     Detection(
-    #                         bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-    #                         confidence = 0.7,
-    #                         track_id = 3
-    #                     ),
-    #                 ],
-    #             )
-    #         )
+    if DEBUG:
+        for i in range(3):
+            detections_queue.put(
+                Detections(-1,
+                    frame = None,
+                    detections = [
+                        Detection(
+                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                            confidence = 0.1,
+                            track_id = 1
+                        ),
+                        Detection(
+                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                            confidence = 0.9,
+                            track_id = 2
+                        ),
+                        Detection(
+                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+                            confidence = 0.7,
+                            track_id = 3
+                        ),
+                    ],
+                )
+            )
 
     app.run(event)
     print("Done !!!")
