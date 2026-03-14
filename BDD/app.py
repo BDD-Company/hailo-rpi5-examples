@@ -227,6 +227,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     TARGET_SIZE_M = control_config.get('target_size_m', XY(1, 0.5))
     FRAME_ANGLUAR_SIZE_DEG = control_config.get('frame_angular_size_deg', XY(120, 90))
 
+    SAFE_TAKEOFF_PERIOD_NS = control_config.get('safe_takeoff_period_ns', 300_000_000)
+
     center = XY(0.5, 0.5)
     distance_r = 0.1
     distance_r *= distance_r
@@ -303,7 +305,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             return PD_COEFF_P
 
         # avoid tipping over on hallucinations while close to the ground
-        if flight_time_ns <= 100_000_000:
+        if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
             return PD_COEFF_P_MIN
 
         min_target_size = PD_COEFF_P_MIN_TARGET_SIZE
@@ -357,7 +359,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             logger.debug("!!!")
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
 
-            if False: #DEBUG:
+            if DEBUG:
                 # NOTE: injecting fake detections to debug
                 import math
                 __tmp_delta_confidence = math.sin(detections_obj.frame_id / 100) / 10
@@ -424,14 +426,14 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 target_relative_pos = center - detection.bbox.center
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
 
-                if True:
+                if True and target_estimator.history_size() > 3:
                     mode = 'follow* '
 
                     # estimate target based on previous positions
                     # TODO maybe use frame capture time?
                     target_estimator.add_target_pos(target_relative_pos, current_frame_timestamp_ns)
 
-                    number_of_frames_to_estimate_pos = 10
+                    number_of_frames_to_estimate_pos = 2
                     # if estimated_distance is not None:
                     #     estimated_distance_class, estimated_distance_meters = estimated_distance
                     #     if estimated_distance_class == DistanceClass.FAR:
@@ -486,30 +488,32 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 if distance_to_center < 0.2:
                     thrust= MAX_THRUST
                     mode += " GREEN "
-                    pd_coeff_p /= 3
+                    # pd_coeff_p /= 3
                 elif distance_to_center < 0.4:
                     thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
                     mode += " YELLOW "
-                    pd_coeff_p /= 1.5
+                    # pd_coeff_p /= 1.5
                 else:
                     thrust= MIN_THRUST
                     mode += " RED "
                     #pd_coeff_p
 
                 # command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
-                # if target_relative_pos is not None:
-                #     logger.debug("!!! target before PD: %s", target_relative_pos)
-                #     target_relative_pos = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
-                #     logger.debug("!!! target after PD: %s", target_relative_pos)
+                target_relative_pos_pd = target_relative_pos
+                if target_relative_pos is not None:
+                    logger.debug("!!! target before PD: %s", target_relative_pos)
+                    target_relative_pos_pd = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
+                    logger.debug("!!! target after PD: %s", target_relative_pos)
 
-                angle_to_target  = target_relative_pos.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
+                angle_to_target  = target_relative_pos_pd.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
+
                 logger.debug("angle to target: %s", angle_to_target)
 
                 mode = f'size: {target_size:.3}, estimated distance: {estimated_distance}, p: {pd_coeff_p * 1.0 : .3} '
 
 
                 # while still taking off, avoid dangerous moves
-                if flight_time_ns < 100_000_000:
+                if flight_time_ns < SAFE_TAKEOFF_PERIOD_NS:
                     MAX_CLOSE_TO_GROUND_ANGLES = XY(60, 60)
                     new_angle_to_target = angle_to_target
                     if abs(angle_to_target.x) > MAX_CLOSE_TO_GROUND_ANGLES.x:
@@ -663,23 +667,25 @@ def main():
     control_config = {
         'confidence_min': 0.2,
         'confidence_move': 0.4,
-        'thrust_max': 0.45,
+        'thrust_max': 0.5,
         'thrust_min': 0.4,
 
-        'target_lost_fade_per_frame': 0.5,
+        'target_lost_fade_per_frame': 0.75,
 
-        'pd_coeff_p': 0.6, #12.5
+        'pd_coeff_p': 3, #12.5
         'pd_coeff_d': 0,
 
         # Dynamically adjust P coeff based on target size.
         # P is approximated linearly between min and max, NEVER exceeding min nor max
-        'pd_coeff_p_dynamic': True,
+        'pd_coeff_p_dynamic': False,
         'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
         'pd_coeff_p_dynamic_min' : 0.6,
         'pd_coeff_p_dynamic_max_target_size' : 0.001,  # normalized target size
         'pd_coeff_p_dynamic_max' : 4,
 
-        'target_size_m' : XY(1, 0.5)
+        'target_size_m' : XY(0.5, 0.4),
+
+        'safe_takeoff_period_ns': 200_000_000
     }
 
     drone_thread = threading.Thread(
