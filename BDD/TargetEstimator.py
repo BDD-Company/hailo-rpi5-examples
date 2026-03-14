@@ -33,15 +33,15 @@ class TargetEstimator:
     def add_target_pos(self, current_target_pos: XY, current_timestamp_nanoseconds):
         assert(isinstance(current_target_pos, XY))
 
-        current_timestamp_nanoseconds = int(current_timestamp_nanoseconds)
-        self._forget_old_positions(current_timestamp_nanoseconds)
+        # current_timestamp_nanoseconds = int(current_timestamp_nanoseconds)
+        # self._forget_old_positions(current_timestamp_nanoseconds)
 
-        # Keep timestamps monotonic so the velocity estimate stays stable.
-        while (
-            self.target_positions
-            and self.target_positions[-1][0] >= current_timestamp_nanoseconds
-        ):
-            self.target_positions.pop()
+        # # Keep timestamps monotonic so the velocity estimate stays stable.
+        # while (
+        #     self.target_positions
+        #     and self.target_positions[-1][0] >= current_timestamp_nanoseconds
+        # ):
+        #     self.target_positions.pop()
 
         self.target_positions.append(
             (
@@ -65,14 +65,14 @@ class TargetEstimator:
         return (newest_pos - oldest_pos) / delta_t_nanoseconds
 
 
-    def estimate_target_pos(self, at_timestamp_nanoseconds):
+    def estimate_target_pos(self, at_timestamp_nanoseconds, fallback=None):
         if not self.target_positions:
-            return None
+            return fallback
 
         at_timestamp_nanoseconds = int(at_timestamp_nanoseconds)
         self._forget_old_positions(at_timestamp_nanoseconds)
         if not self.target_positions:
-            return None
+            return fallback
 
         newest_timestamp, newest_pos = self.target_positions[-1]
         if len(self.target_positions) == 1:

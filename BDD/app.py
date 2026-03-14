@@ -275,8 +275,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     skipped_detetions = 0
     prev_detection_timestamp_ns = time.monotonic_ns()
     current_detection_timestamp_ns = 0
-    prev_frame_timestamp_ns = 0
-    current_frame_timestamp_ns = 0
+    prev_frame_timestamp_ns = time.monotonic_ns()
+    current_frame_timestamp_ns = time.monotonic_ns()
 
     target_estimator = TargetEstimator()
 
@@ -392,7 +392,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             detection = detections[0] if len(detections) > 0 else Detection()
             if detection.confidence >= MIN_CONFIDENCE:
                 delay_between_detections_ns = update_timestamps_on_detection()
-                estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox)
+                estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
                 # logger.debug("!!! Detection: %s", detection)
 
                 # drone_attitude = telemetry_dict.get('attitude_euler', 0)
@@ -426,7 +426,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                             number_of_frames_to_estimate_pos = 2
 
                     estimation_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
-                    target_relative_pos = target_estimator.estimate_target_pos(current_frame_timestamp_ns + estimation_delta_ns)
+                    target_relative_pos = target_estimator.estimate_target_pos(current_frame_timestamp_ns + estimation_delta_ns, target_relative_pos)
                     logger.debug("!!! estimated new target pos %s, for +%sms (%d frames)", target_relative_pos, estimation_delta_ns / 1000_1000, number_of_frames_to_estimate_pos)
 
 
@@ -477,8 +477,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     #pd_coeff_p
 
                 command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
-                target_relative_pos = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
-                logger.debug("!!! target after PD: %s", target_relative_pos)
+                if target_relative_pos is not None:
+                    logger.debug("!!! target before PD: %s", target_relative_pos)
+                    target_relative_pos = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
+                    logger.debug("!!! target after PD: %s", target_relative_pos)
 
                 angle_to_target  = target_relative_pos.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                 logger.debug("angle to target: %s", angle_to_target)

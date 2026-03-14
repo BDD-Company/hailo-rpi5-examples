@@ -52,7 +52,7 @@ class DistanceClass(Enum):
 def estimate_distance_class(
     target_size_m: XY,
     frame_angular_size_deg: XY,
-    target_frame_size : float,
+    target_frame_size : XY,
     distance_classes : list[float] = None
 ) -> tuple[DistanceClass, float] | None:
     distance_classes = distance_classes if distance_classes and len(distance_classes) == 2 else [5, 10]
