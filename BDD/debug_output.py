@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 DETECTED_OBJECT_COLOR = (100, 0, 0)    # blue
 SELECTED_OBJECT_COLOR = (255, 0, 255)  # magenta
+TARGET_COLOR = (0, 0, 255) # red
 NEUTRAL_RECT_COLOR    = (0, 255, 0)    # green
 CROSSHAIR_COLOR = SELECTED_OBJECT_COLOR
 SPEED_COLOR           = SELECTED_OBJECT_COLOR #(255, 255, 0) # cyan
@@ -175,20 +176,39 @@ def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1
     frame_size = XY(frame.shape[1], frame.shape[0])
     # since target is a diff from a frame center (0.5, 0.5) in a 0..1 frame
     target_pos_on_frame = (XY(0.5, 0.5) - target_pos).multiplied_by_XY(frame_size)
+    from_pos_on_frame = from_pos.multiplied_by_XY(frame_size)
+    target_pos_on_frame2 = from_pos_on_frame + (target_pos_on_frame - from_pos_on_frame) * 2
 
     frame_rect = Rect(XY(0, 0), frame_size)
     if frame_rect.is_point_inside(target_pos_on_frame):
         cv2.circle(
             frame,
             target_pos_on_frame.to_tuple(to = int),
-            line_thickness * 2 + 2, #
+            line_thickness * 2 + 4, #
             color,
             line_thickness,
             cv2.LINE_AA
         )
+        cv2.drawMarker(
+            frame,
+            target_pos_on_frame.to_tuple(to = int),
+            color,
+            cv2.MARKER_TILTED_CROSS,
+            10,
+            1
+        )
+
+    cv2.circle(
+        frame,
+        target_pos_on_frame2.to_tuple(to = int),
+        line_thickness * 2 + 2, #
+        color,
+        line_thickness,
+        cv2.LINE_AA
+    )
 
     cv2.arrowedLine(frame,
-        from_pos.multiplied_by_XY(frame_size).to_tuple(to = int),
+        from_pos_on_frame.to_tuple(to = int),
         target_pos_on_frame.to_tuple(to = int),
         color,
         line_thickness,
@@ -279,7 +299,7 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     if selected is not None:
         draw_detection(frame, selected, SELECTED_OBJECT_COLOR, 2)
         if target is not None:
-            draw_target(frame, target, selected.bbox.center, SELECTED_OBJECT_COLOR, 1)
+            draw_target(frame, target, selected.bbox.center, TARGET_COLOR, 1)
 
     if move_command is not None:
         # move command in degrees here, but we don't care

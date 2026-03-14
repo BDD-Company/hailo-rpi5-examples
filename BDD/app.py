@@ -357,7 +357,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             logger.debug("!!!")
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
 
-            if DEBUG:
+            if False: #DEBUG:
                 # NOTE: injecting fake detections to debug
                 import math
                 __tmp_delta_confidence = math.sin(detections_obj.frame_id / 100) / 10
