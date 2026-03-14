@@ -348,6 +348,9 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 logger.warning("No frames (%d times), no detections, input queue empty? ACTION: %s", skipped_detetions, drone.last_command())
                 continue
+            except:
+                logger.exception("Serious error getting next detection from a queue", exc_info=True)
+                break
 
             update_timestamps()
             logger.debug("!!!")
@@ -384,6 +387,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             detections = [d for d in detections if d is not None]
             # detections.sort(reverse=True, key = lambda d : d.track_id)
             detections.sort(reverse=True, key = lambda d : d.confidence)
+            target_relative_pos = None
 
             detection = detections[0] if len(detections) > 0 else Detection()
             if detection.confidence >= MIN_CONFIDENCE:
