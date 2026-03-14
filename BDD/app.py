@@ -29,6 +29,7 @@ from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
 from CommandRegulator import CommandRegulator
 from OverwriteQueue import OverwriteQueue
 from TargetEstimator import TargetEstimator
+from estimate_distance import estimate_distance_class, DistanceClass
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
 from video_sink_multi import MultiSink
@@ -289,7 +290,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     def update_timestamps_on_detection():
         nonlocal prev_detection_timestamp_ns
         nonlocal current_detection_timestamp_ns
-    
+
         new_detection_timestamp = current_frame_timestamp_ns
         prev_detection_timestamp_ns = current_detection_timestamp_ns
         current_detection_timestamp_ns = new_detection_timestamp
@@ -387,40 +388,43 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             detection = detections[0] if len(detections) > 0 else Detection()
             if detection.confidence >= MIN_CONFIDENCE:
                 delay_between_detections_ns = update_timestamps_on_detection()
+                estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox)
                 # logger.debug("!!! Detection: %s", detection)
 
                 # drone_attitude = telemetry_dict.get('attitude_euler', 0)
                 # drone_pitch = drone_attitude['pitch_deg']
                 # drone_roll = drone_attitude['roll_deg']
                 # logger.debug("drone attitude: %s", drone_attitude)
-                mode = ''
+                mode = 'follow'
 
                 distance_to_center = detection.bbox.center.distance_to(center)
                 target_size = detection.bbox.area()
                 pd_coeff_p = pd_coeff_p_for_target_size(target_size)
 
-                diff_xy = center - detection.bbox.center
-                logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", diff_xy, target_size, pd_coeff_p)
+                target_relative_pos = center - detection.bbox.center
+                logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
 
                 if True:
+                    mode = 'follow* '
+
                     # estimate target based on previous positions
                     # TODO maybe use frame capture time?
-                    target_estimator.add_target_pos(diff_xy, current_frame_timestamp_ns)
+                    target_estimator.add_target_pos(target_relative_pos, current_frame_timestamp_ns)
+
                     number_of_frames_to_estimate_pos = 2
+                    if estimated_distance is not None:
+                        estimated_distance_class, estimated_distance_meters = estimated_distance
+                        if estimated_distance_class == DistanceClass.FAR:
+                            number_of_frames_to_estimate_pos = 10
+                        elif estimated_distance_class == DistanceClass.MEDIUM:
+                            number_of_frames_to_estimate_pos = 5
+                        elif estimated_distance_class == DistanceClass.NEAR:
+                            number_of_frames_to_estimate_pos = 2
+
                     estimation_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
-                    diff_xy = target_estimator.estimate_target_pos(current_frame_timestamp_ns + estimation_delta_ns)
-                    logger.debug("!!! estimated new target pos %s, for +%sms", diff_xy, estimation_delta_ns / 1000_1000)
+                    target_relative_pos = target_estimator.estimate_target_pos(current_frame_timestamp_ns + estimation_delta_ns)
+                    logger.debug("!!! estimated new target pos %s, for +%sms (%d frames)", target_relative_pos, estimation_delta_ns / 1000_1000, number_of_frames_to_estimate_pos)
 
-                command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
-
-                diff_xy = command_regulator.next_command(diff_xy, delay_between_detections_ns / 1000_000)
-                logger.debug("!!! target after PD: %s", diff_xy)
-
-                angle_to_target  = diff_xy.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
-                logger.debug("angle to target: %s", angle_to_target)
-
-                mode = f'size: {target_size}, distance: {distance_to_center}, p: {pd_coeff_p} '
-                mode += "follow"
 
                 odometry = telemetry_dict.get('odometry', {}) or {}
                 flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
@@ -457,15 +461,28 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 thrust = MIN_THRUST
                 if distance_to_center < 0.2:
                     thrust= MAX_THRUST
-                    mode += " GREEN"
+                    mode += " GREEN "
+                    pd_coeff_p /= 3
                 elif distance_to_center < 0.4:
                     thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
-                    mode += " YELLOW"
+                    mode += " YELLOW "
+                    pd_coeff_p /= 1.5
                 else:
                     thrust= MIN_THRUST
-                    mode += " RED"
+                    mode += " RED "
+                    #pd_coeff_p
 
-                # while still taking off, avoid dangerous moves 
+                command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
+                target_relative_pos = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
+                logger.debug("!!! target after PD: %s", target_relative_pos)
+
+                angle_to_target  = target_relative_pos.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
+                logger.debug("angle to target: %s", angle_to_target)
+
+                mode = f'size: {target_size:.3}, estimated distance: {estimated_distance}, p: {pd_coeff_p * 1.0 : .3} '
+
+
+                # while still taking off, avoid dangerous moves
                 if flight_time_ns < 100_000_000:
                     MAX_CLOSE_TO_GROUND_ANGLES = XY(60, 60)
                     new_angle_to_target = angle_to_target
@@ -515,7 +532,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     'selected' : detection,
                     # 'move_command': move_command,
                     'telemetry': debug_info,
-                    'target' : diff_xy,
+                    'target' : target_relative_pos,
                 }
                 output_queue.put(output)
 
@@ -616,7 +633,7 @@ def main():
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
         record_videos=True)
-    
+
     control_config = {
         'confidence_min': 0.2,
         'confidence_move': 0.4,
@@ -633,15 +650,17 @@ def main():
         'pd_coeff_p_dynamic': True,
         'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
         'pd_coeff_p_dynamic_min' : 0.6,
-        'pd_coeff_p_dynamic_max_target_size' : 0.008,  # normalized target size
+        'pd_coeff_p_dynamic_max_target_size' : 0.001,  # normalized target size
         'pd_coeff_p_dynamic_max' : 4,
+
+        'target_size_m' : XY(1, 0.5)
     }
 
     drone_thread = threading.Thread(
         target = drone_controlling_tread,
         args = ('udp://:14550', drone_config, detections_queue),
         kwargs= dict(
-            control_config= control_config, 
+            control_config= control_config,
             output_queue= output_queue,
             signal_event_when_ready= event,
         ),
