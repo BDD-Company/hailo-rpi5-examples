@@ -28,6 +28,7 @@ from gi.repository import Gst, GLib
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
 from CommandRegulator import CommandRegulator
 from OverwriteQueue import OverwriteQueue
+from TargetEstimator import TargetEstimator
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
 from video_sink_multi import MultiSink
@@ -222,10 +223,12 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     PD_COEFF_P_MIN  = control_config.get('pd_coeff_p_dynamic_min', 0.5)
     PD_COEFF_P_MAX  = control_config.get('pd_coeff_p_dynamic_max', 2)
 
+    TARGET_SIZE_M = control_config.get('target_size_m', XY(1, 0.5))
+    FRAME_ANGLUAR_SIZE_DEG = control_config.get('frame_angular_size_deg', XY(120, 90))
+
     center = XY(0.5, 0.5)
     distance_r = 0.1
     distance_r *= distance_r
-    frame_angular_size = XY(120, 90)
     seen_target = False
 
     from drone import DroneMover, is_in_air
@@ -261,25 +264,37 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
     #logger.debug("!!! detections_queue: %s (%s items)", detections_queue, detections_queue.qsize())
 
-    # return
-    moving = False
-    target_seen_at_pos = XY(0,0)
+    # debug wrapper to collect executed commands
     drone = debug_collect_call_info(drone, history_max_size=3)
+
+    moving = False
     flight_time_ns = 0
     takeoff_time_ns = None
     prev_angle_to_target = XY()
     skipped_detetions = 0
-    prev_detection_timestamp = time.monotonic_ns()
-    current_detection_timestamp = 0
+    prev_detection_timestamp_ns = time.monotonic_ns()
+    current_detection_timestamp_ns = 0
+    prev_frame_timestamp_ns = 0
+    current_frame_timestamp_ns = 0
+
+    target_estimator = TargetEstimator()
+
+    def update_timestamps():
+        nonlocal prev_frame_timestamp_ns
+        nonlocal current_frame_timestamp_ns
+        new_frame_timestamp = time.monotonic_ns()
+        prev_frame_timestamp_ns = current_frame_timestamp_ns
+        current_frame_timestamp_ns = new_frame_timestamp
 
     def update_timestamps_on_detection():
-        nonlocal prev_detection_timestamp
-        nonlocal current_detection_timestamp
-        new_detection_timestamp = time.monotonic_ns()
-        prev_detection_timestamp = current_detection_timestamp
-        current_detection_timestamp = new_detection_timestamp
+        nonlocal prev_detection_timestamp_ns
+        nonlocal current_detection_timestamp_ns
+    
+        new_detection_timestamp = current_frame_timestamp_ns
+        prev_detection_timestamp_ns = current_detection_timestamp_ns
+        current_detection_timestamp_ns = new_detection_timestamp
 
-        return current_detection_timestamp - prev_detection_timestamp
+        return current_detection_timestamp_ns - prev_detection_timestamp_ns
 
     def pd_coeff_p_for_target_size(target_size):
         if not PD_COEFF_P_DYNAMIC:
@@ -333,6 +348,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 logger.warning("No frames (%d times), no detections, input queue empty? ACTION: %s", skipped_detetions, drone.last_command())
                 continue
 
+            update_timestamps()
             logger.debug("!!!")
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
             logger.debug("!!! GOT DETECTIONS, objects detected: %s (%s), detection delay: %sms, total delay: %sms",
@@ -385,12 +401,22 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 diff_xy = center - detection.bbox.center
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", diff_xy, target_size, pd_coeff_p)
+
+                if True:
+                    # estimate target based on previous positions
+                    # TODO maybe use frame capture time?
+                    target_estimator.add_target_pos(diff_xy, current_frame_timestamp_ns)
+                    number_of_frames_to_estimate_pos = 2
+                    estimation_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
+                    diff_xy = target_estimator.estimate_target_pos(current_frame_timestamp_ns + estimation_delta_ns)
+                    logger.debug("!!! estimated new target pos %s, for +%sms", diff_xy, estimation_delta_ns / 1000_1000)
+
                 command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
 
                 diff_xy = command_regulator.next_command(diff_xy, delay_between_detections_ns / 1000_000)
                 logger.debug("!!! target after PD: %s", diff_xy)
 
-                angle_to_target  = diff_xy.multiplied_by_XY(frame_angular_size)
+                angle_to_target  = diff_xy.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                 logger.debug("angle to target: %s", angle_to_target)
 
                 mode = f'size: {target_size}, distance: {distance_to_center}, p: {pd_coeff_p} '
@@ -489,6 +515,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     'selected' : detection,
                     # 'move_command': move_command,
                     'telemetry': debug_info,
+                    'target' : diff_xy,
                 }
                 output_queue.put(output)
 

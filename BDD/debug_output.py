@@ -171,6 +171,31 @@ def draw_detection(frame, detection : Detection, color, line_thickness = 1):
     #         line_width = line_thickness
     #     )
 
+def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1):
+    frame_size = XY(frame.shape[1], frame.shape[0])
+    # since target is a diff from a frame center (0.5, 0.5) in a 0..1 frame
+    target_pos_on_frame = (target_pos + XY(0.5, 0.5)).multiplied_by_XY(frame_size)
+
+    frame_rect = Rect(XY(0, 0), frame_size)
+    if frame_rect.is_point_inside(target_pos_on_frame):
+        cv2.circle(
+            frame,
+            target_pos_on_frame.to_tuple(to = int),
+            line_thickness * 2 + 2, # 
+            color,
+            line_thickness,
+            cv2.LINE_AA
+        )
+
+    cv2.arrowedLine(frame,
+        from_pos.multiplied_by_XY(frame_size).to_tuple(to = int),
+        target_pos_on_frame.to_tuple(to = int),
+        color,
+        line_thickness,
+        cv2.LINE_AA
+    )
+        
+
 def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     # output = {
     #                 'detections' : detections_obj,
@@ -185,6 +210,7 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     selected : Detection|None = detection_dict.get('selected', None)
     move_command : MoveCommand | None = detection_dict.get('move_command', None)
     telemetry : dict | None = detection_dict.get('telemetry', {})
+    target : XY | None = detection_dict.get('target', None)
 
     frame = detections.frame if detections else None
 
@@ -243,7 +269,6 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         add_line('mode', debug_info)
         add_line('action', debug_info)
 
-
         for line_no, line in enumerate(lines):
             font_scale = 0.4
             draw_text(frame, line, XY(0, 20 + 40 * line_no * font_scale), font_scale=font_scale, color=FRAME_METADATA_COLOR, bg_color=FRAME_METADATA_COLOR_BG, line_width=1)
@@ -253,6 +278,8 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
 
     if selected is not None:
         draw_detection(frame, selected, SELECTED_OBJECT_COLOR, 1)
+        if target is not None:
+            draw_target(frame, target, selected.bbox.center, SELECTED_OBJECT_COLOR, 1)
 
     if move_command is not None:
         # move command in degrees here, but we don't care
