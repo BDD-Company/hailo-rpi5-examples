@@ -278,7 +278,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     prev_frame_timestamp_ns = time.monotonic_ns()
     current_frame_timestamp_ns = time.monotonic_ns()
 
-    target_estimator = TargetEstimator()
+    # NOTE: HUGE age to avoid purging prev positions, since it doesn't work as expected RN
+    target_estimator = TargetEstimator(max_target_position_age_nanoseconds=500_000_000_000)
 
     def update_timestamps():
         nonlocal prev_frame_timestamp_ns
