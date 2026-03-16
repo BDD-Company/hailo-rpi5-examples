@@ -36,8 +36,8 @@ class user_app_callback_class(app_callback_class):
             percentage = (count * 100.0) / total_detections
             print(
                 f"\tclass {class_id}: count={count} ({percentage:.2f}%), "
-                f"\tconfidence min/median/max={confidences_np.min():.4f}/"
-                f"{np.median(confidences_np):.4f}/{confidences_np.max():.4f}"
+                f"\tconfidence min/median/max={confidences_np.min():.4f} "
+                f"{np.median(confidences_np):.4f} {confidences_np.max():.4f}"
             )
 
 
@@ -84,7 +84,8 @@ def app_callback(pad, info, user_data):
         track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
         if len(track) == 1:
             track_id = track[0].get_id()
-        string_to_print += (f"frame#{frame_id:04} Detection: #{track_id} {tuple('{:.3}'.format(f) for f in (bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()))} class: {class_id} confidence: {confidence:.2f}\n")
+        string_to_print += (f"frame#{frame_id:04} detection: #{track_id} class: {class_id} confidence: {confidence:.2f}")
+        string_to_print += (f" (x: {bbox.xmin():.3}, y: {bbox.ymin():.3}, w: {bbox.width():.3}, h: {bbox.height():.3})\n")
         detection_count += 1
         user_data.new_detection(class_id, confidence)
 
