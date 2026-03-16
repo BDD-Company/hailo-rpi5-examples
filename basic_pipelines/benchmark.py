@@ -30,14 +30,24 @@ class user_app_callback_class(app_callback_class):
         if total_detections == 0:
             return
 
+        all_confidences = np.asarray(
+            [confidence for confidences in self.detections_info.values() for confidence in confidences],
+            dtype=np.float32,
+        )
+        print(
+            "\toverall confidence min/median/average/max="
+            f"{all_confidences.min():.4f} {np.median(all_confidences):.4f} "
+            f"{all_confidences.mean():.4f} {all_confidences.max():.4f}"
+        )
+
         for class_id, confidences in sorted(self.detections_info.items()):
             confidences_np = np.asarray(confidences, dtype=np.float32)
             count = confidences_np.size
             percentage = (count * 100.0) / total_detections
             print(
                 f"\tclass {class_id}: count={count} ({percentage:.2f}%), "
-                f"\tconfidence min/median/max={confidences_np.min():.4f} "
-                f"{np.median(confidences_np):.4f} {confidences_np.max():.4f}"
+                f"\tconfidence min/median/average/max={confidences_np.min():.4f} "
+                f"{np.median(confidences_np):.4f} {confidences_np.mean():.4f} {confidences_np.max():.4f}"
             )
 
 

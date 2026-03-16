@@ -5,10 +5,9 @@ set -euo pipefail
 # required by hail example apps, otherwise pipeline tries to create windows on no display and crashes
 export DISPLAY=:0
 
-readonly TEST_PREFIX=${1}
+readonly OUT_DIR=${1}
 readonly HEF_DIR=${2}
 readonly TEST_DIR=${3}
-readonly OUT_DIR=${4:-"."}
 readonly VENV_DIR="venv_hailo_rpi_examples"
 
 if [[ ! -d "${TEST_DIR}" ]]; then
@@ -17,12 +16,13 @@ if [[ ! -d "${TEST_DIR}" ]]; then
 fi
 
 if [[ ! -d "${HEF_DIR}" ]]; then
-    echo "HEF_DIR is not a directory: ${HEF}" >&2
+    echo "HEF_DIR is not a directory: ${HEF_DIR}" >&2
     exit 1
 fi
 
+mkdir -p "${OUT_DIR}"
 if [[ ! -d "${OUT_DIR}" ]]; then
-    echo "OUT_DIR is not a directory: ${HEF}" >&2
+    echo "OUT_DIR is not a directory: ${OUT_DIR}" >&2
     exit 1
 fi
 
@@ -53,7 +53,7 @@ function bench()
         [[ -f "${f}" ]] || continue
 
         video_basename="$(just_filename "${f}")"
-        report_name="${TEST_PREFIX}_${hef_basename}_${video_basename}.log"
+        report_name="${hef_basename}+${video_basename}.log"
 
         echo "${hef_file} vs ${f} => ${report_name}"
         python basic_pipelines/benchmark.py --i "${f}" --hef-path "${hef_file}" 2>/dev/null \
@@ -62,7 +62,10 @@ function bench()
     done
 }
 
+hailortcli fw-control identify > "${OUT_DIR}/hailo_info.log"
 
 for hef_file in "${HEF_DIR}"/*.hef; do
+    hef_basename="$(just_filename "${hef_file}")"
+    hailortcli benchmark ${hef_file} &> "${OUT_DIR}/bench_${hef_basename}.log"
     bench "${hef_file}"
 done
