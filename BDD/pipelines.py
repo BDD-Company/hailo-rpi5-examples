@@ -22,16 +22,20 @@ This set is tweaked to minimize latency from capturing frame to consuming detect
 """
 
 
-def QUEUE(name, max_size_buffers=3, max_size_bytes=0, max_size_time=100_000_000, leaky='downstream'):
+def QUEUE(name, max_size_buffers=1, max_size_bytes=0, max_size_time=0, leaky='downstream'):
     """
     Creates a GStreamer queue element string with the specified parameters.
 
     Args:
         name (str): The name of the queue element.
-        max_size_buffers (int, optional): The maximum number of buffers that the queue can hold. Defaults to 3.
+        max_size_buffers (int, optional): The maximum number of buffers that the queue can hold. Defaults to 1.
+            Set to 1 so each stage holds at most one frame; leaky=downstream drops the oldest when full,
+            ensuring downstream always receives the freshest available frame.
         max_size_bytes (int, optional): The maximum size in bytes that the queue can hold. Defaults to 0 (unlimited).
-        max_size_time (int, optional): The maximum size in time that the queue can hold. Defaults to 0 (unlimited).
-        leaky (str, optional): The leaky type of the queue. Can be 'no', 'upstream', or 'downstream'. Defaults to 'no'.
+        max_size_time (int, optional): The maximum time (nanoseconds) the queue may buffer. Defaults to 0 (disabled).
+            Kept at 0 so buffer count is the sole cap; a non-zero time limit grows proportionally to
+            downstream slowness and can mask backpressure instead of shedding it.
+        leaky (str, optional): The leaky type of the queue. Can be 'no', 'upstream', or 'downstream'. Defaults to 'downstream'.
 
     Returns:
         str: A string representing the GStreamer queue element with the specified parameters.
@@ -215,7 +219,7 @@ def INFERENCE_PIPELINE(
     return inference_pipeline
 
 
-def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=20, name='inference_wrapper'):
+def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=2, name='inference_wrapper'):
     """
     Creates a GStreamer pipeline string that wraps an inner pipeline with a hailocropper and hailoaggregator.
     This allows to keep the original video resolution and color-space (format) of the input frame.
