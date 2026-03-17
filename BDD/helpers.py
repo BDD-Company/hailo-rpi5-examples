@@ -164,6 +164,10 @@ class Rect:
         return cls(XY(float(x1), float(y1)), XY(float(x2), float(y2)))
 
     @classmethod
+    def from_xywh(cls, x : float, y : float, w : float, h : float) -> 'Rect':
+        return cls(XY(float(x), float(y)), XY(float(x + w), float(y + h)))
+
+    @classmethod
     def from_p1p2(cls, p1 : XY, p2 : XY) -> 'Rect':
         return cls(p1, p2)
 
@@ -460,7 +464,7 @@ class LoggerWithPrefix(logging.LoggerAdapter):
 
 
 def _safe_repr(value, max_length: int = 160) -> str:
-    text = repr(value)
+    text = str(value)
     if len(text) <= max_length:
         return text
     return text[: max_length - 3] + "..."

@@ -242,7 +242,7 @@ class GStreamerApp:
             err, debug = message.parse_error()
             logger.error(f"got error from Gstreamer: %s : %s", err, debug)
 
-            self.error_occurred = True
+            self.error_occurred = (err, debug)
             self.shutdown()
         # QOS
         elif t == Gst.MessageType.QOS:
@@ -402,8 +402,8 @@ class GStreamerApp:
         except Exception as e:
             logger.error("Error during cleanup", exc_info=True)
         finally:
-            if self.error_occurred:
-                logger.error("Exiting with error...")
+            if self.error_occurred is not False:
+                logger.error("Exiting due to error... %s", self.error_occurred)
                 sys.exit(1)
             else:
                 logger.info("Exiting...")
@@ -579,7 +579,7 @@ class GStreamerDetectionApp(GStreamerApp):
         super().__init__(parser, user_data)
         # Additional initialization code can be added here
         # Set Hailo parameters these parameters should be set based on the model used
-        self.batch_size = 2
+        self.batch_size = 1
         nms_score_threshold = 0.3
         nms_iou_threshold = 0.45
 

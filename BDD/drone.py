@@ -4,20 +4,21 @@ import asyncio
 # import nest_asyncio
 import dataclasses
 from enum import Enum
+from math import nan
 import time
 
-from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate
+from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate, OffboardError
 from mavsdk import System
 from mavsdk.telemetry import Telemetry, EulerAngle, LandedState
 
-from helpers import MoveCommand, dotdict, XY
+from helpers import MoveCommand, dotdict, XY, debug_collect_call_info
 
 import logging
 
 logger = logging.getLogger("BDD_drone")
 
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
-SAFE_TILT_DEG = 40
+SAFE_TILT_DEG = 180
 IDLE_THRUST = 0.01
 
 def is_in_air(state : LandedState):
@@ -194,22 +195,22 @@ class DroneMover():
                 logging.debug("seems armable")
             break
 
-        await self.move_to_xy(XY(0, 0), 0)
-        manual_input_task = asyncio.create_task(self.__manual_input_loop(), name="manual_input_loop")
-        manual_input_task.add_done_callback(self._log_background_task_result)
-        self.tasks.append(manual_input_task)
-        await asyncio.sleep(0.5)
-        await self.move_to_xy(XY(0, 0), 0)
+        # await self.move_to_xy(XY(0, 0), 0)
+        # manual_input_task = asyncio.create_task(self.__manual_input_loop(), name="manual_input_loop")
+        # manual_input_task.add_done_callback(self._log_background_task_result)
+        # self.tasks.append(manual_input_task)
+        # await asyncio.sleep(0.5)
+        # await self.move_to_xy(XY(0, 0), 0)
 
         # await drone.manual_control.start_altitude_control()
 
         async def arm():
             logging.info("arming")
 
-            # Enable arming without GPS
+            # # Enable arming without GPS
             await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
-            await drone.param.set_param_int("COM_RC_IN_MODE", 1) # 1 == drone flies autonomously
-            await drone.param.set_param_int("COM_RC_OVERRIDE", 1)
+            # await drone.param.set_param_int("COM_RC_IN_MODE", 1) # 1 == drone flies autonomously
+            # await drone.param.set_param_int("COM_RC_OVERRIDE", 1)
 
             # keep armed even if not took off for long time (1000 seconds)
             await drone.param.set_param_float("COM_DISARM_PRFLT", 1000.0)
@@ -231,24 +232,68 @@ class DroneMover():
 
             if arming_exception is not None:
                 logging.warning(f"Failed to arm, latest exception", exc_info=arming_exception)
+            else:
+                logging.info("armed")
+
 
         await arm()
 
-        logging.info("armed")
+
+        await asyncio.sleep(1) # TODO(vnemkov): maybe remove?
+
+        # Важно: перед включением Offboard нужно отправить хотя бы одну команду
+        # NED: Z вниз → 0 = текущая высота
+        #await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.01, 0.01, 0.01, 0.01))
+        # await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, 0.0, -0.01))
+        await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
+        # await drone.offboard.set_attitude_rate(AttitudeRate(0.0, 0.0, 0.0, 0.02))
+
+        logger.debug("Entering Offboard mode...")
+        try:
+            await drone.offboard.start()
+        except OffboardError as e:
+            logger.error("Failed to enter Offboard mode: %s, aborting", e, exc_info=True)
+            await drone.action.disarm()
+            raise
+
+        self.offboard = drone.offboard
+
+        # DURATION=3
+        # THRUST=0.3
+        # logger.debug("A little dance")
+        # await self.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=THRUST)
+        # await asyncio.sleep(DURATION)
+        # await self.move_to_target_zenith_async(roll_degree=  0,  pitch_degree=0, thrust=THRUST)
+        # await asyncio.sleep(DURATION / 3)
+        # await self.move_to_target_zenith_async(roll_degree= 45, pitch_degree=0, thrust=THRUST)
+        # await asyncio.sleep(DURATION)
+
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=THRUST / 2)
+        # await asyncio.sleep(DURATION / 3)
+
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=-45, thrust=THRUST)
+        # await asyncio.sleep(DURATION)
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=  0, thrust=THRUST)
+        # await asyncio.sleep(DURATION / 3)
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree= 45, thrust=THRUST)
+        # await asyncio.sleep(DURATION)
+
+        # await self.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=THRUST / 2)
+        # await asyncio.sleep(DURATION / 3)
 
         # await asyncio.sleep(0.5) # TODO(vnemkov): maybe remove?
-        await self.move_to_xy(XY(0, 0), IDLE_THRUST)
-        await asyncio.sleep(0.5)
-        for i in range(0, 10):
-            logging.info("initial dance: %s", i)
-            await self.move_to_xy(XY(0.5, 0.5), 0.2, allow_unsafe=True)
-            await asyncio.sleep(1)
-            await self.move_to_xy(XY(0.5, -0.5), 0.2, allow_unsafe=True)
-            await asyncio.sleep(1)
-            await self.move_to_xy(XY(-0.5, 0.5), 0.2, allow_unsafe=True)
-            await asyncio.sleep(1)
-            await self.move_to_xy(XY(-0.5, -0.5), 0.2, allow_unsafe=True)
-            await asyncio.sleep(1)
+        # await self.move_to_xy(XY(0, 0), IDLE_THRUST)
+        # await asyncio.sleep(0.5)
+        # for i in range(0, 10):
+        #     logging.info("initial dance: %s", i)
+        #     await self.move_to_xy(XY(0.5, 0.5), 0.2, allow_unsafe=True)
+        #     await asyncio.sleep(1)
+        #     await self.move_to_xy(XY(0.5, -0.5), 0.2, allow_unsafe=True)
+        #     await asyncio.sleep(1)
+        #     await self.move_to_xy(XY(-0.5, 0.5), 0.2, allow_unsafe=True)
+        #     await asyncio.sleep(1)
+        #     await self.move_to_xy(XY(-0.5, -0.5), 0.2, allow_unsafe=True)
+        #     await asyncio.sleep(1)
 
         # await asyncio.sleep(1)
         # logging.debug("offboard mode: %s", await self.offboard.is_active())
@@ -310,38 +355,83 @@ class DroneMover():
         return asyncio.run(self.get_telemetry_dict(wait))
 
 
-    async def move_to_xy(self, xy : XY, thrust : float = 0.0, allow_unsafe = True) -> None:
+    # async def move_to_xy(self, xy : XY, thrust : float = 0.0, allow_unsafe = True) -> None:
         # Keep commanded tilt within a safe envelope to avoid toppling.
-        SAFE_MANUAL_VALUES = 0.9
-        def _clamp(value: float) -> float:
-            if allow_unsafe == True:
-                return value
-            return max(-SAFE_MANUAL_VALUES, min(SAFE_MANUAL_VALUES, value))
+        # SAFE_MANUAL_VALUES = 0.9
+        # def _clamp(value: float) -> float:
+        #     if allow_unsafe == True:
+        #         return value
+        #     return max(-SAFE_MANUAL_VALUES, min(SAFE_MANUAL_VALUES, value))
 
 
-        # x : float
-        #      value between -1. to 1. negative -> backwards, positive -> forwards
+        # # x : float
+        # #      value between -1. to 1. negative -> backwards, positive -> forwards
 
-        # y : float
-        #      value between -1. to 1. negative -> left, positive -> right
+        # # y : float
+        # #      value between -1. to 1. negative -> left, positive -> right
 
-        # z : float
-        #      value between -1. to 1. negative -> down, positive -> up (usually for now, for multicopter 0 to 1 is expected)
+        # # z : float
+        # #      value between -1. to 1. negative -> down, positive -> up (usually for now, for multicopter 0 to 1 is expected)
 
-        self.__sticks["x"] = _clamp(xy.y)
-        self.__sticks["y"] = _clamp(xy.x)
-        self.__sticks["z"] = _clamp(thrust)
-        self.__sticks["r"] = 0
-        self.__sticks["last_set_time"] = time.monotonic_ns()
+        # self.__sticks["x"] = _clamp(xy.y)
+        # self.__sticks["y"] = _clamp(xy.x)
+        # self.__sticks["z"] = _clamp(thrust)
+        # self.__sticks["r"] = 0
+        # self.__sticks["last_set_time"] = time.monotonic_ns()
+        # await self.drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.02))
 
+
+    async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0) -> None:
+        # Keep commanded tilt within a safe envelope to avoid toppling.
+        def _clamp(angle: float) -> float:
+            return max(-SAFE_TILT_DEG, min(SAFE_TILT_DEG, angle))
+
+        safe_roll = _clamp(roll_degree)
+        safe_pitch = _clamp(pitch_degree)
+        drone_offboard = debug_collect_call_info(self.drone.offboard)
+
+        await drone_offboard.set_attitude_rate(
+            AttitudeRate(
+                roll_deg_s=safe_roll,
+                pitch_deg_s=safe_pitch,
+                yaw_deg_s=0,
+                thrust_value=thrust,
+            )
+        )
+
+        logger.info("!!! executing: %s ", drone_offboard.last_command())
+
+        # await self.drone.offboard.set_attitude(
+        #     Attitude(
+        #         roll_deg=safe_roll,
+        #         pitch_deg=safe_pitch,
+        #         yaw_deg=0,
+        #         thrust_value=thrust,
+        #     )
+        # )
+        # await self.drone.offboard.set_velocity_body(
+        #     VelocityBodyYawspeed(
+        #         forward_m_s=safe_pitch,
+        #         right_m_s=safe_roll,
+        #         down_m_s=thrust * 10,
+        #         yawspeed_deg_s=0
+        #     )
+        # )
 
     async def standstill(self) -> None:
-        # await self.move_to_xy(XY(0, 0), 0)
-        pass
+        await self.move_to_target_zenith_async(0, 0, IDLE_THRUST * 2)
+
 
     async def idle(self):
-        # await self.move_to_xy(XY(0, 0), 0.0)
-        pass
+        for i in range(0, 0):
+            await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
+            await asyncio.sleep(0.2)
+            await self.move_to_target_zenith_async(0, 0, IDLE_THRUST)
+            await asyncio.sleep(0.05)
+            await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
+
+        await self.move_to_target_zenith_async(0, 0, IDLE_THRUST / 2)
+
 
     def ABORT(self):
         self.aborted = True
