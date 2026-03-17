@@ -2,12 +2,12 @@
 
 set -euo pipefail
 
-# Path to the output directory with results of the benching
-readonly OUT_DIR=${1}
+# Path to the directory with the videos
+readonly TEST_VIDEOS_DIR=${1}
 # Path to the directory with the .hef files or path to a single hef file
 readonly HEF_DIR=${2}
-# Path to the directory with the videos
-readonly TEST_VIDEOS_DIR=${3}
+# Path to the output directory with results of the benching
+readonly OUT_DIR=${3}
 # venv to use
 readonly VENV_DIR="venv_hailo_rpi_examples"
 
@@ -37,6 +37,13 @@ fi
 
 # shellcheck disable=SC1091
 source "${VENV_DIR}/bin/activate"
+
+# NOTE: debug stuff, uncomment if needed
+# set -x
+# export PS4='+ ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main}: '
+
+# print out error code and file/line no on error, intentionally after the arguments code.
+trap 'rc=$?; echo "Error: exit code $rc at ${BASH_SOURCE[0]}:${BASH_LINENO[0]}: $BASH_COMMAND" >&2; exit $rc' ERR
 
 function just_filename()
 {
@@ -76,8 +83,8 @@ function bench_single_hef()
     local report_dir="${OUT_DIR}/${hef_basename}"
     mkdir -p "${report_dir}" ||:
 
-    echo "Collecting generael benchmark info about ${} ..."
-    hailortcli benchmark ${hef_file} &> "${report_dir}/bench.log"
+    # echo "Collecting general benchmark info about ${hef_file} ..."
+    # hailortcli benchmark ${hef_file} &> "${report_dir}/bench.log"
     bench "${hef_file}" "${report_dir}"
 }
 
