@@ -485,7 +485,6 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
             finally:
                 request.release()
 
-            frame_data = picam2.capture_array('lores')
             # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
             if frame_data is None:
                 logger.error("Failed to capture frame #%s.", frame_count)
