@@ -166,7 +166,7 @@ class GStreamerApp:
         self.loop = None
         self.threads = []
         self.error_occurred = False
-        self.pipeline_latency = 300  # milliseconds
+        self.pipeline_latency = 0  # milliseconds; 0 = use each element's natural minimum latency
 
         # Set Hailo parameters; these parameters should be set based on the model used
         self.batch_size = 1
