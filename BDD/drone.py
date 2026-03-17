@@ -212,8 +212,8 @@ class DroneMover():
             # await drone.param.set_param_int("COM_RC_IN_MODE", 1) # 1 == drone flies autonomously
             # await drone.param.set_param_int("COM_RC_OVERRIDE", 1)
 
-            # # keep armed even if not took off for long time (1000 seconds)
-            # await drone.param.set_param_float("COM_DISARM_PRFLT", 1000.0)
+            # keep armed even if not took off for long time (1000 seconds)
+            await drone.param.set_param_float("COM_DISARM_PRFLT", 1000.0)
 
             arming_exception = None
             for i in range(arm_attempts):

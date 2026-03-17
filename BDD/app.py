@@ -380,6 +380,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     (detections_obj.meta.detection_end_timestamp_ns - detections_obj.meta.capture_timestamp_ns) / 1000_000
                 )
             skipped_detetions = 0
+            frame_capture_timestampt_ns = detections_obj.meta.capture_timestamp_ns or None
 
             # telemetry_dict = await drone.get_telemetry_dict()
             # logger.debug("telemetry: %s", telemetry_dict)
@@ -426,22 +427,23 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 target_relative_pos = center - detection.bbox.center
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
 
-                if True and target_estimator.history_size() > 3:
+                # TODO maybe use frame capture time?
+                target_pos_timestamp = frame_capture_timestampt_ns if frame_capture_timestampt_ns else current_frame_timestamp_ns
+                target_estimator.add_target_pos(target_relative_pos, target_pos_timestamp)
+
+                if True and target_estimator.history_size() >= 2:
+                    # estimate target based on previous positions
                     mode = 'follow* '
 
-                    # estimate target based on previous positions
-                    # TODO maybe use frame capture time?
-                    target_estimator.add_target_pos(target_relative_pos, current_frame_timestamp_ns)
-
                     number_of_frames_to_estimate_pos = 2
-                    # if estimated_distance is not None:
-                    #     estimated_distance_class, estimated_distance_meters = estimated_distance
-                    #     if estimated_distance_class == DistanceClass.FAR:
-                    #         number_of_frames_to_estimate_pos = 10
-                    #     elif estimated_distance_class == DistanceClass.MEDIUM:
-                    #         number_of_frames_to_estimate_pos = 5
-                    #     elif estimated_distance_class == DistanceClass.NEAR:
-                    #         number_of_frames_to_estimate_pos = 2
+                    if estimated_distance is not None:
+                        estimated_distance_class, estimated_distance_meters = estimated_distance
+                        if estimated_distance_class == DistanceClass.FAR:
+                            number_of_frames_to_estimate_pos = 10
+                        elif estimated_distance_class == DistanceClass.MEDIUM:
+                            number_of_frames_to_estimate_pos = 5
+                        elif estimated_distance_class == DistanceClass.NEAR:
+                            number_of_frames_to_estimate_pos = 2
 
                     estimation_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
                     target_relative_pos_old = target_relative_pos
@@ -683,7 +685,7 @@ def main():
         'pd_coeff_p_dynamic_max_target_size' : 0.001,  # normalized target size
         'pd_coeff_p_dynamic_max' : 4,
 
-        'target_size_m' : XY(0.5, 0.4),
+        'target_size_m' : XY(0.2, 0.2),
 
         'safe_takeoff_period_ns': 200_000_000
     }
