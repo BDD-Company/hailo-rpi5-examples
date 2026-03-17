@@ -2,21 +2,25 @@
 
 set -euo pipefail
 
-# required by hail example apps, otherwise pipeline tries to create windows on no display and crashes
-export DISPLAY=:0
-
+# Path to the output directory with results of the benching
 readonly OUT_DIR=${1}
+# Path to the directory with the .hef files or path to a single hef file
 readonly HEF_DIR=${2}
-readonly TEST_DIR=${3}
+# Path to the directory with the videos
+readonly TEST_VIDEOS_DIR=${3}
+# venv to use
 readonly VENV_DIR="venv_hailo_rpi_examples"
 
-if [[ ! -d "${TEST_DIR}" ]]; then
-    echo "TEST_DIR is not a directory: ${TEST_DIR}" >&2
+# required by hailo example apps, otherwise pipeline tries to create windows on no display and crashes
+export DISPLAY=:0
+
+if [[ ! -d "${TEST_VIDEOS_DIR}" ]]; then
+    echo "TEST_VIDEOS_DIR is not a directory: ${TEST_VIDEOS_DIR}" >&2
     exit 1
 fi
 
-if [[ ! -d "${HEF_DIR}" ]]; then
-    echo "HEF_DIR is not a directory: ${HEF_DIR}" >&2
+if [[ ! -d "${HEF_DIR}" && ! -f ${HEF_DIR} ]]; then
+    echo "HEF_DIR must be path to directory with .hef files or a path to a single .hef file: ${HEF_DIR}" >&2
     exit 1
 fi
 
@@ -46,26 +50,42 @@ function just_filename()
 function bench()
 {
     local hef_file="${1}"
+    local report_dir="${2}"
 
-    hef_basename="$(just_filename "${hef_file}")"
-
-    for f in "${TEST_DIR}"/*; do
+    for f in "${TEST_VIDEOS_DIR}"/*; do
         [[ -f "${f}" ]] || continue
 
         video_basename="$(just_filename "${f}")"
-        report_name="${hef_basename}+${video_basename}.log"
+        report_name="${video_basename}.log"
 
         echo "${hef_file} vs ${f} => ${report_name}"
         python basic_pipelines/benchmark.py --i "${f}" --hef-path "${hef_file}" 2>/dev/null \
-            | sed '/^[[:space:]]*$/d' > "${OUT_DIR}/${report_name}"
+            | sed '/^[[:space:]]*$/d' > "${report_dir}/${report_name}"
 
     done
 }
 
+echo "Collecting general info about HAILO hardware..."
 hailortcli fw-control identify > "${OUT_DIR}/hailo_info.log"
 
-for hef_file in "${HEF_DIR}"/*.hef; do
-    hef_basename="$(just_filename "${hef_file}")"
-    hailortcli benchmark ${hef_file} &> "${OUT_DIR}/bench_${hef_basename}.log"
-    bench "${hef_file}"
-done
+function bench_single_hef()
+{
+    local hef_file="${1}"
+
+    local hef_basename="$(just_filename "${hef_file}")"
+    local report_dir="${OUT_DIR}/${hef_basename}"
+    mkdir -p "${report_dir}" ||:
+
+    echo "Collecting generael benchmark info about ${} ..."
+    hailortcli benchmark ${hef_file} &> "${report_dir}/bench.log"
+    bench "${hef_file}" "${report_dir}"
+}
+
+# Single HEF file
+if [[ -f ${HEF_DIR} ]]; then
+    bench_single_hef "${HEF_DIR}"
+else
+    for hef_file in "${HEF_DIR}"/*.hef; do
+        bench_single_hef "${hef_file}"
+    done
+fi
