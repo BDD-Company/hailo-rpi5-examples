@@ -499,7 +499,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     mode += " RED "
                     #pd_coeff_p
 
-                # command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
+                command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
                 target_relative_pos_pd = target_relative_pos
                 if target_relative_pos is not None:
                     logger.debug("!!! target before PD: %s", target_relative_pos)
