@@ -651,7 +651,11 @@ class GStreamerDetectionApp(GStreamerApp):
             keep_past_metadata='false',
             qos='false',
             # attempt to remove outdated detections
-            keep_tracked_frames=0
+            keep_tracked_frames=0,
+            keep_lost_frames=0, # Lost tracks dropped immediately, no shadow frames =0
+            keep_new_frames=1, # Unconfirmed new tracks discarded faster with =1
+            iou_thr=0.6,
+            kalman_dist_thr=0.6
         )
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
         if self.source_type == 'rpi':
