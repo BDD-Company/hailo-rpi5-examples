@@ -166,7 +166,7 @@ class GStreamerApp:
         self.loop = None
         self.threads = []
         self.error_occurred = False
-        self.pipeline_latency = 300  # milliseconds
+        self.pipeline_latency = 0  # milliseconds; 0 = use each element's natural minimum latency; if frames are dropped or Gstreamer is stalled, then set to 50
 
         # Set Hailo parameters; these parameters should be set based on the model used
         self.batch_size = 1
@@ -487,7 +487,6 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
             finally:
                 request.release()
 
-            frame_data = picam2.capture_array('lores')
             # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
             if frame_data is None:
                 logger.error("Failed to capture frame #%s.", frame_count)
