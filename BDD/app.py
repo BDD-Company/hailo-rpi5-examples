@@ -203,7 +203,7 @@ def is_drone_moving(telemetry_dict):
 
 
 async def drone_controlling_tread_async(drone_connection_string, drone_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None):
-    from math import radians
+    # from math import radians
 
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
     global global_logger
@@ -301,24 +301,19 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
         return current_detection_timestamp_ns - prev_detection_timestamp_ns
 
     def pd_coeff_p_for_target_size(target_size):
+        # avoid tipping over on hallucinations while close to the ground
+        if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
+            logger.warning("Initial stage of flight, reducing P to %s", PD_COEFF_P_MIN)
+            return PD_COEFF_P_MIN
+
         if not PD_COEFF_P_DYNAMIC:
             return PD_COEFF_P
 
-        # avoid tipping over on hallucinations while close to the ground
-        if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
-            return PD_COEFF_P_MIN
-
-        min_target_size = PD_COEFF_P_MIN_TARGET_SIZE
-        max_target_size = PD_COEFF_P_MAX_TARGET_SIZE
-        min_pd_coeff_p = PD_COEFF_P_MIN
-        max_pd_coeff_p = PD_COEFF_P_MAX
-
-        target_size_ratio = (target_size - min_target_size) / (max_target_size - min_target_size)
-        result = min_pd_coeff_p + target_size_ratio * (max_pd_coeff_p - min_pd_coeff_p)
+        target_size_ratio = (target_size - PD_COEFF_P_MIN_TARGET_SIZE) / (PD_COEFF_P_MAX_TARGET_SIZE - PD_COEFF_P_MIN_TARGET_SIZE)
+        result = PD_COEFF_P_MIN + target_size_ratio * (PD_COEFF_P_MAX - PD_COEFF_P_MIN)
 
         deviance_coeff = 1 # could be 2
         return min(PD_COEFF_P_MAX * deviance_coeff, max(PD_COEFF_P_MIN / deviance_coeff, result))
-
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
 
@@ -327,14 +322,13 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             detections_obj = Detections(-1)
             distance_to_center : float = float('NaN')
             angle_to_target = XY()
-            forward_speed = 0
             move_command = MoveCommand()
 
             logger = global_logger
             # logger.debug("!!! awaiting detection... ")
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
-                r : Detections = await asyncio.to_thread(detections_queue.get, 0.1)
+                r : Detections = detections_queue.get(0.01)
                 if r is STOP:
                     logger.info("stopping")
                     break
@@ -359,19 +353,19 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             logger.debug("!!!")
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
 
-            if DEBUG:
-                # NOTE: injecting fake detections to debug
-                import math
-                __tmp_delta_confidence = math.sin(detections_obj.frame_id / 100) / 10
-                __tmp_delta_x = math.sin(detections_obj.frame_id / 100) / 4
-                __tmp_delta_y = math.cos(detections_obj.frame_id / 100) / 4
-                detections_obj.detections.append(
-                            Detection(
-                                bbox = Rect.from_xywh(0.2 + __tmp_delta_x, 0.2 + __tmp_delta_y, 0.05, 0.05),
-                                confidence = 0.3 + __tmp_delta_confidence,
-                                track_id = 1
-                            )
-                )
+            # if DEBUG:
+            #     # NOTE: injecting fake detections to debug
+            #     import math
+            #     __tmp_delta_confidence = math.sin(detections_obj.frame_id / 100) / 10
+            #     __tmp_delta_x = math.sin(detections_obj.frame_id / 100) / 4
+            #     __tmp_delta_y = math.cos(detections_obj.frame_id / 100) / 4
+            #     detections_obj.detections.append(
+            #                 Detection(
+            #                     bbox = Rect.from_xywh(0.2 + __tmp_delta_x, 0.2 + __tmp_delta_y, 0.05, 0.05),
+            #                     confidence = 0.3 + __tmp_delta_confidence,
+            #                     track_id = 1
+            #                 )
+            #     )
 
             logger.debug("!!! GOT DETECTIONS, objects detected: %s (%s), detection delay: %sms, total delay: %sms",
                     len(detections_obj.detections),
@@ -423,6 +417,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 distance_to_center = detection.bbox.center.distance_to(center)
                 target_size = detection.bbox.area()
                 pd_coeff_p = pd_coeff_p_for_target_size(target_size)
+                if flight_time_ns >= 1_500_000_000:
+                    pd_coeff_p = PD_COEFF_P_MAX
 
                 target_relative_pos = center - detection.bbox.center
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
@@ -454,7 +450,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     logger.debug("!!! estimated new target pos %s (was %s), for +%sms (%d frames)",
                             target_relative_pos,
                             target_relative_pos_old,
-                            estimation_delta_ns / 1000_1000,
+                            estimation_delta_ns / 1000_000,
                             number_of_frames_to_estimate_pos)
 
                 odometry = telemetry_dict.get('odometry', {}) or {}
@@ -517,22 +513,21 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
                 mode += f'size: {target_size:.3}, estimated distance: {estimated_distance}, p: {pd_coeff_p * 1.0 : .3} '
 
-
                 # while still taking off, avoid dangerous moves
-                if flight_time_ns < SAFE_TAKEOFF_PERIOD_NS:
-                    MAX_CLOSE_TO_GROUND_ANGLES = XY(60, 60)
-                    new_angle_to_target = angle_to_target
-                    if abs(angle_to_target.x) > MAX_CLOSE_TO_GROUND_ANGLES.x:
-                        sign = angle_to_target.x / abs(angle_to_target.x)
-                        new_angle_to_target.x = min(MAX_CLOSE_TO_GROUND_ANGLES.x, abs(angle_to_target.x)) * sign
+                # if flight_time_ns < SAFE_TAKEOFF_PERIOD_NS:
+                #     MAX_CLOSE_TO_GROUND_ANGLES = XY(60, 60)
+                #     new_angle_to_target = angle_to_target
+                #     if abs(angle_to_target.x) > MAX_CLOSE_TO_GROUND_ANGLES.x:
+                #         sign = angle_to_target.x / abs(angle_to_target.x)
+                #         new_angle_to_target.x = min(MAX_CLOSE_TO_GROUND_ANGLES.x, abs(angle_to_target.x)) * sign
 
-                    if abs(angle_to_target.y) > MAX_CLOSE_TO_GROUND_ANGLES.y:
-                        sign = angle_to_target.y / abs(angle_to_target.y)
-                        new_angle_to_target.y = min(MAX_CLOSE_TO_GROUND_ANGLES.y, abs(angle_to_target.y)) * sign
+                #     if abs(angle_to_target.y) > MAX_CLOSE_TO_GROUND_ANGLES.y:
+                #         sign = angle_to_target.y / abs(angle_to_target.y)
+                #         new_angle_to_target.y = min(MAX_CLOSE_TO_GROUND_ANGLES.y, abs(angle_to_target.y)) * sign
 
-                    if new_angle_to_target != angle_to_target:
-                        logger.warning("Too steep atack close to the ground %s, clamping to %s ", angle_to_target, new_angle_to_target)
-                        angle_to_target = new_angle_to_target
+                #     if new_angle_to_target != angle_to_target:
+                #         logger.warning("Too steep atack close to the ground %s, clamping to %s ", angle_to_target, new_angle_to_target)
+                #         angle_to_target = new_angle_to_target
 
                 # await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
                 await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
@@ -600,7 +595,7 @@ class App(GStreamerDetectionApp):
         # add "_%05d" so we get multiple files w/o overwriting anything
         video_file_name = video_file_name.stem + "_%05d" + (video_file_name.suffix if video_file_name.suffix else '.mkv')
 
-        video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000 * 1000 * 1000
+        video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000_000_000
         return f'''
             videoconvert \
             ! x264enc \
@@ -679,20 +674,21 @@ def main():
 
         'target_lost_fade_per_frame': 0.75,
 
-        'pd_coeff_p': 3, #12.5
+        'pd_coeff_p': 4, #12.5
         'pd_coeff_d': 0,
 
         # Dynamically adjust P coeff based on target size.
         # P is approximated linearly between min and max, NEVER exceeding min nor max
         'pd_coeff_p_dynamic': False,
-        'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
+        'pd_coeff_p_dynamic_min_target_size' : 0.0001, # normalized target size w * h, where both w and are in range (0..1)
         'pd_coeff_p_dynamic_min' : 0.6,
         'pd_coeff_p_dynamic_max_target_size' : 0.001,  # normalized target size
-        'pd_coeff_p_dynamic_max' : 4,
+        'pd_coeff_p_dynamic_max' : 6,
 
+        'frame_angular_size_deg' : XY(120, 100),
         'target_size_m' : XY(0.2, 0.2),
 
-        'safe_takeoff_period_ns': 200_000_000
+        'safe_takeoff_period_ns': 700_000_000
     }
 
     drone_thread = threading.Thread(
@@ -724,30 +720,30 @@ def main():
     )
     output_thread.start()
 
-    if DEBUG:
-        for i in range(3):
-            detections_queue.put(
-                Detections(-1,
-                    frame = None,
-                    detections = [
-                        Detection(
-                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                            confidence = 0.1,
-                            track_id = 1
-                        ),
-                        Detection(
-                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                            confidence = 0.9,
-                            track_id = 2
-                        ),
-                        Detection(
-                            bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
-                            confidence = 0.7,
-                            track_id = 3
-                        ),
-                    ],
-                )
-            )
+    # if DEBUG:
+    #     for i in range(3):
+    #         detections_queue.put(
+    #             Detections(-1,
+    #                 frame = None,
+    #                 detections = [
+    #                     Detection(
+    #                         bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+    #                         confidence = 0.1,
+    #                         track_id = 1
+    #                     ),
+    #                     Detection(
+    #                         bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+    #                         confidence = 0.9,
+    #                         track_id = 2
+    #                     ),
+    #                     Detection(
+    #                         bbox = Rect.from_xyxy(0.1, 0.1, 0.2, 0.2),
+    #                         confidence = 0.7,
+    #                         track_id = 3
+    #                     ),
+    #                 ],
+    #             )
+    #         )
 
     app.run(event)
     print("Done !!!")

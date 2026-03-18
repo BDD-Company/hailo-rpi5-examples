@@ -207,7 +207,9 @@ def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1
     )
 
     # do not draw arrow when it is very small
-    if from_pos_on_frame.distance_to(target_pos_on_frame) < 20:
+    if from_pos_on_frame is not None \
+            and from_pos_on_frame != XY() \
+            and from_pos_on_frame.distance_to(target_pos_on_frame) > 20:
         cv2.arrowedLine(frame,
             from_pos_on_frame.to_tuple(to = int),
             target_pos_on_frame.to_tuple(to = int),
