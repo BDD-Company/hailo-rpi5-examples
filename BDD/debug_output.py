@@ -197,14 +197,14 @@ def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1
         #     1
         # )
 
-    cv2.circle(
-        frame,
-        (from_pos_on_frame + (target_pos_on_frame - from_pos_on_frame) * 2).to_tuple(to = int),
-        line_thickness * 2 + 1, #
-        color,
-        max(line_thickness / 2, 1),
-        cv2.LINE_AA
-    )
+    # cv2.circle(
+    #     frame,
+    #     (from_pos_on_frame + (target_pos_on_frame - from_pos_on_frame) * 2).to_tuple(to = int),
+    #     line_thickness * 2 + 1, #
+    #     color,
+    #     max(line_thickness / 2, 1),
+    #     cv2.LINE_AA
+    # )
 
     # do not draw arrow when it is very small
     if from_pos_on_frame is not None \
