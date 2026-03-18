@@ -177,7 +177,6 @@ def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1
     # since target is a diff from a frame center (0.5, 0.5) in a 0..1 frame
     target_pos_on_frame = (XY(0.5, 0.5) - target_pos).multiplied_by_XY(frame_size)
     from_pos_on_frame = from_pos.multiplied_by_XY(frame_size)
-    target_pos_on_frame2 = from_pos_on_frame + (target_pos_on_frame - from_pos_on_frame) * 2
 
     frame_rect = Rect(XY(0, 0), frame_size)
     if frame_rect.is_point_inside(target_pos_on_frame):
@@ -189,31 +188,33 @@ def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1
             line_thickness,
             cv2.LINE_AA
         )
-        cv2.drawMarker(
-            frame,
-            target_pos_on_frame.to_tuple(to = int),
-            color,
-            cv2.MARKER_TILTED_CROSS,
-            10,
-            1
-        )
+        # cv2.drawMarker(
+        #     frame,
+        #     target_pos_on_frame.to_tuple(to = int),
+        #     color,
+        #     cv2.MARKER_TILTED_CROSS,
+        #     10,
+        #     1
+        # )
 
     cv2.circle(
         frame,
-        target_pos_on_frame2.to_tuple(to = int),
-        line_thickness * 2 + 2, #
+        (from_pos_on_frame + (target_pos_on_frame - from_pos_on_frame) * 2).to_tuple(to = int),
+        line_thickness * 2 + 1, #
         color,
-        line_thickness,
+        max(line_thickness / 2, 1),
         cv2.LINE_AA
     )
 
-    cv2.arrowedLine(frame,
-        from_pos_on_frame.to_tuple(to = int),
-        target_pos_on_frame.to_tuple(to = int),
-        color,
-        line_thickness,
-        cv2.LINE_AA
-    )
+    # do not draw arrow when it is very small
+    if from_pos_on_frame.distance_to(target_pos_on_frame) < 20:
+        cv2.arrowedLine(frame,
+            from_pos_on_frame.to_tuple(to = int),
+            target_pos_on_frame.to_tuple(to = int),
+            color,
+            line_thickness,
+            cv2.LINE_AA
+        )
 
 
 def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
@@ -298,8 +299,9 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
 
     if selected is not None:
         draw_detection(frame, selected, SELECTED_OBJECT_COLOR, 2)
-        if target is not None:
-            draw_target(frame, target, selected.bbox.center, TARGET_COLOR, 1)
+
+    if target is not None:
+        draw_target(frame, target, selected.bbox.center if selected else None, TARGET_COLOR, 1)
 
     if move_command is not None:
         # move command in degrees here, but we don't care
@@ -437,7 +439,6 @@ if __name__ == '__main__':
     #             frame_count += 1
     def generate_frames():
         video_capture = cv2.VideoCapture("/home/bdd/hailo-rpi5-examples/TEST_DATA/sample.mp4")
-
         if not video_capture.isOpened():
             raise RuntimeError("Cannot open video")
 
@@ -448,7 +449,6 @@ if __name__ == '__main__':
             yield frame
 
         video_capture.release()
-
 
 
     def producer_thread_func(n_frames = 1000, delay_between_frames_ms=10):
@@ -488,7 +488,6 @@ if __name__ == '__main__':
             odo_pb['x_m'] += 0.05
             odo_pb['y_m'] += 0.05
             odo_pb['z_m'] += 0.05
-
 
             d = dataclasses.replace(detections_template, frame_id = i, frame=frame.copy())
             q = i / 10

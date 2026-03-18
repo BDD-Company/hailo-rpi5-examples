@@ -7,7 +7,7 @@ import numpy as np
 class FrameSinkInterface(ABC):
 
     @abstractmethod
-    def start(self, frame_size):
+    def start(self, frame_size : tuple[int, int]):
         pass
 
     @abstractmethod

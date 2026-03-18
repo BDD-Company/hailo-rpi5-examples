@@ -428,22 +428,25 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
 
                 # TODO maybe use frame capture time?
-                target_pos_timestamp = frame_capture_timestampt_ns if frame_capture_timestampt_ns else current_frame_timestamp_ns
-                target_estimator.add_target_pos(target_relative_pos, target_pos_timestamp)
+                target_estimator.add_target_pos(
+                    target_relative_pos,
+                    # estimation is too fra off, when using frame capture time.
+                    current_frame_timestamp_ns #frame_capture_timestampt_ns if frame_capture_timestampt_ns else current_frame_timestamp_ns
+                )
 
                 if True and target_estimator.history_size() >= 2:
                     # estimate target based on previous positions
                     mode = 'follow* '
 
                     number_of_frames_to_estimate_pos = 2
-                    if estimated_distance is not None:
-                        estimated_distance_class, estimated_distance_meters = estimated_distance
-                        if estimated_distance_class == DistanceClass.FAR:
-                            number_of_frames_to_estimate_pos = 10
-                        elif estimated_distance_class == DistanceClass.MEDIUM:
-                            number_of_frames_to_estimate_pos = 5
-                        elif estimated_distance_class == DistanceClass.NEAR:
-                            number_of_frames_to_estimate_pos = 2
+                    # if estimated_distance is not None:
+                    #     estimated_distance_class, estimated_distance_meters = estimated_distance
+                    #     if estimated_distance_class == DistanceClass.FAR:
+                    #         number_of_frames_to_estimate_pos = 10
+                    #     elif estimated_distance_class == DistanceClass.MEDIUM:
+                    #         number_of_frames_to_estimate_pos = 5
+                    #     elif estimated_distance_class == DistanceClass.NEAR:
+                    #         number_of_frames_to_estimate_pos = 2
 
                     estimation_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
                     target_relative_pos_old = target_relative_pos
@@ -480,7 +483,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
                 #     logger.debug("angle to target adjusted: %s", angle_to_target)
 
-                # prev_angle_to_target = angle_to_target
+
                 # # logger.debug('!!!! max_angle_divisor: %s', max_angle_divisor)
                 # logger.debug("angle to target adjusted for mode: %s", angle_to_target)
 
@@ -508,10 +511,11 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     logger.debug("!!! target after PD: %s", target_relative_pos)
 
                 angle_to_target  = target_relative_pos_pd.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
+                prev_angle_to_target = angle_to_target
 
                 logger.debug("angle to target: %s", angle_to_target)
 
-                mode = f'size: {target_size:.3}, estimated distance: {estimated_distance}, p: {pd_coeff_p * 1.0 : .3} '
+                mode += f'size: {target_size:.3}, estimated distance: {estimated_distance}, p: {pd_coeff_p * 1.0 : .3} '
 
 
                 # while still taking off, avoid dangerous moves
@@ -543,6 +547,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 if seen_target:
                     prev_angle_to_target *= FADE_COEFF
                     await drone.move_to_target_zenith_async(roll_degree=-prev_angle_to_target.x, pitch_degree=prev_angle_to_target.y, thrust=thrust)
+                    # Just t visualize the point we are moving to
+                    target_relative_pos = prev_angle_to_target.divided_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                     # await drone.standstill()
                     moving = False
                     debug_info["mode"] = "hover"
@@ -570,7 +576,6 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
         except:
             logging.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, move_command, exc_info=True)
-
 
 
 class App(GStreamerDetectionApp):

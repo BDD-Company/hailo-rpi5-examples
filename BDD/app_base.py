@@ -417,7 +417,7 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
     logger.debug("appsrc properties: %s", appsrc)
     # Initialize Picamera2
 
-    with Picamera2() as picam2:
+    with Picamera2(tuning="/usr/share/libcamera/ipa/rpi/pisp/imx477_noir.json") as picam2:
         if picamera_config is None:
             # Default configuration
             main = {'size': (1280, 720), 'format': 'RGB888'}
