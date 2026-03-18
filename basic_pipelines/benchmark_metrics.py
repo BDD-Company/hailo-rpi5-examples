@@ -11,6 +11,7 @@ from statistics import mean
 from typing import Dict, Iterable, List, Tuple
 
 BBox = Tuple[float, float, float, float]  # (x1, y1, x2, y2)
+FrameKey = str
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,7 @@ def parse_args() -> argparse.Namespace:
         "--output-json",
         type=Path,
         default=None,
-        help="Optional path to save full metrics as JSON.",
+        help="Optional output JSON path (file path or existing directory).",
     )
     return parser.parse_args()
 
@@ -266,6 +267,24 @@ def calculate_video_metrics(
 ) -> Dict[str, object]:
     gt_by_frame = parse_gt_file(gt_file)
     pred_by_frame = parse_predictions_file(pred_file, class_id_filter=class_id_filter)
+    return calculate_video_metrics_from_data(
+        video_name=video_path.name,
+        gt_file=gt_file,
+        pred_file=pred_file,
+        gt_by_frame=gt_by_frame,
+        pred_by_frame=pred_by_frame,
+        iou_threshold=iou_threshold,
+    )
+
+
+def calculate_video_metrics_from_data(
+    video_name: str,
+    gt_file: Path,
+    pred_file: Path,
+    gt_by_frame: Dict[int, List[BBox]],
+    pred_by_frame: Dict[int, List[Prediction]],
+    iou_threshold: float,
+) -> Dict[str, object]:
     frames = sorted(set(gt_by_frame.keys()) | set(pred_by_frame.keys()))
 
     tp_total = 0
@@ -296,7 +315,7 @@ def calculate_video_metrics(
     map50_95 = float(mean(ap_per_threshold)) if ap_per_threshold else 0.0
 
     return {
-        "video": video_path.name,
+        "video": video_name,
         "gt_file": str(gt_file),
         "prediction_file": str(pred_file),
         "num_gt_frames": len(gt_by_frame),
@@ -317,6 +336,128 @@ def calculate_video_metrics(
         "false_negative_by_frame": [
             {"frame": frame, "count": count} for frame, count in sorted(fn_frame_counts.items())
         ],
+    }
+
+
+def _calculate_dataset_ap(
+    gt_by_key: Dict[FrameKey, List[BBox]],
+    pred_tuples: List[Tuple[float, FrameKey, BBox]],
+    iou_threshold: float,
+) -> float:
+    total_gt = sum(len(boxes) for boxes in gt_by_key.values())
+    if total_gt == 0:
+        return 0.0
+
+    matched_by_key = {key: [False] * len(boxes) for key, boxes in gt_by_key.items()}
+    sorted_preds = sorted(pred_tuples, key=lambda x: x[0], reverse=True)
+
+    tp_flags: List[int] = []
+    fp_flags: List[int] = []
+    for confidence, frame_key, pred_bbox in sorted_preds:
+        del confidence  # confidence only used for sorting
+        gt_boxes = gt_by_key.get(frame_key, [])
+        gt_matches = matched_by_key.setdefault(frame_key, [False] * len(gt_boxes))
+
+        best_iou = 0.0
+        best_gt_idx = -1
+        for idx, gt in enumerate(gt_boxes):
+            if gt_matches[idx]:
+                continue
+            score = iou(pred_bbox, gt)
+            if score > best_iou:
+                best_iou = score
+                best_gt_idx = idx
+
+        if best_gt_idx >= 0 and best_iou >= iou_threshold:
+            gt_matches[best_gt_idx] = True
+            tp_flags.append(1)
+            fp_flags.append(0)
+        else:
+            tp_flags.append(0)
+            fp_flags.append(1)
+
+    if not tp_flags:
+        return 0.0
+
+    tp_cumsum: List[float] = []
+    fp_cumsum: List[float] = []
+    tp_running = 0.0
+    fp_running = 0.0
+    for tp_flag, fp_flag in zip(tp_flags, fp_flags):
+        tp_running += tp_flag
+        fp_running += fp_flag
+        tp_cumsum.append(tp_running)
+        fp_cumsum.append(fp_running)
+
+    recalls = [tp / float(total_gt) for tp in tp_cumsum]
+    precisions = [tp / max(tp + fp, 1e-12) for tp, fp in zip(tp_cumsum, fp_cumsum)]
+
+    mrec = [0.0] + recalls + [1.0]
+    mpre = [0.0] + precisions + [0.0]
+    for idx in range(len(mpre) - 1, 0, -1):
+        mpre[idx - 1] = max(mpre[idx - 1], mpre[idx])
+
+    ap = 0.0
+    for idx in range(len(mrec) - 1):
+        if mrec[idx + 1] != mrec[idx]:
+            ap += (mrec[idx + 1] - mrec[idx]) * mpre[idx + 1]
+    return ap
+
+
+def calculate_summary_metrics(
+    iou_threshold: float,
+    datasets: List[Tuple[str, Dict[int, List[BBox]], Dict[int, List[Prediction]]]],
+) -> Dict[str, object]:
+    tp_total = 0
+    fp_total = 0
+    fn_total = 0
+    gt_boxes_total = 0
+    pred_total = 0
+
+    gt_by_key: Dict[FrameKey, List[BBox]] = {}
+    pred_tuples: List[Tuple[float, FrameKey, BBox]] = []
+
+    for video_name, gt_by_frame, pred_by_frame in datasets:
+        gt_boxes_total += sum(len(boxes) for boxes in gt_by_frame.values())
+        pred_total += sum(len(preds) for preds in pred_by_frame.values())
+
+        for frame, gt_boxes in gt_by_frame.items():
+            frame_key = f"{video_name}::{frame}"
+            gt_by_key[frame_key] = gt_boxes
+
+        for frame, preds in pred_by_frame.items():
+            frame_key = f"{video_name}::{frame}"
+            for pred in preds:
+                pred_tuples.append((pred.confidence, frame_key, pred.bbox))
+
+        frames = sorted(set(gt_by_frame.keys()) | set(pred_by_frame.keys()))
+        for frame in frames:
+            preds = pred_by_frame.get(frame, [])
+            gt_boxes = gt_by_frame.get(frame, [])
+            tp, fp, fn = match_frame_predictions(preds, gt_boxes, iou_threshold)
+            tp_total += tp
+            fp_total += fp
+            fn_total += fn
+
+    precision = (tp_total / (tp_total + fp_total)) if (tp_total + fp_total) > 0 else 0.0
+    recall = (tp_total / (tp_total + fn_total)) if (tp_total + fn_total) > 0 else 0.0
+
+    iou_thresholds = [round(0.5 + 0.05 * i, 2) for i in range(10)]
+    ap_per_threshold = [_calculate_dataset_ap(gt_by_key, pred_tuples, thr) for thr in iou_thresholds]
+    map50 = ap_per_threshold[0] if ap_per_threshold else 0.0
+    map50_95 = float(mean(ap_per_threshold)) if ap_per_threshold else 0.0
+
+    return {
+        "num_videos": len(datasets),
+        "num_gt_boxes": int(gt_boxes_total),
+        "num_predictions": int(pred_total),
+        "precision": precision,
+        "recall": recall,
+        "mAP50": map50,
+        "mAP50_95": map50_95,
+        "true_positive": int(tp_total),
+        "false_positive": int(fp_total),
+        "false_negative": int(fn_total),
     }
 
 
@@ -342,7 +483,13 @@ def discover_videos(videos_dir: Path, extensions: Iterable[str]) -> List[Path]:
     return sorted(videos)
 
 
-def print_report(report_set_name: str, metrics: List[Dict[str, object]]) -> None:
+def resolve_output_json_path(output_json: Path) -> Path:
+    if output_json.exists() and output_json.is_dir():
+        return output_json / "benchmark_metrics.json"
+    return output_json
+
+
+def print_report(report_set_name: str, metrics: List[Dict[str, object]], summary: Dict[str, object]) -> None:
     print(f"\nReport set: {report_set_name}")
     print("video | precision | recall | mAP50 | mAP50-95 | TP | FP | FN")
     print("-" * 82)
@@ -356,6 +503,12 @@ def print_report(report_set_name: str, metrics: List[Dict[str, object]]) -> None
         print(f"  FN frames: {item['false_negative_frames']}")
         print(f"  FP by frame: {item['false_positive_by_frame']}")
         print(f"  FN by frame: {item['false_negative_by_frame']}")
+    print("-" * 82)
+    print(
+        f"TOTAL (all videos) | {summary['precision']:.4f} | {summary['recall']:.4f} | "
+        f"{summary['mAP50']:.4f} | {summary['mAP50_95']:.4f} | "
+        f"{summary['true_positive']} | {summary['false_positive']} | {summary['false_negative']}"
+    )
 
 
 def main() -> int:
@@ -396,6 +549,7 @@ def main() -> int:
     has_any_result = False
     for report_set_name, report_set_dir in report_sets:
         per_video_metrics: List[Dict[str, object]] = []
+        summary_datasets: List[Tuple[str, Dict[int, List[BBox]], Dict[int, List[Prediction]]]] = []
         for video in videos:
             base_name = video.stem
             gt_file = annotations_dir / f"{base_name}.txt"
@@ -408,25 +562,32 @@ def main() -> int:
                 print(f"[WARN] missing prediction log: {pred_file} (skipping {video.name})", file=sys.stderr)
                 continue
 
-            result = calculate_video_metrics(
-                video_path=video,
+            gt_by_frame = parse_gt_file(gt_file)
+            pred_by_frame = parse_predictions_file(pred_file, class_id_filter=args.class_id)
+
+            result = calculate_video_metrics_from_data(
+                video_name=video.name,
                 gt_file=gt_file,
                 pred_file=pred_file,
-                class_id_filter=args.class_id,
+                gt_by_frame=gt_by_frame,
+                pred_by_frame=pred_by_frame,
                 iou_threshold=args.iou_threshold,
             )
             per_video_metrics.append(result)
+            summary_datasets.append((video.name, gt_by_frame, pred_by_frame))
 
         if not per_video_metrics:
             continue
 
         has_any_result = True
-        print_report(report_set_name, per_video_metrics)
+        summary = calculate_summary_metrics(args.iou_threshold, summary_datasets)
+        print_report(report_set_name, per_video_metrics, summary)
         all_results["report_sets"].append(
             {
                 "name": report_set_name,
                 "path": str(report_set_dir),
                 "videos": per_video_metrics,
+                "summary": summary,
             }
         )
 
@@ -435,9 +596,10 @@ def main() -> int:
         return 1
 
     if args.output_json:
-        args.output_json.parent.mkdir(parents=True, exist_ok=True)
-        args.output_json.write_text(json.dumps(all_results, indent=2), encoding="utf-8")
-        print(f"\nJSON report saved to: {args.output_json}")
+        output_json = resolve_output_json_path(args.output_json)
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(json.dumps(all_results, indent=2), encoding="utf-8")
+        print(f"\nJSON report saved to: {output_json}")
 
     return 0
 
