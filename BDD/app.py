@@ -417,7 +417,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 distance_to_center = detection.bbox.center.distance_to(center)
                 target_size = detection.bbox.area()
                 pd_coeff_p = pd_coeff_p_for_target_size(target_size)
-                if flight_time_ns >= 1_500_000_000:
+                if flight_time_ns >= 1_300_000_000:
                     pd_coeff_p = PD_COEFF_P_MAX
 
                 target_relative_pos = center - detection.bbox.center
@@ -499,6 +499,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     mode += " RED "
                     #pd_coeff_p
 
+
                 command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
                 target_relative_pos_pd = target_relative_pos
                 if target_relative_pos is not None:
@@ -528,6 +529,10 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     if new_angle_to_target != angle_to_target:
                 #         logger.warning("Too steep atack close to the ground %s, clamping to %s ", angle_to_target, new_angle_to_target)
                 #         angle_to_target = new_angle_to_target
+
+                if False and (angle_to_target.x > 100 or angle_to_target.y > 90) and flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
+                    logging.warning("!!! Angle is too steep, adding thrust")
+                    thrust *= 1.05
 
                 # await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
                 await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
@@ -674,7 +679,7 @@ def main():
 
         'target_lost_fade_per_frame': 0.75,
 
-        'pd_coeff_p': 4, #12.5
+        'pd_coeff_p': 3, #12.5
         'pd_coeff_d': 0,
 
         # Dynamically adjust P coeff based on target size.
@@ -688,7 +693,7 @@ def main():
         'frame_angular_size_deg' : XY(120, 100),
         'target_size_m' : XY(0.2, 0.2),
 
-        'safe_takeoff_period_ns': 700_000_000
+        'safe_takeoff_period_ns': 400_000_000
     }
 
     drone_thread = threading.Thread(
