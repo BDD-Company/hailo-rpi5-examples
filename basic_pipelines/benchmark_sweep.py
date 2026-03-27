@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -112,8 +113,16 @@ def run_benchmark_for_video(
         '--tracker-keep-tracked-frames', str(params['keep_tracked_frames']),
         '--tracker-keep-lost-frames',  str(params['keep_lost_frames']),
     ]
-    with log_path.open('w') as log_fh:
-        result = subprocess.run(cmd, stdout=log_fh, stderr=subprocess.DEVNULL)
+    err_path = log_path.with_suffix('.err')
+    with log_path.open('w') as log_fh, err_path.open('w') as err_fh:
+        result = subprocess.run(cmd, stdout=log_fh, stderr=err_fh,
+                                env={**os.environ, 'DISPLAY': os.environ.get('DISPLAY', ':0')})
+    if result.returncode != 0:
+        err_text = err_path.read_text().strip()
+        if err_text:
+            print(f"  stderr: {err_text[-500:]}", file=sys.stderr)
+    else:
+        err_path.unlink(missing_ok=True)
     # Remove blank lines (matches what benchmark.sh does with sed)
     lines = [l for l in log_path.read_text().splitlines() if l.strip()]
     log_path.write_text('\n'.join(lines) + ('\n' if lines else ''))

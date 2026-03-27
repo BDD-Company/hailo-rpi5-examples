@@ -133,15 +133,24 @@ class BenchmarkApp(GStreamerDetectionApp):
                             help='Tracker keep_lost_frames (default: 0)')
         return parser
 
+    def create_pipeline(self):
+        # super().__init__() calls create_pipeline() before we can set custom thresholds.
+        # We intercept that first call and do one real build after thresholds are ready.
+        if not getattr(self, '_sweep_ready', False):
+            return
+        super().create_pipeline()
+
     def __init__(self, app_callback, user_data):
         super().__init__(app_callback, user_data, parser=self._make_sweep_parser())
-        # Override thresholds with values from CLI args, then rebuild pipeline
+        # Now super().__init__() has finished (skipping pipeline creation via the override above).
+        # Set correct thresholds from CLI args and build pipeline once.
         opt = self.options_menu
         self.thresholds_str = (
             f"nms-score-threshold={opt.nms_score_threshold} "
             f"nms-iou-threshold={opt.nms_iou_threshold} "
             f"output-format-type=HAILO_FORMAT_TYPE_FLOAT32"
         )
+        self._sweep_ready = True
         self.create_pipeline()
 
     def get_pipeline_string(self):
