@@ -100,6 +100,7 @@ def run_benchmark_for_video(
     hef_path: Path,
     log_path: Path,
     params: dict[str, Any],
+    timeout_s: int = 300,
 ) -> int:
     cmd = [
         sys.executable, str(benchmark_py),
@@ -114,19 +115,26 @@ def run_benchmark_for_video(
         '--tracker-keep-lost-frames',  str(params['keep_lost_frames']),
     ]
     err_path = log_path.with_suffix('.err')
-    with log_path.open('w') as log_fh, err_path.open('w') as err_fh:
-        result = subprocess.run(cmd, stdout=log_fh, stderr=err_fh,
-                                env={**os.environ, 'DISPLAY': os.environ.get('DISPLAY', ':0')})
-    if result.returncode != 0:
-        err_text = err_path.read_text().strip()
+    try:
+        with log_path.open('w') as log_fh, err_path.open('w') as err_fh:
+            result = subprocess.run(cmd, stdout=log_fh, stderr=err_fh,
+                                    timeout=timeout_s,
+                                    env={**os.environ, 'DISPLAY': os.environ.get('DISPLAY', ':0')})
+        rc = result.returncode
+    except subprocess.TimeoutExpired:
+        print(f"  WARNING: benchmark timed out after {timeout_s}s for {video.name}", file=sys.stderr)
+        rc = -1
+    if rc != 0:
+        err_text = err_path.read_text().strip() if err_path.exists() else ''
         if err_text:
             print(f"  stderr: {err_text[-500:]}", file=sys.stderr)
     else:
         err_path.unlink(missing_ok=True)
     # Remove blank lines (matches what benchmark.sh does with sed)
-    lines = [l for l in log_path.read_text().splitlines() if l.strip()]
-    log_path.write_text('\n'.join(lines) + ('\n' if lines else ''))
-    return result.returncode
+    if log_path.exists():
+        lines = [l for l in log_path.read_text().splitlines() if l.strip()]
+        log_path.write_text('\n'.join(lines) + ('\n' if lines else ''))
+    return rc
 
 
 def run_metrics(

@@ -182,14 +182,10 @@ class BenchmarkApp(GStreamerDetectionApp):
             keep_lost_frames=opt.tracker_keep_lost_frames,
         )
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
-        if self.source_type == 'rpi':
-            display_pipeline = self.get_output_pipeline_string(
-                video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps
-            )
-        else:
-            display_pipeline = DISPLAY_PIPELINE(
-                video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps
-            )
+        # Use fakesink for headless benchmark — autovideosink hangs without a display
+        display_pipeline = DISPLAY_PIPELINE(
+            video_sink='fakesink', sync=self.sync, show_fps='false'
+        )
         pipeline_string = (
             f'{source_pipeline} ! '
             f'{detection_pipeline_wrapper} ! '
