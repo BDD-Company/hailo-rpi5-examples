@@ -382,11 +382,14 @@ def main() -> int:
 
         for vi, video in enumerate(videos):
             log_path = combo_dir / f"{video.stem}.log"
-            print(
+            prefix = (
                 f"[{ci+1:>{len(str(n_combos))}}/{n_combos}  video {vi+1}/{len(videos)}]"
-                f"  {combo_id}  {params_short(params)}",
-                flush=True,
+                f"  {combo_id}  {params_short(params)}"
             )
+            if log_path.exists() and log_path.stat().st_size > 0:
+                print(f"{prefix}  [skip, log exists]", flush=True)
+                continue
+            print(prefix, flush=True)
             rc = run_benchmark_for_video(benchmark_py, video, args.hef_path, log_path, params)
             if rc != 0:
                 print(f"  WARNING: benchmark exited with code {rc} for {video.name}", file=sys.stderr)
