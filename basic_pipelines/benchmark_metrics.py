@@ -125,7 +125,7 @@ def parse_gt_file(path: Path) -> Dict[int, List[BBox]]:
             except ValueError as exc:
                 raise ValueError(f"{path}:{line_no}: invalid frame id in line: {line}") from exc
 
-            coords = parts[1:]
+            coords = [c.rstrip(';') for c in parts[1:] if c.rstrip(';')]
             if len(coords) % 4 != 0:
                 raise ValueError(
                     f"{path}:{line_no}: expected 4*N bbox values after frame number, got {len(coords)}"

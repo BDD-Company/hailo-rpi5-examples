@@ -221,8 +221,8 @@ def parse_args() -> argparse.Namespace:
                         help='Directory with test video files')
     parser.add_argument('--annotations-dir', type=Path, default=None,
                         help='Directory with GT .txt annotation files (defaults to --videos-dir)')
-    parser.add_argument('--hef-path', type=Path, required=True,
-                        help='Path to the Hailo .hef model file')
+    parser.add_argument('--hef-path', type=Path, default=None,
+                        help='Path to the Hailo .hef model file (not needed with --metrics-only)')
     parser.add_argument('--out-dir', type=Path, required=True,
                         help='Output directory for sweep results')
     parser.add_argument('--mode', choices=['detection', 'tracking', 'combined'],
@@ -238,6 +238,8 @@ def parse_args() -> argparse.Namespace:
                         help='Metric to rank results by (default: mAP50)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print parameter combinations and exit without running')
+    parser.add_argument('--metrics-only', action='store_true',
+                        help='Skip benchmark runs, compute metrics and ranking from existing logs in --out-dir')
     return parser.parse_args()
 
 
@@ -248,16 +250,97 @@ def main() -> int:
     benchmark_py  = scripts_dir / 'benchmark.py'
     metrics_py    = scripts_dir / 'benchmark_metrics.py'
 
-    for path, name in [(benchmark_py, 'benchmark.py'), (metrics_py, 'benchmark_metrics.py')]:
-        if not path.exists():
-            print(f"ERROR: {name} not found at {path}", file=sys.stderr)
-            return 1
+    if not metrics_py.exists():
+        print(f"ERROR: benchmark_metrics.py not found at {metrics_py}", file=sys.stderr)
+        return 1
 
     if not args.videos_dir.is_dir():
         print(f"ERROR: --videos-dir is not a directory: {args.videos_dir}", file=sys.stderr)
         return 1
 
     annotations_dir = args.annotations_dir or args.videos_dir
+
+    # ------------------------------------------------------------------
+    # metrics-only: skip benchmark runs, read params from existing dirs
+    # ------------------------------------------------------------------
+    if args.metrics_only:
+        if not args.out_dir.is_dir():
+            print(f"ERROR: --out-dir does not exist: {args.out_dir}", file=sys.stderr)
+            return 1
+
+        combo_params: dict[str, Any] = {}
+        for combo_dir in sorted(args.out_dir.iterdir()):
+            params_file = combo_dir / 'params.json'
+            if combo_dir.is_dir() and params_file.exists():
+                combo_params[combo_dir.name] = json.loads(params_file.read_text())
+
+        if not combo_params:
+            print(f"ERROR: no combo_XXXX directories with params.json found in {args.out_dir}", file=sys.stderr)
+            return 1
+
+        n_combos = len(combo_params)
+        print(f"metrics-only: found {n_combos} combos in {args.out_dir}")
+        print(f"Metric: {args.metric}  |  Output: {args.out_dir}\n")
+
+        all_metrics_json = args.out_dir / 'all_metrics.json'
+        print(f"Calculating metrics → {all_metrics_json} ...")
+        rc = run_metrics(metrics_py, args.videos_dir, annotations_dir, args.out_dir, all_metrics_json)
+        if rc != 0:
+            print(f"WARNING: benchmark_metrics.py exited with code {rc}", file=sys.stderr)
+
+        if not all_metrics_json.exists():
+            print("ERROR: metrics file was not created; cannot produce summary.", file=sys.stderr)
+            return 1
+
+        all_metrics = json.loads(all_metrics_json.read_text())
+
+        ranked = []
+        for report_set in all_metrics.get('report_sets', []):
+            name     = report_set.get('name', '')
+            combo_id = Path(name).name
+            params   = combo_params.get(combo_id) or combo_params.get(Path(report_set.get('path', '')).name, {})
+            summary  = report_set.get('summary', {})
+            p_val    = summary.get('precision', 0.0) or 0.0
+            r_val    = summary.get('recall', 0.0) or 0.0
+            f1       = (2 * p_val * r_val / (p_val + r_val)) if (p_val + r_val) > 0 else 0.0
+            score    = extract_summary_metric(report_set, args.metric)
+            ranked.append({
+                'combo_id': combo_id,
+                'params':   params,
+                'score':    score,
+                'metrics': {
+                    'mAP50':     summary.get('mAP50', 0.0),
+                    'mAP50_95':  summary.get('mAP50_95', 0.0),
+                    'precision': p_val,
+                    'recall':    r_val,
+                    'f1':        f1,
+                },
+            })
+
+        ranked.sort(key=lambda x: x['score'], reverse=True)
+        for rank, entry in enumerate(ranked, 1):
+            entry['rank'] = rank
+
+        summary_json = args.out_dir / 'sweep_summary.json'
+        summary_json.write_text(json.dumps({
+            'metric':         args.metric,
+            'total_combos':   n_combos,
+            'ranked_results': ranked,
+        }, indent=2))
+        print(f"Sweep summary saved → {summary_json}")
+        print_top_results(ranked, args.top_n, args.metric)
+        return 0
+
+    # ------------------------------------------------------------------
+    # Normal sweep: validate hef-path and run benchmarks
+    # ------------------------------------------------------------------
+    if not benchmark_py.exists():
+        print(f"ERROR: benchmark.py not found at {benchmark_py}", file=sys.stderr)
+        return 1
+
+    if args.hef_path is None:
+        print("ERROR: --hef-path is required unless --metrics-only is set", file=sys.stderr)
+        return 1
 
     sweep_config = None
     if args.sweep_config:
