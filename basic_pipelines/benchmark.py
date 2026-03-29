@@ -10,6 +10,15 @@ import hailo
 
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
+from hailo_apps.hailo_app_python.core.common.core import get_default_parser
+from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import (
+    SOURCE_PIPELINE,
+    INFERENCE_PIPELINE,
+    INFERENCE_PIPELINE_WRAPPER,
+    TRACKER_PIPELINE,
+    USER_CALLBACK_PIPELINE,
+    DISPLAY_PIPELINE,
+)
 from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
 
 # -----------------------------------------------------------------------------------------------
@@ -117,7 +126,67 @@ def app_callback(pad, info, user_data):
 
 class BenchmarkApp(GStreamerDetectionApp):
     def __init__(self, app_callback, user_data):
-        super().__init__(app_callback, user_data)
+        parser = get_default_parser()
+        for flag, dest, typ, default in [
+            ('--nms-score-threshold',         'nms_score_threshold',         float, 0.3),
+            ('--nms-iou-threshold',           'nms_iou_threshold',           float, 0.45),
+            ('--tracker-iou-thr',             'tracker_iou_thr',             float, 0.6),
+            ('--tracker-kalman-dist-thr',     'tracker_kalman_dist_thr',     float, 0.6),
+            ('--tracker-keep-new-frames',     'tracker_keep_new_frames',     int,   1),
+            ('--tracker-keep-tracked-frames', 'tracker_keep_tracked_frames', int,   0),
+            ('--tracker-keep-lost-frames',    'tracker_keep_lost_frames',    int,   0),
+        ]:
+            try:
+                parser.add_argument(flag, dest=dest, type=typ, default=default)
+            except Exception:
+                pass  # already in default parser
+        super().__init__(app_callback, user_data, parser=parser)
+
+    def get_pipeline_string(self):
+        nms_score = getattr(self.options_menu, 'nms_score_threshold', 0.3)
+        nms_iou   = getattr(self.options_menu, 'nms_iou_threshold',   0.45)
+        thresholds_str = (
+            f"nms-score-threshold={nms_score} "
+            f"nms-iou-threshold={nms_iou} "
+            f"output-format-type=HAILO_FORMAT_TYPE_FLOAT32"
+        )
+        source_pipeline = SOURCE_PIPELINE(
+            video_source=self.video_source,
+            video_width=self.video_width,
+            video_height=self.video_height,
+            frame_rate=self.frame_rate,
+            sync=self.sync,
+        )
+        detection_pipeline = INFERENCE_PIPELINE(
+            hef_path=self.hef_path,
+            post_process_so=self.post_process_so,
+            post_function_name=self.post_function_name,
+            batch_size=self.batch_size,
+            config_json=self.labels_json,
+            additional_params=thresholds_str,
+        )
+        detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
+        tracker_pipeline = TRACKER_PIPELINE(
+            class_id=1,
+            keep_past_metadata='false',
+            qos='false',
+            iou_thr=getattr(self.options_menu, 'tracker_iou_thr', 0.6),
+            kalman_dist_thr=getattr(self.options_menu, 'tracker_kalman_dist_thr', 0.6),
+            keep_new_frames=getattr(self.options_menu, 'tracker_keep_new_frames', 1),
+            keep_tracked_frames=getattr(self.options_menu, 'tracker_keep_tracked_frames', 0),
+            keep_lost_frames=getattr(self.options_menu, 'tracker_keep_lost_frames', 0),
+        )
+        user_callback_pipeline = USER_CALLBACK_PIPELINE()
+        display_pipeline = DISPLAY_PIPELINE(
+            video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps
+        )
+        return (
+            f'{source_pipeline} ! '
+            f'{detection_pipeline_wrapper} ! '
+            f'{tracker_pipeline} ! '
+            f'{user_callback_pipeline} ! '
+            f'{display_pipeline}'
+        )
 
     def on_eos(self):
         self.user_data.print_stats()
