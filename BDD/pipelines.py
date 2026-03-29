@@ -113,6 +113,8 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
     else:
         source_element = (
             f'filesrc location="{video_source}" name={name} ! '
+            f' qtdemux name=demux demux.video_0 ! '
+            f'{QUEUE(name=f"{name}_queue_decode")} ! '
             f'decodebin name={name}_decodebin ! '
         )
 
