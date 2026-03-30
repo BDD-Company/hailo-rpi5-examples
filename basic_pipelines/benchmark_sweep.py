@@ -51,7 +51,7 @@ TRACKING_SWEEP: dict[str, list] = {
 
 DEFAULTS: dict[str, Any] = {
     'nms_score_threshold':    0.3,
-    'nms_iou_threshold':      0.45,
+    'nms_iou_threshold':      0.35,
     'iou_thr':                0.6,
     'kalman_dist_thr':        0.6,
     'keep_new_frames':        1,
