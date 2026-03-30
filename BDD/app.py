@@ -219,10 +219,42 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     PD_COEFF_D      = control_config.get('pd_coeff_d', 1)
 
     PD_COEFF_P_DYNAMIC = control_config.get('pd_coeff_p_dynamic', False)
+    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.get('pd_coeff_p_dynamic_use_piecewise', False)
     PD_COEFF_P_MIN_TARGET_SIZE = control_config.get('pd_coeff_p_dynamic_min_target_size', 0.003)
     PD_COEFF_P_MAX_TARGET_SIZE = control_config.get('pd_coeff_p_dynamic_max_target_size', 0.005)
     PD_COEFF_P_MIN  = control_config.get('pd_coeff_p_dynamic_min', 0.5)
     PD_COEFF_P_MAX  = control_config.get('pd_coeff_p_dynamic_max', 2)
+
+    # Normalized target size thresholds for dynamic P profile:
+    # s = 0.0 means target is at or below PD_COEFF_P_MIN_TARGET_SIZE
+    # s = 1.0 means target is at or above PD_COEFF_P_MAX_TARGET_SIZE
+    #
+    # Below STAGE_1_THRESHOLD:
+    #   target is considered small / far, P grows quickly from minimum.
+    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.get('pd_coeff_p_dynamic_stage_1_threshold', 0.2)
+
+    # Between STAGE_1_THRESHOLD and STAGE_2_THRESHOLD:
+    #   target is in the working mid-range, P continues growing up to maximum.
+    # Above STAGE_2_THRESHOLD:
+    #   target is considered large / near, P starts decreasing to avoid overshoot
+    #   and overly aggressive control close to the target.
+    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.get('pd_coeff_p_dynamic_stage_2_threshold', 0.6)
+
+
+    # Relative P ratios inside [PD_COEFF_P_MIN, PD_COEFF_P_MAX]:
+    #
+    # Ratio reached at STAGE_1_THRESHOLD.
+    # Example: 0.60 means that by s = 0.2, P reaches 60% of the full range
+    # between PD_COEFF_P_MIN and PD_COEFF_P_MAX.
+    PD_COEFF_P_STAGE_1_RATIO = control_config.get('pd_coeff_p_dynamic_stage_1_ratio', 0.60)
+
+    # Ratio reached at STAGE_2_THRESHOLD.
+    # Usually 1.00, meaning the maximum P is reached in the mid-range.
+    PD_COEFF_P_STAGE_2_RATIO = control_config.get('pd_coeff_p_dynamic_stage_2_ratio', 1.00)
+
+    # Ratio used when target is very large / very near (s -> 1.0).
+    # This reduces P near the target to make control softer and reduce oscillation.
+    PD_COEFF_P_STAGE_3_RATIO = control_config.get('pd_coeff_p_dynamic_stage_3_ratio', 0.35)
 
     TARGET_SIZE_M = control_config.get('target_size_m', XY(1, 0.5))
     FRAME_ANGLUAR_SIZE_DEG = control_config.get('frame_angular_size_deg', XY(120, 90))
@@ -300,6 +332,23 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
 
         return current_detection_timestamp_ns - prev_detection_timestamp_ns
 
+    def piecewise_p_ratio(s: float) -> float:
+        s = max(0.0, min(1.0, s))
+
+        if s < PD_COEFF_P_STAGE_1_THRESHOLD:
+            return PD_COEFF_P_STAGE_1_RATIO * (s / PD_COEFF_P_STAGE_1_THRESHOLD)
+
+        if s < PD_COEFF_P_STAGE_2_THRESHOLD:
+            return PD_COEFF_P_STAGE_1_RATIO + (
+                (PD_COEFF_P_STAGE_2_RATIO - PD_COEFF_P_STAGE_1_RATIO)
+                * ((s - PD_COEFF_P_STAGE_1_THRESHOLD) / (PD_COEFF_P_STAGE_2_THRESHOLD - PD_COEFF_P_STAGE_1_THRESHOLD))
+            )
+
+        return PD_COEFF_P_STAGE_2_RATIO + (
+            (PD_COEFF_P_STAGE_3_RATIO - PD_COEFF_P_STAGE_2_RATIO)
+            * ((s - PD_COEFF_P_STAGE_2_THRESHOLD) / (1.0 - PD_COEFF_P_STAGE_2_THRESHOLD))
+        )
+
     def pd_coeff_p_for_target_size(target_size):
         # avoid tipping over on hallucinations while close to the ground
         if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
@@ -309,8 +358,21 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
         if not PD_COEFF_P_DYNAMIC:
             return PD_COEFF_P
 
-        target_size_ratio = (target_size - PD_COEFF_P_MIN_TARGET_SIZE) / (PD_COEFF_P_MAX_TARGET_SIZE - PD_COEFF_P_MIN_TARGET_SIZE)
-        result = PD_COEFF_P_MIN + target_size_ratio * (PD_COEFF_P_MAX - PD_COEFF_P_MIN)
+        min_size = PD_COEFF_P_MIN_TARGET_SIZE
+        max_size = PD_COEFF_P_MAX_TARGET_SIZE
+
+        if max_size <= min_size:
+            logger.warning("Invalid target size range: min=%s max=%s", min_size, max_size)
+            return PD_COEFF_P_MIN
+
+        s = (target_size - min_size) / (max_size - min_size)
+        s = max(0.0, min(1.0, s))
+
+        if PD_COEFF_P_DYNAMIC_USE_PIECEWISE:
+            ratio = piecewise_p_ratio(s)
+            return PD_COEFF_P_MIN + ratio * (PD_COEFF_P_MAX - PD_COEFF_P_MIN)
+
+        result = PD_COEFF_P_MIN + s * (PD_COEFF_P_MAX - PD_COEFF_P_MIN)
 
         deviance_coeff = 1 # could be 2
         return min(PD_COEFF_P_MAX * deviance_coeff, max(PD_COEFF_P_MIN / deviance_coeff, result))
@@ -417,8 +479,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 distance_to_center = detection.bbox.center.distance_to(center)
                 target_size = detection.bbox.area()
                 pd_coeff_p = pd_coeff_p_for_target_size(target_size)
-                if flight_time_ns >= 1_300_000_000:
-                    pd_coeff_p = PD_COEFF_P_MAX
+                # if flight_time_ns >= 1_500_000_000:
+                    # pd_coeff_p = PD_COEFF_P_MAX
 
                 target_relative_pos = center - detection.bbox.center
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
@@ -499,8 +561,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     mode += " RED "
                     #pd_coeff_p
 
-
-                command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
+                # command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
                 target_relative_pos_pd = target_relative_pos
                 if target_relative_pos is not None:
                     logger.debug("!!! target before PD: %s", target_relative_pos)
@@ -529,10 +590,6 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 #     if new_angle_to_target != angle_to_target:
                 #         logger.warning("Too steep atack close to the ground %s, clamping to %s ", angle_to_target, new_angle_to_target)
                 #         angle_to_target = new_angle_to_target
-
-                if False and (angle_to_target.x > 100 or angle_to_target.y > 90) and flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
-                    logging.warning("!!! Angle is too steep, adding thrust")
-                    thrust *= 1.05
 
                 # await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
                 await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
@@ -674,26 +731,34 @@ def main():
     control_config = {
         'confidence_min': 0.2,
         'confidence_move': 0.4,
-        'thrust_max': 0.5,
-        'thrust_min': 0.4,
+        'thrust_max': 0.375,
+        'thrust_min': 0.375,
 
         'target_lost_fade_per_frame': 0.75,
 
-        'pd_coeff_p': 3, #12.5
+        'pd_coeff_p': 4, #12.5
         'pd_coeff_d': 0,
 
         # Dynamically adjust P coeff based on target size.
-        # P is approximated linearly between min and max, NEVER exceeding min nor max
-        'pd_coeff_p_dynamic': False,
-        'pd_coeff_p_dynamic_min_target_size' : 0.0001, # normalized target size w * h, where both w and are in range (0..1)
+        # Old mode: linear interpolation between min and max.
+        # New mode: piecewise profile controlled by stage thresholds and ratios.
+        'pd_coeff_p_dynamic': True,
+        'pd_coeff_p_dynamic_use_piecewise': True,
+        'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
         'pd_coeff_p_dynamic_min' : 0.6,
-        'pd_coeff_p_dynamic_max_target_size' : 0.001,  # normalized target size
+        'pd_coeff_p_dynamic_max_target_size' : 0.0120,  # normalized target size
         'pd_coeff_p_dynamic_max' : 6,
+
+        'pd_coeff_p_dynamic_stage_1_threshold': 0.2,
+        'pd_coeff_p_dynamic_stage_2_threshold': 0.642857,
+        'pd_coeff_p_dynamic_stage_1_ratio': 0.50,
+        'pd_coeff_p_dynamic_stage_2_ratio': 1.00,
+        'pd_coeff_p_dynamic_stage_3_ratio': 0.60,
 
         'frame_angular_size_deg' : XY(120, 100),
         'target_size_m' : XY(0.2, 0.2),
 
-        'safe_takeoff_period_ns': 400_000_000
+        'safe_takeoff_period_ns': 700_000_000
     }
 
     drone_thread = threading.Thread(
