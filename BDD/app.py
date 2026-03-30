@@ -745,9 +745,15 @@ def main():
         'pd_coeff_p_dynamic': True,
         'pd_coeff_p_dynamic_use_piecewise': True,
         'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
+
         'pd_coeff_p_dynamic_min' : 0.6,
         'pd_coeff_p_dynamic_max_target_size' : 0.0120,  # normalized target size
         'pd_coeff_p_dynamic_max' : 6,
+        'pd_coeff_p_dynamic_stage_1_threshold': 0.2,
+        'pd_coeff_p_dynamic_stage_2_threshold': 0.6,
+        'pd_coeff_p_dynamic_stage_1_ratio': 0.60,
+        'pd_coeff_p_dynamic_stage_2_ratio': 1.00,
+        'pd_coeff_p_dynamic_stage_3_ratio': 0.35,
 
         'pd_coeff_p_dynamic_stage_1_threshold': 0.2,
         'pd_coeff_p_dynamic_stage_2_threshold': 0.642857,
