@@ -50,10 +50,10 @@ TRACKING_SWEEP: dict[str, list] = {
 }
 
 DEFAULTS: dict[str, Any] = {
-    'nms_score_threshold':    0.3,
+    'nms_score_threshold':    0.5,
     'nms_iou_threshold':      0.35,
-    'iou_thr':                0.6,
-    'kalman_dist_thr':        0.6,
+    'iou_thr':                0.8,
+    'kalman_dist_thr':        0.8,
     'keep_new_frames':        1,
     'keep_tracked_frames':    0,
     'keep_lost_frames':       0,
@@ -143,12 +143,16 @@ def run_metrics(
     annotations_dir: Path,
     reports_dir: Path,
     output_json: Path,
+    frame_align: str,
+    frame_tolerance: int,
 ) -> int:
     cmd = [
         sys.executable, str(metrics_py),
         '--videos-dir',      str(videos_dir),
         '--annotations-dir', str(annotations_dir),
         '--reports-dir',     str(reports_dir),
+        '--frame-align',     str(frame_align),
+        '--frame-tolerance', str(frame_tolerance),
         '--output-json',     str(output_json),
     ]
     result = subprocess.run(cmd)
@@ -236,11 +240,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--metric', choices=['mAP50', 'mAP50_95', 'precision', 'recall', 'f1'],
                         default='mAP50',
                         help='Metric to rank results by (default: mAP50)')
+    parser.add_argument(
+        '--frame-align',
+        choices=['none', 'linear'],
+        default='none',
+        help=(
+            'Frame alignment mode for benchmark_metrics.py. '
+            'none: strict frame ids, linear: rescale prediction frame ids to GT timeline.'
+        ),
+    )
+    parser.add_argument(
+        '--frame-tolerance',
+        type=int,
+        default=0,
+        help='Allow matching GT in neighboring frames within +/-N after alignment (default: 0)',
+    )
     parser.add_argument('--dry-run', action='store_true',
                         help='Print parameter combinations and exit without running')
     parser.add_argument('--metrics-only', action='store_true',
                         help='Skip benchmark runs, compute metrics and ranking from existing logs in --out-dir')
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.frame_tolerance < 0:
+        parser.error('--frame-tolerance must be >= 0')
+    return args
 
 
 def main() -> int:
@@ -284,7 +306,15 @@ def main() -> int:
 
         all_metrics_json = args.out_dir / 'all_metrics.json'
         print(f"Calculating metrics → {all_metrics_json} ...")
-        rc = run_metrics(metrics_py, args.videos_dir, annotations_dir, args.out_dir, all_metrics_json)
+        rc = run_metrics(
+            metrics_py=metrics_py,
+            videos_dir=args.videos_dir,
+            annotations_dir=annotations_dir,
+            reports_dir=args.out_dir,
+            output_json=all_metrics_json,
+            frame_align=args.frame_align,
+            frame_tolerance=args.frame_tolerance,
+        )
         if rc != 0:
             print(f"WARNING: benchmark_metrics.py exited with code {rc}", file=sys.stderr)
 
@@ -399,7 +429,15 @@ def main() -> int:
     # ------------------------------------------------------------------
     all_metrics_json = args.out_dir / 'all_metrics.json'
     print(f"\nCalculating metrics → {all_metrics_json} ...")
-    rc = run_metrics(metrics_py, args.videos_dir, annotations_dir, args.out_dir, all_metrics_json)
+    rc = run_metrics(
+        metrics_py=metrics_py,
+        videos_dir=args.videos_dir,
+        annotations_dir=annotations_dir,
+        reports_dir=args.out_dir,
+        output_json=all_metrics_json,
+        frame_align=args.frame_align,
+        frame_tolerance=args.frame_tolerance,
+    )
     if rc != 0:
         print(f"WARNING: benchmark_metrics.py exited with code {rc}", file=sys.stderr)
 

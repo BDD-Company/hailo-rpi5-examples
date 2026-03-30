@@ -11,7 +11,6 @@ from statistics import mean
 from typing import Dict, Iterable, List, Tuple
 
 BBox = Tuple[float, float, float, float]  # (x1, y1, x2, y2)
-FrameKey = str
 
 
 @dataclass(frozen=True)
@@ -21,10 +20,19 @@ class Prediction:
     bbox: BBox
 
 
+@dataclass(frozen=True)
+class AlignedPrediction:
+    frame: int
+    original_frame: int
+    confidence: float
+    bbox: BBox
+
+
+NUMBER_RE = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
 LOG_LINE_RE = re.compile(
-    r"frame#(?P<frame>\d+)\s+detection:\s+#(?P<track>-?\d+)\s+class:\s+(?P<class_id>-?\d+)\s+"
-    r"confidence:\s+(?P<confidence>\d*\.?\d+)\s+\(x:\s*(?P<x>-?\d*\.?\d+),\s*"
-    r"y:\s*(?P<y>-?\d*\.?\d+),\s*w:\s*(?P<w>-?\d*\.?\d+),\s*h:\s*(?P<h>-?\d*\.?\d+)\)"
+    rf"frame#(?P<frame>\d+)\s+detection:\s+#(?P<track>-?\d+)\s+class:\s+(?P<class_id>-?\d+)\s+"
+    rf"confidence:\s+(?P<confidence>{NUMBER_RE})\s+\(x:\s*(?P<x>{NUMBER_RE}),\s*"
+    rf"y:\s*(?P<y>{NUMBER_RE}),\s*w:\s*(?P<w>{NUMBER_RE}),\s*h:\s*(?P<h>{NUMBER_RE})\)"
 )
 
 
@@ -70,12 +78,34 @@ def parse_args() -> argparse.Namespace:
         help="IoU threshold used for TP/FP/FN and Precision/Recall (default: 0.5).",
     )
     parser.add_argument(
+        "--frame-align",
+        choices=["none", "linear"],
+        default="none",
+        help=(
+            "How to align prediction frame numbers to GT timeline before matching. "
+            "'none' keeps original frame ids, 'linear' rescales prediction frames "
+            "to GT frame range."
+        ),
+    )
+    parser.add_argument(
+        "--frame-tolerance",
+        type=int,
+        default=0,
+        help=(
+            "Allow matching GT in neighboring frames within +/-N after frame alignment "
+            "(default: 0)."
+        ),
+    )
+    parser.add_argument(
         "--output-json",
         type=Path,
         default=None,
         help="Optional output JSON path (file path or existing directory).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.frame_tolerance < 0:
+        parser.error("--frame-tolerance must be >= 0")
+    return args
 
 
 def xywh_center_to_xyxy(x_center: float, y_center: float, width: float, height: float) -> BBox:
@@ -164,42 +194,150 @@ def parse_predictions_file(path: Path, class_id_filter: int | None = None) -> Di
     return pred_by_frame
 
 
-def flatten_predictions(pred_by_frame: Dict[int, List[Prediction]]) -> List[Prediction]:
-    preds = [pred for preds in pred_by_frame.values() for pred in preds]
-    preds.sort(key=lambda p: p.confidence, reverse=True)
-    return preds
+def _last_gt_frame(gt_by_frame: Dict[int, List[BBox]]) -> int:
+    non_empty_frames = [frame for frame, boxes in gt_by_frame.items() if boxes]
+    if non_empty_frames:
+        return max(non_empty_frames)
+    return max(gt_by_frame.keys(), default=0)
 
 
-def match_frame_predictions(preds: List[Prediction], gt_boxes: List[BBox], iou_threshold: float) -> Tuple[int, int, int]:
-    if not preds and not gt_boxes:
-        return (0, 0, 0)
+def _last_pred_frame(pred_by_frame: Dict[int, List[Prediction]]) -> int:
+    non_empty_frames = [frame for frame, preds in pred_by_frame.items() if preds]
+    if non_empty_frames:
+        return max(non_empty_frames)
+    return max(pred_by_frame.keys(), default=0)
 
-    sorted_preds = sorted(preds, key=lambda p: p.confidence, reverse=True)
-    matched_gt = [False] * len(gt_boxes)
+
+def frame_alignment_scale(
+    gt_by_frame: Dict[int, List[BBox]],
+    pred_by_frame: Dict[int, List[Prediction]],
+    frame_align: str,
+) -> float:
+    if frame_align != "linear":
+        return 1.0
+
+    gt_last = _last_gt_frame(gt_by_frame)
+    pred_last = _last_pred_frame(pred_by_frame)
+    if gt_last <= 0 or pred_last <= 0:
+        return 1.0
+    return gt_last / float(pred_last)
+
+
+def _apply_frame_alignment(frame: int, scale: float) -> int:
+    if frame <= 0:
+        return 0
+    return max(1, int(round(frame * scale)))
+
+
+def align_predictions(
+    gt_by_frame: Dict[int, List[BBox]],
+    pred_by_frame: Dict[int, List[Prediction]],
+    frame_align: str,
+) -> Tuple[List[AlignedPrediction], float]:
+    scale = frame_alignment_scale(gt_by_frame, pred_by_frame, frame_align)
+    aligned_preds: List[AlignedPrediction] = []
+    for frame, preds in pred_by_frame.items():
+        aligned_frame = _apply_frame_alignment(frame, scale)
+        for pred in preds:
+            aligned_preds.append(
+                AlignedPrediction(
+                    frame=aligned_frame,
+                    original_frame=pred.frame,
+                    confidence=pred.confidence,
+                    bbox=pred.bbox,
+                )
+            )
+    aligned_preds.sort(key=lambda p: p.confidence, reverse=True)
+    return aligned_preds, scale
+
+
+def _find_best_unmatched_gt(
+    pred_bbox: BBox,
+    pred_frame: int,
+    gt_by_frame: Dict[int, List[BBox]],
+    matched_by_frame: Dict[int, List[bool]],
+    frame_tolerance: int,
+) -> Tuple[int, int, float] | None:
+    start_frame = pred_frame - frame_tolerance
+    end_frame = pred_frame + frame_tolerance
+
+    best_iou = 0.0
+    best_frame = -1
+    best_idx = -1
+    best_dist = None
+
+    for frame in range(start_frame, end_frame + 1):
+        gt_boxes = gt_by_frame.get(frame, [])
+        if not gt_boxes:
+            continue
+
+        frame_matches = matched_by_frame.setdefault(frame, [False] * len(gt_boxes))
+        for idx, gt in enumerate(gt_boxes):
+            if frame_matches[idx]:
+                continue
+
+            score = iou(pred_bbox, gt)
+            dist = abs(frame - pred_frame)
+            if score > best_iou + 1e-12:
+                best_iou = score
+                best_frame = frame
+                best_idx = idx
+                best_dist = dist
+            elif abs(score - best_iou) <= 1e-12 and best_dist is not None and dist < best_dist:
+                best_frame = frame
+                best_idx = idx
+                best_dist = dist
+
+    if best_idx < 0:
+        return None
+    return (best_frame, best_idx, best_iou)
+
+
+def match_predictions(
+    gt_by_frame: Dict[int, List[BBox]],
+    aligned_preds: List[AlignedPrediction],
+    iou_threshold: float,
+    frame_tolerance: int,
+) -> Tuple[int, int, int, Dict[int, int], Dict[int, int]]:
+    matched_by_frame = {frame: [False] * len(boxes) for frame, boxes in gt_by_frame.items()}
+
     tp = 0
     fp = 0
+    fp_frame_counts: Dict[int, int] = {}
 
-    for pred in sorted_preds:
-        best_iou = 0.0
-        best_gt_idx = -1
-        for idx, gt in enumerate(gt_boxes):
-            if matched_gt[idx]:
-                continue
-            score = iou(pred.bbox, gt)
-            if score > best_iou:
-                best_iou = score
-                best_gt_idx = idx
-        if best_gt_idx >= 0 and best_iou >= iou_threshold:
-            matched_gt[best_gt_idx] = True
+    for pred in aligned_preds:
+        match = _find_best_unmatched_gt(
+            pred_bbox=pred.bbox,
+            pred_frame=pred.frame,
+            gt_by_frame=gt_by_frame,
+            matched_by_frame=matched_by_frame,
+            frame_tolerance=frame_tolerance,
+        )
+        if match is not None and match[2] >= iou_threshold:
+            matched_frame, matched_idx, _ = match
+            matched_by_frame[matched_frame][matched_idx] = True
             tp += 1
         else:
             fp += 1
+            fp_frame_counts[pred.frame] = fp_frame_counts.get(pred.frame, 0) + 1
 
-    fn = sum(1 for m in matched_gt if not m)
-    return (tp, fp, fn)
+    fn = 0
+    fn_frame_counts: Dict[int, int] = {}
+    for frame, matches in matched_by_frame.items():
+        unmatched_count = sum(1 for is_matched in matches if not is_matched)
+        if unmatched_count > 0:
+            fn += unmatched_count
+            fn_frame_counts[frame] = unmatched_count
+
+    return (tp, fp, fn, fp_frame_counts, fn_frame_counts)
 
 
-def calculate_ap(gt_by_frame: Dict[int, List[BBox]], sorted_preds: List[Prediction], iou_threshold: float) -> float:
+def calculate_ap(
+    gt_by_frame: Dict[int, List[BBox]],
+    aligned_preds: List[AlignedPrediction],
+    iou_threshold: float,
+    frame_tolerance: int,
+) -> float:
     total_gt = sum(len(boxes) for boxes in gt_by_frame.values())
     if total_gt == 0:
         return 0.0
@@ -208,22 +346,17 @@ def calculate_ap(gt_by_frame: Dict[int, List[BBox]], sorted_preds: List[Predicti
     tp_flags: List[int] = []
     fp_flags: List[int] = []
 
-    for pred in sorted_preds:
-        gt_boxes = gt_by_frame.get(pred.frame, [])
-        gt_matches = matched_by_frame.setdefault(pred.frame, [False] * len(gt_boxes))
-
-        best_iou = 0.0
-        best_gt_idx = -1
-        for idx, gt in enumerate(gt_boxes):
-            if gt_matches[idx]:
-                continue
-            score = iou(pred.bbox, gt)
-            if score > best_iou:
-                best_iou = score
-                best_gt_idx = idx
-
-        if best_gt_idx >= 0 and best_iou >= iou_threshold:
-            gt_matches[best_gt_idx] = True
+    for pred in aligned_preds:
+        match = _find_best_unmatched_gt(
+            pred_bbox=pred.bbox,
+            pred_frame=pred.frame,
+            gt_by_frame=gt_by_frame,
+            matched_by_frame=matched_by_frame,
+            frame_tolerance=frame_tolerance,
+        )
+        if match is not None and match[2] >= iou_threshold:
+            matched_frame, matched_idx, _ = match
+            matched_by_frame[matched_frame][matched_idx] = True
             tp_flags.append(1)
             fp_flags.append(0)
         else:
@@ -264,6 +397,8 @@ def calculate_video_metrics(
     pred_file: Path,
     class_id_filter: int | None,
     iou_threshold: float,
+    frame_align: str,
+    frame_tolerance: int,
 ) -> Dict[str, object]:
     gt_by_frame = parse_gt_file(gt_file)
     pred_by_frame = parse_predictions_file(pred_file, class_id_filter=class_id_filter)
@@ -274,6 +409,8 @@ def calculate_video_metrics(
         gt_by_frame=gt_by_frame,
         pred_by_frame=pred_by_frame,
         iou_threshold=iou_threshold,
+        frame_align=frame_align,
+        frame_tolerance=frame_tolerance,
     )
 
 
@@ -284,33 +421,34 @@ def calculate_video_metrics_from_data(
     gt_by_frame: Dict[int, List[BBox]],
     pred_by_frame: Dict[int, List[Prediction]],
     iou_threshold: float,
+    frame_align: str,
+    frame_tolerance: int,
 ) -> Dict[str, object]:
-    frames = sorted(set(gt_by_frame.keys()) | set(pred_by_frame.keys()))
-
-    tp_total = 0
-    fp_total = 0
-    fn_total = 0
-    fp_frame_counts: Dict[int, int] = {}
-    fn_frame_counts: Dict[int, int] = {}
-
-    for frame in frames:
-        preds = pred_by_frame.get(frame, [])
-        gt_boxes = gt_by_frame.get(frame, [])
-        tp, fp, fn = match_frame_predictions(preds, gt_boxes, iou_threshold)
-        tp_total += tp
-        fp_total += fp
-        fn_total += fn
-        if fp > 0:
-            fp_frame_counts[frame] = fp_frame_counts.get(frame, 0) + fp
-        if fn > 0:
-            fn_frame_counts[frame] = fn_frame_counts.get(frame, 0) + fn
+    aligned_preds, align_scale = align_predictions(
+        gt_by_frame=gt_by_frame,
+        pred_by_frame=pred_by_frame,
+        frame_align=frame_align,
+    )
+    tp_total, fp_total, fn_total, fp_frame_counts, fn_frame_counts = match_predictions(
+        gt_by_frame=gt_by_frame,
+        aligned_preds=aligned_preds,
+        iou_threshold=iou_threshold,
+        frame_tolerance=frame_tolerance,
+    )
 
     precision = (tp_total / (tp_total + fp_total)) if (tp_total + fp_total) > 0 else 0.0
     recall = (tp_total / (tp_total + fn_total)) if (tp_total + fn_total) > 0 else 0.0
 
-    sorted_preds = flatten_predictions(pred_by_frame)
     iou_thresholds = [round(0.5 + 0.05 * i, 2) for i in range(10)]
-    ap_per_threshold = [calculate_ap(gt_by_frame, sorted_preds, thr) for thr in iou_thresholds]
+    ap_per_threshold = [
+        calculate_ap(
+            gt_by_frame=gt_by_frame,
+            aligned_preds=aligned_preds,
+            iou_threshold=thr,
+            frame_tolerance=frame_tolerance,
+        )
+        for thr in iou_thresholds
+    ]
     map50 = ap_per_threshold[0]
     map50_95 = float(mean(ap_per_threshold)) if ap_per_threshold else 0.0
 
@@ -320,7 +458,10 @@ def calculate_video_metrics_from_data(
         "prediction_file": str(pred_file),
         "num_gt_frames": len(gt_by_frame),
         "num_gt_boxes": int(sum(len(b) for b in gt_by_frame.values())),
-        "num_predictions": int(sum(len(p) for p in pred_by_frame.values())),
+        "num_predictions": int(len(aligned_preds)),
+        "frame_align": frame_align,
+        "frame_tolerance": int(frame_tolerance),
+        "frame_align_scale": float(align_scale),
         "precision": precision,
         "recall": recall,
         "mAP50": map50,
@@ -340,36 +481,41 @@ def calculate_video_metrics_from_data(
 
 
 def _calculate_dataset_ap(
-    gt_by_key: Dict[FrameKey, List[BBox]],
-    pred_tuples: List[Tuple[float, FrameKey, BBox]],
+    gt_by_video: Dict[str, Dict[int, List[BBox]]],
+    pred_tuples: List[Tuple[float, str, int, BBox]],
     iou_threshold: float,
+    frame_tolerance: int,
 ) -> float:
-    total_gt = sum(len(boxes) for boxes in gt_by_key.values())
+    total_gt = 0
+    for gt_by_frame in gt_by_video.values():
+        total_gt += sum(len(boxes) for boxes in gt_by_frame.values())
     if total_gt == 0:
         return 0.0
 
-    matched_by_key = {key: [False] * len(boxes) for key, boxes in gt_by_key.items()}
+    matched_by_video: Dict[str, Dict[int, List[bool]]] = {
+        video_name: {frame: [False] * len(boxes) for frame, boxes in gt_by_frame.items()}
+        for video_name, gt_by_frame in gt_by_video.items()
+    }
     sorted_preds = sorted(pred_tuples, key=lambda x: x[0], reverse=True)
 
     tp_flags: List[int] = []
     fp_flags: List[int] = []
-    for confidence, frame_key, pred_bbox in sorted_preds:
+    for confidence, video_name, pred_frame, pred_bbox in sorted_preds:
         del confidence  # confidence only used for sorting
-        gt_boxes = gt_by_key.get(frame_key, [])
-        gt_matches = matched_by_key.setdefault(frame_key, [False] * len(gt_boxes))
+        gt_by_frame = gt_by_video.get(video_name, {})
+        matched_by_frame = matched_by_video.setdefault(video_name, {})
+        match = _find_best_unmatched_gt(
+            pred_bbox=pred_bbox,
+            pred_frame=pred_frame,
+            gt_by_frame=gt_by_frame,
+            matched_by_frame=matched_by_frame,
+            frame_tolerance=frame_tolerance,
+        )
 
-        best_iou = 0.0
-        best_gt_idx = -1
-        for idx, gt in enumerate(gt_boxes):
-            if gt_matches[idx]:
-                continue
-            score = iou(pred_bbox, gt)
-            if score > best_iou:
-                best_iou = score
-                best_gt_idx = idx
-
-        if best_gt_idx >= 0 and best_iou >= iou_threshold:
-            gt_matches[best_gt_idx] = True
+        if match is not None and match[2] >= iou_threshold:
+            matched_frame, matched_idx, _ = match
+            matched_by_frame.setdefault(matched_frame, [False] * len(gt_by_frame.get(matched_frame, [])))
+            matched_by_frame[matched_frame][matched_idx] = True
             tp_flags.append(1)
             fp_flags.append(0)
         else:
@@ -407,6 +553,8 @@ def _calculate_dataset_ap(
 def calculate_summary_metrics(
     iou_threshold: float,
     datasets: List[Tuple[str, Dict[int, List[BBox]], Dict[int, List[Prediction]]]],
+    frame_align: str,
+    frame_tolerance: int,
 ) -> Dict[str, object]:
     tp_total = 0
     fp_total = 0
@@ -414,36 +562,45 @@ def calculate_summary_metrics(
     gt_boxes_total = 0
     pred_total = 0
 
-    gt_by_key: Dict[FrameKey, List[BBox]] = {}
-    pred_tuples: List[Tuple[float, FrameKey, BBox]] = []
+    gt_by_video: Dict[str, Dict[int, List[BBox]]] = {}
+    pred_tuples: List[Tuple[float, str, int, BBox]] = []
 
     for video_name, gt_by_frame, pred_by_frame in datasets:
         gt_boxes_total += sum(len(boxes) for boxes in gt_by_frame.values())
-        pred_total += sum(len(preds) for preds in pred_by_frame.values())
+        aligned_preds, _ = align_predictions(
+            gt_by_frame=gt_by_frame,
+            pred_by_frame=pred_by_frame,
+            frame_align=frame_align,
+        )
+        pred_total += len(aligned_preds)
+        gt_by_video[video_name] = gt_by_frame
 
-        for frame, gt_boxes in gt_by_frame.items():
-            frame_key = f"{video_name}::{frame}"
-            gt_by_key[frame_key] = gt_boxes
+        for pred in aligned_preds:
+            pred_tuples.append((pred.confidence, video_name, pred.frame, pred.bbox))
 
-        for frame, preds in pred_by_frame.items():
-            frame_key = f"{video_name}::{frame}"
-            for pred in preds:
-                pred_tuples.append((pred.confidence, frame_key, pred.bbox))
-
-        frames = sorted(set(gt_by_frame.keys()) | set(pred_by_frame.keys()))
-        for frame in frames:
-            preds = pred_by_frame.get(frame, [])
-            gt_boxes = gt_by_frame.get(frame, [])
-            tp, fp, fn = match_frame_predictions(preds, gt_boxes, iou_threshold)
-            tp_total += tp
-            fp_total += fp
-            fn_total += fn
+        tp, fp, fn, _, _ = match_predictions(
+            gt_by_frame=gt_by_frame,
+            aligned_preds=aligned_preds,
+            iou_threshold=iou_threshold,
+            frame_tolerance=frame_tolerance,
+        )
+        tp_total += tp
+        fp_total += fp
+        fn_total += fn
 
     precision = (tp_total / (tp_total + fp_total)) if (tp_total + fp_total) > 0 else 0.0
     recall = (tp_total / (tp_total + fn_total)) if (tp_total + fn_total) > 0 else 0.0
 
     iou_thresholds = [round(0.5 + 0.05 * i, 2) for i in range(10)]
-    ap_per_threshold = [_calculate_dataset_ap(gt_by_key, pred_tuples, thr) for thr in iou_thresholds]
+    ap_per_threshold = [
+        _calculate_dataset_ap(
+            gt_by_video=gt_by_video,
+            pred_tuples=pred_tuples,
+            iou_threshold=thr,
+            frame_tolerance=frame_tolerance,
+        )
+        for thr in iou_thresholds
+    ]
     map50 = ap_per_threshold[0] if ap_per_threshold else 0.0
     map50_95 = float(mean(ap_per_threshold)) if ap_per_threshold else 0.0
 
@@ -451,6 +608,8 @@ def calculate_summary_metrics(
         "num_videos": len(datasets),
         "num_gt_boxes": int(gt_boxes_total),
         "num_predictions": int(pred_total),
+        "frame_align": frame_align,
+        "frame_tolerance": int(frame_tolerance),
         "precision": precision,
         "recall": recall,
         "mAP50": map50,
@@ -542,6 +701,8 @@ def main() -> int:
         "annotations_dir": str(annotations_dir),
         "reports_dir": str(reports_dir),
         "iou_threshold_for_pr": float(args.iou_threshold),
+        "frame_align": args.frame_align,
+        "frame_tolerance": int(args.frame_tolerance),
         "class_id_filter": args.class_id,
         "report_sets": [],
     }
@@ -572,6 +733,8 @@ def main() -> int:
                 gt_by_frame=gt_by_frame,
                 pred_by_frame=pred_by_frame,
                 iou_threshold=args.iou_threshold,
+                frame_align=args.frame_align,
+                frame_tolerance=args.frame_tolerance,
             )
             per_video_metrics.append(result)
             summary_datasets.append((video.name, gt_by_frame, pred_by_frame))
@@ -580,7 +743,12 @@ def main() -> int:
             continue
 
         has_any_result = True
-        summary = calculate_summary_metrics(args.iou_threshold, summary_datasets)
+        summary = calculate_summary_metrics(
+            iou_threshold=args.iou_threshold,
+            datasets=summary_datasets,
+            frame_align=args.frame_align,
+            frame_tolerance=args.frame_tolerance,
+        )
         print_report(report_set_name, per_video_metrics, summary)
         all_results["report_sets"].append(
             {
