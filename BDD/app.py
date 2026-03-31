@@ -625,6 +625,16 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
             mode = debug_info.get('mode', '')
             logger.info("MODE: %s, ACTION: %s", mode, last_command)
 
+            debug_info['extra'] = (
+                f"stage1_thr={PD_COEFF_P_STAGE_1_THRESHOLD:.3f} "
+                f"stage2_thr={PD_COEFF_P_STAGE_2_THRESHOLD:.3f} "
+                f"stage1_r={PD_COEFF_P_STAGE_1_RATIO:.2f} "
+                f"stage2_r={PD_COEFF_P_STAGE_2_RATIO:.2f} "
+                f"stage3_r={PD_COEFF_P_STAGE_3_RATIO:.2f} "
+                f"p_min={PD_COEFF_P_MIN:.2f} "
+                f"p_max={PD_COEFF_P_MAX:.2f}"
+            )
+
             # -1 means that there was no frame and no detections
             if output_queue is not None:
                 output = {
@@ -755,11 +765,6 @@ def main():
         'pd_coeff_p_dynamic_min' : 0.6,
         'pd_coeff_p_dynamic_max_target_size' : 0.0120,  # normalized target size
         'pd_coeff_p_dynamic_max' : 6,
-        'pd_coeff_p_dynamic_stage_1_threshold': 0.2,
-        'pd_coeff_p_dynamic_stage_2_threshold': 0.6,
-        'pd_coeff_p_dynamic_stage_1_ratio': 0.60,
-        'pd_coeff_p_dynamic_stage_2_ratio': 1.00,
-        'pd_coeff_p_dynamic_stage_3_ratio': 0.35,
 
         'pd_coeff_p_dynamic_stage_1_threshold': 0.2,
         'pd_coeff_p_dynamic_stage_2_threshold': 0.642857,
