@@ -454,7 +454,7 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 # logger.info("!!! flight time: %ss", flight_time_ns / 1000_000_000)
 
             debug_info['start_time_ms'] = START_TIME_MS
-            debug_info['flight_time_ms'] = flight_time_ns / 1000_1000
+            debug_info['flight_time_ms'] = flight_time_ns / 1000_000
 
             detections, frame = detections_obj.detections, detections_obj.frame
             detection = None
@@ -640,7 +640,6 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 output = {
                     'detections' : detections_obj,
                     'selected' : detection,
-                    # 'move_command': move_command,
                     'telemetry': debug_info,
                     'selected_detection_projected_pos' : target_relative_pos,
                     'move_goal' : target_relative_pos
