@@ -209,6 +209,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
     global global_logger
     logger = global_logger
 
+    START_TIME_MS = time.monotonic_ns() / 1000_000
+
     MIN_CONFIDENCE  = control_config.get('confidence_min', 0.1)
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
     MAX_THRUST      = control_config.get('thrust_max', 0.5)
@@ -451,6 +453,9 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                 flight_time_ns = time.monotonic_ns() - takeoff_time_ns
                 # logger.info("!!! flight time: %ss", flight_time_ns / 1000_000_000)
 
+            debug_info['start_time_ms'] = START_TIME_MS
+            debug_info['flight_time_ms'] = flight_time_ns / 1000_1000
+
             detections, frame = detections_obj.detections, detections_obj.frame
             detection = None
 
@@ -627,7 +632,8 @@ async def drone_controlling_tread_async(drone_connection_string, drone_config, d
                     'selected' : detection,
                     # 'move_command': move_command,
                     'telemetry': debug_info,
-                    'target' : target_relative_pos, #detection.bbox.center + XY(0.1, 0.1) if detection else XY(), # target_relative_pos
+                    'selected_detection_projected_pos' : target_relative_pos,
+                    'move_goal' : target_relative_pos
                 }
                 output_queue.put(output)
 

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 DETECTED_OBJECT_COLOR = (100, 0, 0)    # blue
 SELECTED_OBJECT_COLOR = (255, 0, 255)  # magenta
-TARGET_COLOR = (0, 0, 255) # red
+TARGET_COLOR = (0, 0, 255)
 NEUTRAL_RECT_COLOR    = (0, 255, 0)    # green
 CROSSHAIR_COLOR = SELECTED_OBJECT_COLOR
 SPEED_COLOR           = SELECTED_OBJECT_COLOR #(255, 255, 0) # cyan
@@ -116,7 +116,10 @@ class FormatPrinter(pprint.PrettyPrinter):
         return super().format(object, context, maxlevels, level)
 
 # ceanup_json_re= re.compile(r'\s*[{}],?|"')
-def make_debug_info_dict(frame_id, telemetry_dict, frame_metadata):
+def make_debug_info_dict(frame_id, telemetry_dict : dict, frame_metadata):
+    start_time_ms = telemetry_dict.pop('start_time_ms', 0)
+    flight_time_ms = telemetry_dict.pop('flight_time_ms', 0)
+
     result = dict(**telemetry_dict)
     # remove 'covariance_matrix' which is too verbose
     result = filterdict(result, lambda k, v :  k != 'covariance_matrix')
@@ -127,7 +130,10 @@ def make_debug_info_dict(frame_id, telemetry_dict, frame_metadata):
     result['frame'] = frame_id
 
     detection_delay = (frame_metadata.detection_end_timestamp_ns - frame_metadata.detection_start_timestamp_ns) / 1000000
+    now_ms = time.monotonic_ns() / 1000_000
     result['time'] = {
+        'start' : int(now_ms - start_time_ms),
+        'takeoff' : int(now_ms - flight_time_ms),
         'captured at': frame_metadata.capture_timestamp_ns,
         'detection delay': detection_delay
     }
@@ -172,11 +178,28 @@ def draw_detection(frame, detection : Detection, color, line_thickness = 1):
     #         line_width = line_thickness
     #     )
 
+def draw_move_goal(frame, target_pos : XY, color, line_thickness = 1):
+    frame_size = XY(frame.shape[1], frame.shape[0])
+    # since target is a diff from a frame center (0.5, 0.5) in a 0..1 frame
+    target_pos_on_frame = (XY(0.5, 0.5) - target_pos).multiplied_by_XY(frame_size)
+
+    frame_rect = Rect(XY(0, 0), frame_size)
+    if frame_rect.is_point_inside(target_pos_on_frame):
+        cv2.drawMarker(
+            frame,
+            target_pos_on_frame.to_tuple(to = int),
+            color,
+            cv2.MARKER_TILTED_CROSS,
+            10,
+            1
+        )
+
+
 def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1):
     frame_size = XY(frame.shape[1], frame.shape[0])
     # since target is a diff from a frame center (0.5, 0.5) in a 0..1 frame
     target_pos_on_frame = (XY(0.5, 0.5) - target_pos).multiplied_by_XY(frame_size)
-    from_pos_on_frame = from_pos.multiplied_by_XY(frame_size)
+    from_pos_on_frame = from_pos.multiplied_by_XY(frame_size) if from_pos else None
 
     frame_rect = Rect(XY(0, 0), frame_size)
     if frame_rect.is_point_inside(target_pos_on_frame):
@@ -233,7 +256,8 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     selected : Detection|None = detection_dict.get('selected', None)
     move_command : MoveCommand | None = detection_dict.get('move_command', None)
     telemetry : dict | None = detection_dict.get('telemetry', {})
-    target : XY | None = detection_dict.get('target', None)
+    target : XY | None = detection_dict.get('selected_detection_projected_pos', None)
+    move_goal : XY | None = detection_dict.get('move_goal', None)
 
     frame = detections.frame if detections else None
 
@@ -278,12 +302,18 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
                     value_str = value_str.replace("{", "")
                     value_str = value_str.replace("}", "")
                     value_str = value_str.replace("\n", "")
+                    value_str = value_str.replace("\t", "")
+                    value_str = value_str.replace("  ", " ")
 
             lines.append(f'{key}: {value_str}')
 
+        time_dict = debug_info['time']
+        def time_val(val):
+            return time_dict.get(val, 0)
+
         odo_dict = debug_info.get("odometry", {}) or {}
         add_line('frame', debug_info)
-        add_line('time  ',  debug_info)
+        lines.append(f'time: start {time_val("start")}ms, takeoff {time_val("takeoff")}ms, captured {time_val("captured at")}, delay: {time_val("detection delay")}ms' )
         add_line('state ', debug_info)
         add_line('position_body', odo_dict)
         add_line('velocity_body ', odo_dict)
@@ -291,6 +321,8 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         add_line('attitude_euler        ', debug_info)
         add_line('mode', debug_info)
         add_line('action', debug_info)
+        if 'extra' in debug_info.keys():
+            add_line('extra', debug_info)
 
         for line_no, line in enumerate(lines):
             font_scale = 0.4
@@ -302,8 +334,11 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     if selected is not None:
         draw_detection(frame, selected, SELECTED_OBJECT_COLOR, 2)
 
-    if target is not None:
-        draw_target(frame, target, selected.bbox.center if selected else None, TARGET_COLOR, 1)
+    if target is not None and selected is not None:
+        draw_target(frame, target, selected.bbox.center, TARGET_COLOR, 1)
+
+    if move_goal is not None:
+        draw_move_goal(frame, move_goal, TARGET_COLOR, 1)
 
     if move_command is not None:
         # move command in degrees here, but we don't care
@@ -363,7 +398,7 @@ if __name__ == '__main__':
     import time
     import math
 
-    from video_sink_gstreamer import RecorderSink
+    # from video_sink_gstreamer import RecorderSink
     from video_sink_multi import MultiSink
     from opencv_show_image_sink import OpenCVShowImageSink
     from helpers import configure_logging
@@ -454,9 +489,15 @@ if __name__ == '__main__':
 
 
     def producer_thread_func(n_frames = 1000, delay_between_frames_ms=10):
+        START_TIME_MS = time.monotonic_ns() / 1000_000
 
         # frame = cv2.imread('/home/bdd/hailo-rpi5-examples/TEST_DATA/sample.mp4') # np.zeros(shape=[800, 600, 3], dtype=np.uint8)
         detections = [
+            Detection(
+                bbox = Rect.from_xyxy(0.4, 0.45, 0.5, 0.55),
+                confidence = 0.7,
+                track_id = 3
+            ),
             Detection(
                 bbox = Rect.from_xyxy(0.1, 0.15, 0.2, 0.25),
                 confidence = 0.1,
@@ -467,15 +508,11 @@ if __name__ == '__main__':
                 confidence = 0.9,
                 track_id = 2
             ),
-            Detection(
-                bbox = Rect.from_xyxy(0.4, 0.45, 0.5, 0.55),
-                confidence = 0.7,
-                track_id = 3
-            ),
         ]
         detections_template = Detections(0, frame=None, detections=detections)
         telemetry = json.loads('{"odometry": {"angular_velocity_body": {"pitch_rad_s": -0.0010726579930633307, "roll_rad_s": 0.0010208315216004848, "yaw_rad_s": 0.0006282856920734048}, "child_frame_id": "1 (BODY_NED)", "frame_id": "1 (BODY_NED)", "pose_covariance": {"covariance_matrix": [0.00013371351815294474, NaN, NaN, NaN, NaN, NaN, 0.00013370705710258335, NaN, NaN, NaN, NaN, 0.07561597973108292, NaN, NaN, NaN, 1.736115154926665e-05, NaN, NaN, 1.3997990208736155e-05, NaN, 0.0010160470847040415]}, "position_body": {"x_m": 0.0010958998464047909, "y_m": -0.00166346225887537, "z_m": -1.66695237159729}, "q": {"timestamp_us": 0, "w": 0.7084895968437195, "x": 0.02082471176981926, "y": 0.019742604345083237, "z": -0.7051376104354858}, "time_usec": 1102239786672, "velocity_body": {"x_m_s": 0.0006445666076615453, "y_m_s": 0.001224401406943798, "z_m_s": 0.005852778907865286}, "velocity_covariance": {"covariance_matrix": [0.0014366698451340199, NaN, NaN, NaN, NaN, NaN, 0.0014359699562191963, NaN, NaN, NaN, NaN, 0.004651403985917568, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]}}, "scaled_pressure": {"absolute_pressure_hpa": 1008.449951171875, "differential_pressure_hpa": 0.0, "differential_pressure_temperature_deg": 0.0, "temperature_deg": 36.290000915527344, "timestamp_us": 1102240195000}, "attitude_euler": {"pitch_deg": 3.287358045578003, "roll_deg": 0.0956246480345726, "timestamp_us": 1102239771000, "yaw_deg": -89.72563171386719}, "flight_mode": "7 (OFFBOARD)"}')
 
+        flight_time_ns = time.monotonic_ns() / 1000_000
         for frame, i in zip(generate_frames(), range(0, n_frames)):
             logger.debug("got frame: %s", i)
             # _, frame = camera.read()
@@ -493,12 +530,28 @@ if __name__ == '__main__':
 
             d = dataclasses.replace(detections_template, frame_id = i, frame=frame.copy())
             q = i / 10
+            selected = d.detections[0]
+            print("!!!!", i % 100)
+            if 20 < i % 100 < 40:
+                selected = None
+
+            xy_delta = XY(math.cos(q), math.sin(q)) / 10 - XY(0.5, 0.5)
+            # move_command = MoveCommand(adjust_attitude=xy_delta.multiplied_by_XY(XY(20, 20)), move_speed_ms=10)
+
+            telemetry.update({
+                'start_time_ms': START_TIME_MS,
+                'flight_time_ms': flight_time_ns,
+                'extra': dict(q=q, xy_delta=xy_delta, selected=selected)
+            })
+
             output_queue.put({
                 'detections': d,
-                'selected' : d.detections[0],
-                'move_command': MoveCommand(adjust_attitude=XY(math.cos(q) * 20, math.sin(q)* 20), move_speed_ms=10),
+                'selected' : selected,
+                # 'move_command': move_command,
                 'telemetry' : telemetry,
-                'taget' : d.detections[0].bbox.center + XY(0.1, 0.1)
+                'selected_detection_projected_pos' : selected.bbox.center + xy_delta if selected is not None else None,
+                # emulate case when there are no detections
+                'move_goal' : selected.bbox.center + xy_delta if selected is not None else XY(0.5, 0.5) + xy_delta,
             })
             time.sleep(delay_between_frames_ms / 1000)
         output_queue.put(None) # Just to terminate by exception
@@ -512,7 +565,7 @@ if __name__ == '__main__':
 
     sink = MultiSink([
         # RtspStreamerSink(30, 8554),
-        RecorderSink(10, "_TMP/test_recordings"),
+        # RecorderSink(10, "_TMP/test_recordings"),
         OpenCVShowImageSink(window_title='DEBUG IMAGE', fps_hint=500)
     ])
 

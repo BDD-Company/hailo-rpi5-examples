@@ -52,7 +52,7 @@ class OpenCVShowImageSink(FrameSinkInterface):
         cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.setWindowTitle(self._window_name, self._window_title)
         cv2.resizeWindow(self._window_name, frame_size[0], frame_size[0])
-        cv2.setWindowProperty(self._window_name, cv2.CV_WND_PROP_FULLSCREEN, cv2.CV_WINDOW_FULLSCREEN)
+        # cv2.setWindowProperty(self._window_name, cv2.CV_WND_PROP_FULLSCREEN, cv2.CV_WINDOW_FULLSCREEN)
         frame_id = -1
         while True:
             try:
