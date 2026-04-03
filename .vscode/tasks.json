@@ -41,7 +41,7 @@
         "--progress",
         "--chmod=+x",
         "${workspaceFolder}",
-        "${input:drone_ip_address}:"
+        "bdd@${input:drone_ip_address}:"
       ],
     },
     {
@@ -49,8 +49,8 @@
       "type": "shell",
       "command": "ssh",
       "args": [
-        "${input:drone_ip_address_reuse}",
-        "bash '-c cd ./${workspaceFolderBasename}; . scripts/setup_env.sh && ./BDD/app.py --hef-path /home/bdd/models/2026-02-18_n640-last.hef'",
+        "bdd@${input:drone_ip_address_reuse}",
+        "bash -c 'cd ./${workspaceFolderBasename}; . scripts/setup_env.sh && ./BDD/app.py --hef-path /home/bdd/models/2026-02-18_n640-last.hef'",
       ],
       "isBackground": true,
       "problemMatcher": {
@@ -68,6 +68,37 @@
         "reveal": "always",
         "panel": "dedicated"
       }
+    },
+    {
+      "label": "start remote app",
+      "type": "shell",
+      "command": "ssh",
+      "args": [
+        "bdd@${input:drone_ip_address_reuse}",
+        "bash -c 'cd ./${workspaceFolderBasename} && . scripts/setup_env.sh && python -m debugpy --listen 5678 BDD/app.py --hef-path /home/bdd/models/2026-02-18_n640-last.hef'",
+      ],
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^(.*)$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": "Listening for client connections"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "sync and start remote app",
+      "dependsOn": ["sync to remote", "start remote app"],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
     },
     {
       "label": "sync and start remote debugpy",
@@ -108,7 +139,7 @@
       "command": "extension.commandvariable.promptStringRemember",
       "args" : {
         "key": "drone_ip_address",
-        "description": "Drone IP address (e.g. 192.168.0.100)",
+        "description": "Drone IP address only, no username (e.g. 192.168.0.100)",
       }
     },
     {

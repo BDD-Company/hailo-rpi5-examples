@@ -117,15 +117,20 @@
         {
             "name": "REMOTE app.py",
             "type": "debugpy",
-            "request": "launch",
-            "preLaunchTask": "sync to remote",
-            "program": "bash",
-            "console": "integratedTerminal",
-            "args": [
-                "ssh",
-                "${input:drone_ip_address_reuse}",
-                "bash '-c ./${workspaceFolderBasename}; ./scripts/setup_venv.sh && ./BDD/app.py --hef-path /home/bdd/models/2026-02-18_n640-last.hef'",
+            "request": "attach",
+            "preLaunchTask": "sync and start remote app",
+            "connect": {
+                "host": "${input:drone_ip_address_reuse}",
+                "port": 5678,
+                "username": "bdd"
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "/home/bdd/${workspaceFolderBasename}"
+                }
             ],
+            "justMyCode": false
         },
         {
             "name": "REMOTE debug app.py",
