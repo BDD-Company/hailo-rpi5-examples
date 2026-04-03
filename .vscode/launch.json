@@ -1,0 +1,158 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        // {
+        //     "name": "pytest test_DetectionsAggregator.py",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "module": "pytest",
+        //     "args": [
+        //         "-qq",
+        //         "/home/dima/BDD/yolo-detect/src/test_DetectionsAggregator.py",
+        //         "-k",
+        //         "test_same_rect_aggregated[bbox_polar_coordinates5]"
+        //     ]
+        // },
+        // {
+        //     "name": "Python Debugger: Current File",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${file}",
+        //     "console": "integratedTerminal",
+        //     "justMyCode": false,
+        //     "cwd": "${workspaceFolder}",
+        //     "env": {
+        //         "DISPLAY": ":0" // force forward all to pre-existing display, even when connected via ssh
+        //         ,
+        //         "LIBCAMERA_RPI_TUNING_FILE": "/usr/share/libcamera/ipa/rpi/pisp/imx477_noir.json"
+        //     },
+        // },
+        // {
+        //     "name": "debug_video_source.py",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "src/debug_video_source.py",
+        //     "console": "integratedTerminal",
+        //     "justMyCode": false,
+        //     "env": {
+        //         "DISPLAY": ":0" // force forward all to pre-existing display, even when connected via ssh
+        //         ,
+        //         "LIBCAMERA_RPI_TUNING_FILE": "/usr/share/libcamera/ipa/rpi/pisp/imx477_noir.json"
+        //     },
+        // },
+        // {
+        //     "name": "debug_platform_mover.py",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "src/debug_platform_mover.py",
+        //     "console": "integratedTerminal",
+        //     "justMyCode": false,
+        //     "env": {
+        //         "DISPLAY": ":0", // force forward all to pre-existing display, even when connected via ssh
+        //         "LIBCAMERA_RPI_TUNING_FILE": "/usr/share/libcamera/ipa/rpi/pisp/imx477_noir.json"
+        //     },
+        // },
+        // {
+        //     "name": "test_Tracker.py",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "src/test_Tracker.py",
+        //     "console": "integratedTerminal",
+        //     "justMyCode": false,
+        //     "env": {
+        //     },
+        // },
+        // {
+        //     "name": "pytest",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "module": "pytest",
+        //     "args": [
+        //         "${workspaceFolder}",
+        //     ],
+        //     "justMyCode": false
+        // },
+        // {
+        //     "name": "HAILO track.py with camera",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/src/track.py",
+        //     "console": "integratedTerminal",
+        //     "args": [
+        //         "--model=/home/dima/BDD/yolo-detect/models/10.12_yolo10s.hef",
+        //         //"--model=/home/dima/BDD/yolo-detect/models/04.12_yolov10s.hef",
+        //         "--source=tcp://0.0.0.0:7000",
+        //         "--source=tcp://0.0.0.0:7001",
+        //         // "--source=tcp://0.0.0.0:7001",
+        //         "--platform_commands_sink=/dev/ttyUSB0",
+        //         "--web_ui_port=8888",
+        //     ],
+        //     "env": {
+        //         "DISPLAY": ":0" // force forward all to pre-existing display, even when connected via ssh
+        //     },
+        //     "justMyCode": false
+        // },
+        // {
+        //     "name": "HAILO track.py with config file",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/src/track.py",
+        //     "console": "integratedTerminal",
+        //     "args": [
+        //         "--config=${workspaceFolder}/configs/config.json",
+        //         "--web_ui_port=8888",
+        //         "--platform=mock",
+        //         "--detector=mock",
+        //         // "--no_display"
+        //     ],
+        //     "env": {
+        //         "DISPLAY": ":0" // force forward all to pre-existing display, even when connected via ssh
+        //         ,"LIBCAMERA_RPI_TUNING_FILE": "/usr/share/libcamera/ipa/rpi/pisp/imx477_noir.json"
+        //     },
+        //     "justMyCode": false
+        // },
+        {
+            "name": "REMOTE app.py",
+            "type": "debugpy",
+            "request": "launch",
+            "preLaunchTask": "sync to remote",
+            "program": "bash",
+            "console": "integratedTerminal",
+            "args": [
+                "ssh",
+                "${input:drone_ip_address_reuse}",
+                "bash '-c ./${workspaceFolderBasename}; ./scripts/setup_venv.sh && ./BDD/app.py --hef-path /home/bdd/models/2026-02-18_n640-last.hef'",
+            ],
+        },
+        {
+            "name": "REMOTE debug app.py",
+            "type": "debugpy",
+            "request": "attach",
+            "preLaunchTask": "sync and start remote debugpy",
+            "connect": {
+                "host": "${input:drone_ip_address_reuse}",
+                "port": 5678
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "/home/bdd/${workspaceFolderBasename}"
+                }
+            ],
+            "justMyCode": false
+        },
+    ],
+    "inputs": [
+        {
+            "id": "drone_ip_address_reuse",
+            "type": "command",
+            "command": "extension.commandvariable.remember",
+            "args" : {
+                "key": "drone_ip_address",
+            }
+        }
+    ]
+}

@@ -1,0 +1,123 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "sync to remote",
+      "dependsOn": [
+        "sync sources to remote"
+        // ,"sync scripts to remote"
+      ],
+      "dependsOrder": "sequence",
+
+      "problemMatcher": "$gcc", // just to avoid extra GUI dialog
+      "presentation": {
+        "echo": true,
+        "reveal": "silent",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      },
+    },
+    {
+      "label": "sync sources to remote",
+      "type": "shell",
+      "problemMatcher": "$gcc", // just to avoid extra GUI dialog
+
+      "command": "rsync",
+      "args": [
+        "-v",
+        "--mkpath",
+        "-rc",
+        "--exclude=*venv*",
+        "--exclude=doc",
+        "--exclude=*__pycache__*",
+        "--exclude=**/.*",
+        "--exclude=*test_data/**",
+        "--exclude=community_projects/",
+        "--exclude=*/**.mp4",
+        "--include=*.py",
+        "--include=*.sh",
+        "--progress",
+        "--chmod=+x",
+        "${workspaceFolder}",
+        "${input:drone_ip_address}:"
+      ],
+    },
+    {
+      "label": "start remote debugpy",
+      "type": "shell",
+      "command": "ssh",
+      "args": [
+        "${input:drone_ip_address_reuse}",
+        "bash '-c cd ./${workspaceFolderBasename}; . scripts/setup_env.sh && ./BDD/app.py --hef-path /home/bdd/models/2026-02-18_n640-last.hef'",
+      ],
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^(.*)$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": "Listening for client connections"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "sync and start remote debugpy",
+      "dependsOn": ["sync to remote", "start remote debugpy"],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    // {
+    //   "label": "sync scripts to remote",
+    //   "problemMatcher": "$gcc", // just to avoid extra GUI dialog
+    //   "type": "shell",
+    //   "command": "rsync",
+    //   "args": [
+    //     "-v",
+    //     "--mkpath",
+    //     "-rc",
+    //     "--exclude=*venv*",
+    //     "--exclude=*__pycache__*",
+    //     "--exclude=**/.*",
+    //     "--exclude=*test_data/**",
+    //     "--exclude=community_projects/",
+    //     "--exclude=*/**.mp4",
+    //     "--progress",
+    //     "--chmod=+x",
+    //     "--include=*.sh",
+    //     "${workspaceFolder}/",
+    //     "${input:drone_ip_address_reuse}:"
+    //   ],
+    // }
+
+  ],
+  "inputs": [
+    {
+      // requires: `ext install rioj7.command-variable`
+      // see https://marketplace.visualstudio.com/items?itemName=rioj7.command-variable#promptstringremember for details
+      "id": "drone_ip_address",
+      "type": "command",
+      "command": "extension.commandvariable.promptStringRemember",
+      "args" : {
+        "key": "drone_ip_address",
+        "description": "Drone IP address (e.g. 192.168.0.100)",
+      }
+    },
+    {
+      "id": "drone_ip_address_reuse",
+      "type": "command",
+      "command": "extension.commandvariable.remember",
+      "args" : {
+        "key": "drone_ip_address",
+      }
+    }
+  ]
+}
