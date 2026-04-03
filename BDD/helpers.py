@@ -567,3 +567,10 @@ def debug_collect_call_info(obj, object_name: str | None = None, history_max_siz
             object_name = "drone"
 
     return _DebugCallProxy(obj, object_name=object_name, history_max_size = history_max_size)
+
+@dataclass(frozen=True, slots=True)
+class StopSignal:
+    # __slots__ = ()
+    pass
+
+STOP = StopSignal()
