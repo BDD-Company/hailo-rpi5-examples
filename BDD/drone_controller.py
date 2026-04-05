@@ -22,6 +22,8 @@ import logging
 logger = logging.getLogger(__name__)
 global_logger = logger
 
+DEBUG = False
+
 
 def drone_controlling_thread(*args, **kwargs):
     loop = asyncio.new_event_loop()
