@@ -263,8 +263,8 @@ def main():
     control_config = {
         'confidence_min': 0.2,
         'confidence_move': 0.4,
-        'thrust_max': 0.375,
-        'thrust_min': 0.375,
+        'thrust_max': 0.4,
+        'thrust_min': 0.4,
 
         'target_lost_fade_per_frame': 0.75,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
@@ -283,16 +283,16 @@ def main():
         'pd_coeff_p_dynamic_max_target_size' : 0.0120,  # normalized target size
         'pd_coeff_p_dynamic_max' : 6,
 
-        'pd_coeff_p_dynamic_stage_1_threshold': 0.2,
+        'pd_coeff_p_dynamic_stage_1_threshold': 0.1,
         'pd_coeff_p_dynamic_stage_2_threshold': 0.642857,
-        'pd_coeff_p_dynamic_stage_1_ratio': 0.50,
-        'pd_coeff_p_dynamic_stage_2_ratio': 1.00,
-        'pd_coeff_p_dynamic_stage_3_ratio': 0.60,
+        'pd_coeff_p_dynamic_stage_1_ratio': 1,
+        'pd_coeff_p_dynamic_stage_2_ratio': 1.5,
+        'pd_coeff_p_dynamic_stage_3_ratio': 1.5,
 
         'frame_angular_size_deg' : XY(120, 100),
         'target_size_m' : XY(0.2, 0.2),
 
-        'safe_takeoff_period_ns': 700_000_000,
+        'safe_takeoff_period_ns': 100_000_000,
         'DEBUG': DEBUG
     }
 
