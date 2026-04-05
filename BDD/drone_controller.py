@@ -67,6 +67,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     MAX_THRUST      = control_config.pop('thrust_max', 0.5)
     MIN_THRUST      = control_config.pop('thrust_min', 0.4)
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
+    TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
 
     PD_COEFF_P      = control_config.pop('pd_coeff_p', 12)
     PD_COEFF_D      = control_config.pop('pd_coeff_d', 1)
@@ -120,6 +121,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     distance_r = 0.1
     distance_r *= distance_r
     seen_target = False
+    last_seen_target_at_frame = 0
+    frame_id = 0
 
     drone = DroneMover(drone_connection_string, drone_config)
     logger.debug("starting up drone...")
@@ -296,10 +299,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             debug_info = telemetry_dict
 
             ## Check if take off
-            if takeoff_time_ns == None:
+            if takeoff_time_ns is None:
                 if moving:
                     takeoff_time_ns = time.monotonic_ns()
-                    # logger.info("!!! IN AIR: %s", takeoff_time_ns)
+                    logger.info("!!! TAKEOFF AT: %s", takeoff_time_ns)
             else:
                 flight_time_ns = time.monotonic_ns() - takeoff_time_ns
                 # logger.info("!!! flight time: %ss", flight_time_ns / 1000_000_000)
@@ -319,9 +322,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             # detections.sort(reverse=True, key = lambda d : d.track_id)
             detections.sort(reverse=True, key = lambda d : d.confidence)
             target_relative_pos = None
+            frame_id = detections_obj.frame_id
 
             detection = detections[0] if len(detections) > 0 else Detection()
             if detection.confidence >= MIN_CONFIDENCE:
+                last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
                 estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
                 # logger.debug("!!! Detection: %s", detection)
@@ -452,11 +457,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 debug_info["mode"] = mode
 
                 moving = True
-                if takeoff_time_ns == None:
+                if takeoff_time_ns is None:
                     takeoff_time_ns = time.monotonic_ns()
                     # logger.info("!!! IN AIR since: %s", takeoff_time_ns)
 
             else:
+                if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES:
+                    logger.warning("!!! CLEARING HISTORY")
+                    target_estimator.clear_history()
+
                 if seen_target:
                     prev_angle_to_target *= FADE_COEFF
                     await drone.move_to_target_zenith_async(roll_degree=-prev_angle_to_target.x, pitch_degree=prev_angle_to_target.y, thrust=thrust)

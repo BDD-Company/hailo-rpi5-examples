@@ -267,6 +267,7 @@ def main():
         'thrust_min': 0.375,
 
         'target_lost_fade_per_frame': 0.75,
+        'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'pd_coeff_p': 4, #12.5
         'pd_coeff_d': 0,

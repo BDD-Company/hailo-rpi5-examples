@@ -14,8 +14,13 @@ class TargetEstimator:
         self.max_target_position_age_nanoseconds = int(max_target_position_age_nanoseconds)
         self.target_positions : deque[tuple[int, XY]] = deque(maxlen=self.max_target_positions)
 
+
     def history_size(self):
         return len(self.target_positions)
+
+
+    def clear_history(self):
+        return self.target_positions.clear()
 
 
     def _forget_old_positions(self, reference_timestamp_nanoseconds : int):
