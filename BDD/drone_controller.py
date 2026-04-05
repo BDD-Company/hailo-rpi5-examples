@@ -57,7 +57,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     START_TIME_MS = time.monotonic_ns() / 1000_000
 
-    DEBUG           = control_config.pop('debug', False)
+    global DEBUG
+    DEBUG           = control_config.pop('DEBUG', False)
+    logger.debug("!!!!! DEBUG state: %s", DEBUG)
     MIN_CONFIDENCE  = control_config.pop('confidence_min', 0.1)
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
     MAX_THRUST      = control_config.pop('thrust_max', 0.5)

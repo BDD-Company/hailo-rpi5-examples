@@ -107,7 +107,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
 
     platform.move_to(PLATFORM_INITIAL_POS)
 
-    logger.debug("drone started")
+    logger.info("platform started %s", platform_config)
 
     if signal_event_when_ready:
         signal_event_when_ready.set()

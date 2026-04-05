@@ -15,6 +15,7 @@ import time
 import hailo
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
+from hailo_apps.hailo_app_python.core.common.core import get_default_parser
 from app_base import GStreamerDetectionApp
 from drone_controller import drone_controlling_thread
 from platform_controller import platform_controlling_thread
@@ -247,9 +248,13 @@ def main():
     event = threading.Event()
     user_data = user_app_callback_class(detections_queue)
     user_data.use_frame = True
+
+    arg_parser = get_default_parser()
+    arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
     app = App(
         app_callback,
         user_data,
+        parser=arg_parser,
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
@@ -286,18 +291,22 @@ def main():
         'frame_angular_size_deg' : XY(120, 100),
         'target_size_m' : XY(0.2, 0.2),
 
-        'safe_takeoff_period_ns': 700_000_000
+        'safe_takeoff_period_ns': 700_000_000,
+        'DEBUG': DEBUG
     }
 
     action_thread = None
     if app.options_menu.action == 'platform':
         action_thread = threading.Thread(
             target = platform_controlling_thread,
-            args = ('/dev/ttyUSB0', dict(
-                speed_adjustments=XY(1, -1),
-                # speed=0, #
-                # acceleration=0
-            )),
+            args = (
+                '/dev/ttyUSB0',
+                dict(
+                    speed_adjustments=XY(1, -1),
+                    # speed=0, #
+                    # acceleration=0
+                    ),
+                detections_queue),
             kwargs = dict(
                 control_config= control_config,
                 output_queue= output_queue,
