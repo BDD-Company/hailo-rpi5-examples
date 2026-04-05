@@ -133,7 +133,7 @@ def make_debug_info_dict(frame_id, telemetry_dict : dict, frame_metadata):
     now_ms = time.monotonic_ns() / 1000_000
     result['time'] = {
         'start' : int(now_ms - start_time_ms),
-        'takeoff' : int(now_ms - flight_time_ms),
+        'takeoff' : int(flight_time_ms),
         'captured at': frame_metadata.capture_timestamp_ns,
         'detection delay': detection_delay
     }
