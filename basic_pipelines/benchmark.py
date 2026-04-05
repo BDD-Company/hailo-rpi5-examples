@@ -1,6 +1,7 @@
 from pathlib import Path
 from collections import defaultdict
-from typing import Optional
+from typing import Callable, Optional
+import time
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
@@ -22,6 +23,94 @@ from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines impor
 )
 from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
 
+
+def _buffer_correlation_key(buffer: Gst.Buffer):
+    pts = buffer.pts
+    if pts != Gst.CLOCK_TIME_NONE:
+        return ("pts", int(pts))
+    return ("id", id(buffer))
+
+
+class StageLatencyAggregator:
+    """
+    Wall-clock delays between bench markers on buffer src pads (monotonic_ns).
+    The probe on identity_callback.src is registered before app_callback, so stage
+    "queues_before_callback" ends right before user callback work; callback_cpu is app_callback only.
+    """
+
+    DELTA_LABELS = (
+        "inference_wrapper",
+        "tracker",
+        "queues_before_callback",
+    )
+
+    def __init__(self):
+        self._n_markers = 4
+        self.delta_lists: list[list[int]] = [[] for _ in range(3)]
+        self.callback_durations_ns: list[int] = []
+        self.e2e_ns: list[int] = []
+        self._pending: dict = {}
+        self._frame_t0: dict = {}
+        self._callback_start: dict = {}
+
+    def record_marker(self, stage_idx: int, buffer: Gst.Buffer) -> None:
+        key = _buffer_correlation_key(buffer)
+        t = time.monotonic_ns()
+        row = self._pending.setdefault(key, [None] * self._n_markers)
+        if row[stage_idx] is not None:
+            return
+        row[stage_idx] = t
+        if stage_idx == 0:
+            self._frame_t0[key] = t
+        if stage_idx > 0 and row[stage_idx - 1] is not None:
+            self.delta_lists[stage_idx - 1].append(t - row[stage_idx - 1])
+        if stage_idx == self._n_markers - 1:
+            self._callback_start[key] = t
+
+    def record_callback_done(self, buffer: Gst.Buffer) -> None:
+        key = _buffer_correlation_key(buffer)
+        te = time.monotonic_ns()
+        t0 = self._frame_t0.pop(key, None)
+        if t0 is not None:
+            self.e2e_ns.append(te - t0)
+        ts = self._callback_start.pop(key, None)
+        if ts is not None:
+            self.callback_durations_ns.append(te - ts)
+        self._pending.pop(key, None)
+
+    def flush(self) -> None:
+        self._pending.clear()
+        self._frame_t0.clear()
+        self._callback_start.clear()
+
+    @staticmethod
+    def _fmt_ns(samples: list[int]) -> str:
+        if not samples:
+            return "(no samples)"
+        ms = np.asarray(samples, dtype=np.float64) / 1e6
+        return (
+            f"n={ms.size} min/med/mean/max ms = "
+            f"{ms.min():.3f} {np.median(ms):.3f} {ms.mean():.3f} {ms.max():.3f}"
+        )
+
+    def print_report(self) -> None:
+        print("Pipeline stage delay (wall clock between identity markers, per frame):")
+        for label, samples in zip(self.DELTA_LABELS, self.delta_lists):
+            print(f"  {label}: {self._fmt_ns(samples)}")
+        print(f"  app_callback (probe work): {self._fmt_ns(self.callback_durations_ns)}")
+        print(f"  end-to-end after source marker: {self._fmt_ns(self.e2e_ns)}")
+
+
+def _make_latency_probe(stage_idx: int, agg: StageLatencyAggregator) -> Callable:
+    def _probe(_pad, info, _user):
+        buf = info.get_buffer()
+        if buf is not None:
+            agg.record_marker(stage_idx, buf)
+        return Gst.PadProbeReturn.OK
+
+    return _probe
+
+
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
 # -----------------------------------------------------------------------------------------------
@@ -29,6 +118,7 @@ from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStrea
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
+        self.stage_latency: Optional[StageLatencyAggregator] = StageLatencyAggregator()
         self.detections_info = defaultdict(list)
         self.save_detection_frames_dir: Optional[Path] = None
         self.save_detection_frames_max = 1
@@ -71,6 +161,8 @@ class user_app_callback_class(app_callback_class):
             print(f"WARNING: failed to save detection frame: {out_path}")
 
     def print_stats(self):
+        if self.stage_latency is not None:
+            self.stage_latency.print_report()
         total_detections = sum(len(confidences) for confidences in self.detections_info.values())
         print(f"Detection statistics:\n\ttotal detections: {total_detections}")
         if total_detections == 0:
@@ -179,6 +271,8 @@ def app_callback(pad, info, user_data):
 
     if string_to_print:
         print(string_to_print)
+    if user_data.stage_latency is not None and buffer is not None:
+        user_data.stage_latency.record_callback_done(buffer)
     return Gst.PadProbeReturn.OK
 
 
@@ -210,7 +304,19 @@ class BenchmarkApp(GStreamerDetectionApp):
             )
         except Exception:
             pass
+        try:
+            parser.add_argument(
+                '--no-stage-latency',
+                dest='no_stage_latency',
+                action='store_true',
+                default=False,
+                help='Disable identity markers and stage delay measurement',
+            )
+        except Exception:
+            pass
         super().__init__(app_callback, user_data, parser=parser)
+        if getattr(self.options_menu, 'no_stage_latency', False):
+            self.user_data.stage_latency = None
         video_tag = Path(str(self.video_source)).stem if self.video_source else "stream"
         if getattr(self.options_menu, 'save_detection_frames_dir', None):
             # Saving callback frames requires pulling image data from GstBuffer.
@@ -260,15 +366,58 @@ class BenchmarkApp(GStreamerDetectionApp):
         display_pipeline = DISPLAY_PIPELINE(
             video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps
         )
+        if getattr(self.options_menu, 'no_stage_latency', False):
+            return (
+                f'{source_pipeline} ! '
+                f'{detection_pipeline_wrapper} ! '
+                f'{tracker_pipeline} ! '
+                f'{user_callback_pipeline} ! '
+                f'{display_pipeline}'
+            )
         return (
-            f'{source_pipeline} ! '
-            f'{detection_pipeline_wrapper} ! '
-            f'{tracker_pipeline} ! '
+            f'{source_pipeline} ! identity name=bench_after_source ! '
+            f'{detection_pipeline_wrapper} ! identity name=bench_after_infer ! '
+            f'{tracker_pipeline} ! identity name=bench_after_tracker ! '
             f'{user_callback_pipeline} ! '
             f'{display_pipeline}'
         )
 
+    def _install_stage_latency_probes(self) -> None:
+        agg = self.user_data.stage_latency
+        if agg is None:
+            return
+        markers = (
+            ("bench_after_source", 0),
+            ("bench_after_infer", 1),
+            ("bench_after_tracker", 2),
+            ("identity_callback", 3),
+        )
+        pads_and_idx = []
+        for name, idx in markers:
+            el = self.pipeline.get_by_name(name)
+            if el is None:
+                print(f"WARNING: benchmark latency: element '{name}' not found, stage timing disabled.")
+                self.user_data.stage_latency = None
+                return
+            pad = el.get_static_pad("src")
+            if pad is None:
+                print(f"WARNING: benchmark latency: no src pad on '{name}', stage timing disabled.")
+                self.user_data.stage_latency = None
+                return
+            pads_and_idx.append((pad, idx))
+        for pad, idx in pads_and_idx:
+            pad.add_probe(Gst.PadProbeType.BUFFER, _make_latency_probe(idx, agg), None)
+
+    def run(self, *args, **kwargs):
+        self._benchmark_wall_t0 = time.monotonic()
+        self._install_stage_latency_probes()
+        super().run(*args, **kwargs)
+
     def on_eos(self):
+        wall_s = time.monotonic() - getattr(self, "_benchmark_wall_t0", time.monotonic())
+        print(f"benchmark_file_wall_time_s: {wall_s:.6f}")
+        if self.user_data.stage_latency is not None:
+            self.user_data.stage_latency.flush()
         self.user_data.print_stats()
         # do not rewind, just stop
         self.loop.quit()
