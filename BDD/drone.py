@@ -76,14 +76,16 @@ class DroneMover():
         self.telemetry_aspects = [
             "attitude_euler",
             # "battery",
-            "health",
+            # "health",
             "odometry",
-            "landed_state"
+            "landed_state",
+            "imu"
             # "attitude_angular_velocity_body",
         ]
         self._telemetry_tasks : dict[str, asyncio.Task] = {}
         self._telemetry_ready : dict[str, asyncio.Event] = {}
         self._telemetry_latest : dict[str, object] = {}
+        self._telemetry_dict_cache : dict[str, object] = {}
         self.__sticks = {
             "x": 0.0,
             "y": 0.0,
@@ -319,6 +321,7 @@ class DroneMover():
             async def _consume(aspect_name: str):
                 async for sample in getattr(self.drone.telemetry, aspect_name)():
                     self._telemetry_latest[aspect_name] = sample
+                    self._telemetry_dict_cache[aspect_name] = mavsdk_msg_to_dict(sample)
                     self._telemetry_ready[aspect_name].set()
 
             task = asyncio.create_task(_consume(aspect))
@@ -353,6 +356,12 @@ class DroneMover():
 
     def get_telemetry_dict_sync(self, wait = False) -> dict:
         return asyncio.run(self.get_telemetry_dict(wait))
+
+    def get_telemetry_dict_cached(self) -> dotdict:
+        """Return pre-converted telemetry as dotdict with zero async overhead.
+        Values are at most one telemetry update old. Only valid after startup_sequence().
+        Safe to call without await from inside the asyncio loop."""
+        return dotdict({aspect: self._telemetry_dict_cache.get(aspect) for aspect in self.telemetry_aspects})
 
 
     # async def move_to_xy(self, xy : XY, thrust : float = 0.0, allow_unsafe = True) -> None:

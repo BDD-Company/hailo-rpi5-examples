@@ -319,6 +319,15 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         add_line('velocity_body ', odo_dict)
         add_line('angular_velocity_body', odo_dict)
         add_line('attitude_euler        ', debug_info)
+
+        imu_dict = debug_info.get('imu', {}) or {}
+        add_line('acceleration_frd    ', imu_dict)
+        add_line('angular_velocity_frd', imu_dict)
+        add_line('acceleration_frd', imu_dict)
+        add_line('magnetic_field_frd', imu_dict)
+        add_line('temperature_degc', imu_dict)
+        add_line('timestamp_us', imu_dict)
+
         add_line('mode', debug_info)
         add_line('action', debug_info)
         if 'extra' in debug_info.keys():

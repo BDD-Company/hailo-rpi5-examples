@@ -294,8 +294,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             skipped_detetions = 0
             frame_capture_timestampt_ns = detections_obj.meta.capture_timestamp_ns or None
 
-            # telemetry_dict = await drone.get_telemetry_dict()
-            # logger.debug("telemetry: %s", telemetry_dict)
+            telemetry_dict = drone.get_telemetry_dict_cached()
+            logger.debug("!!!!!!!!!!! telemetry: %s", telemetry_dict)
             debug_info = telemetry_dict
 
             ## Check if take off
@@ -313,7 +313,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             detections, frame = detections_obj.detections, detections_obj.frame
             detection = None
 
-            current_attitude = await drone.get_cached_attitude(wait_for_first=False)
             # so telemetry action doesn't get into the logs
             drone.clear_command_history()
 
