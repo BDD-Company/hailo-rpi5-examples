@@ -100,9 +100,10 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
             f'video/x-raw, format={video_format}, width={video_width}, height={video_height} {framere_clause} ! '
         )
     elif source_type == 'libcamera':
+        framerate = int(force_framerate if force_framerate is not None else frame_rate)
         source_element = (
             f'libcamerasrc name={name} ! '
-            f'video/x-raw, format={video_format}, width=1536, height=864 ! '
+            f'video/x-raw, width={video_width}, height={video_height}, framerate={framerate}/1 ! '
         )
     elif source_type == 'ximage':
         source_element = (

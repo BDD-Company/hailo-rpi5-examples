@@ -71,6 +71,29 @@ def normalized_timestamp(ts):
     else:
         return 0
 
+def normalized_frame_id(buffer: Gst.Buffer, frame_meta) -> int:
+    """Return a stable per-frame identifier suitable for deduplication.
+
+    Priority:
+      1. Picamera2 frame-id reference timestamp meta (appsrc / rpi path)
+      2. buffer.offset — libcamerasrc sets this to the frame sequence number
+      3. buffer.pts   — always set by libcamerasrc; unique per frame
+      4. time.monotonic_ns() — last resort; unique per call, dedup won't fire
+    """
+    if frame_meta is not None:
+        return frame_meta.timestamp
+
+    offset = buffer.offset
+    if offset != Gst.BUFFER_OFFSET_NONE:
+        return int(offset)
+
+    pts = buffer.pts
+    if pts != Gst.CLOCK_TIME_NONE:
+        return int(pts)
+
+    return time.monotonic_ns()
+
+
 seen_frames = deque(maxlen=10)
 
 # This is the callback function that will be called when data is available from the pipeline
@@ -91,11 +114,13 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     detection_start_timestamp_ns  = normalized_timestamp(buffer.get_reference_timestamp_meta(unix_timestamp_caps))
     detection_end_timestamp_ns  = time.monotonic_ns()
 
-    frame_id = buffer.get_reference_timestamp_meta(frame_id_caps)
-    if frame_id is not None:
-        frame_id = frame_id.timestamp
-    else:
-        frame_id = time.monotonic_ns()
+    frame_id = normalized_frame_id(buffer, buffer.get_reference_timestamp_meta(frame_id_caps))
+
+    # Picamera2 metadata absent when using libcamerasrc; fall back to wall-clock time
+    if detection_start_timestamp_ns == 0:
+        detection_start_timestamp_ns = detection_end_timestamp_ns
+    if sensor_timestamp_ns == 0:
+        sensor_timestamp_ns = detection_start_timestamp_ns
 
     if frame_id in seen_frames:
         # logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s", frame_id)
