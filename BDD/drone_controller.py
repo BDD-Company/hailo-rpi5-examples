@@ -136,7 +136,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
 
     drone = DroneMover(drone_connection_string, drone_config)
-    logger.debug("starting up drone...")
+    logger.debug("starting up drone... with %s, config: %s", drone_connection_string, drone_config)
 
     # udp_port = 14560
     # killdrone_thread = threading.Thread(

@@ -266,8 +266,6 @@ def main():
     detections_queue = OverwriteQueue(maxsize=20)
     output_queue = OverwriteQueue(maxsize=200)
 
-    drone_config = {}
-
     start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
     event = threading.Event()
@@ -343,7 +341,14 @@ def main():
 
         action_thread = threading.Thread(
             target = drone_controlling_thread,
-            args = ('udp://:14550', drone_config, detections_queue),
+            args = (
+                'udp://:14550',
+                {
+                    'upside_down_angle_deg': 130,
+                    'upside_down_hold_s': 0.2,
+                },
+                detections_queue
+            ),
             kwargs= dict(
                 control_config= control_config,
                 output_queue= output_queue,
