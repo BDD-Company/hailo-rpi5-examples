@@ -20,6 +20,8 @@ logger = logging.getLogger("BDD_drone")
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
 SAFE_TILT_DEG = 180
 IDLE_THRUST = 0.01
+UPSIDE_DOWN_ANGLE_DEG = 120
+UPSIDE_DOWN_HOLD_S = 1.0
 
 def is_in_air(state : LandedState):
     return state == LandedState.IN_AIR
@@ -68,6 +70,8 @@ class DroneMover():
         self.initial_pos = None
         self.initial_yaw = None
         self.cruise_altitude = self.config.get('cruise_altitude', DEFAULT_TAKEOFF_ALTITUDE_M)
+        self.upside_down_angle_deg = self.config.get('upside_down_angle_deg', UPSIDE_DOWN_ANGLE_DEG)
+        self.upside_down_hold_s = self.config.get('upside_down_hold_s', UPSIDE_DOWN_HOLD_S)
         self.tasks : list[asyncio.Task] = []
         self.drone_connection_string = drone_connection_string
         self.aborted = False
@@ -86,13 +90,6 @@ class DroneMover():
         self._telemetry_ready : dict[str, asyncio.Event] = {}
         self._telemetry_latest : dict[str, object] = {}
         self._telemetry_dict_cache : dict[str, object] = {}
-        self.__sticks = {
-            "x": 0.0,
-            "y": 0.0,
-            "z": 0.0,
-            "r": 0.0,
-            "last_set_time": time.monotonic_ns(),
-        }
 
     @staticmethod
     def _log_background_task_result(task: asyncio.Task) -> None:
@@ -128,55 +125,6 @@ class DroneMover():
 
         asyncio.run(__shutdown_async())
 
-    async def __manual_input_loop(self) -> None:
-        """
-        Sends manual control input continuously.
-        MAVSDK docs recommend at least 10 Hz.
-        x: pitch   (-1..1)
-        y: roll    (-1..1)
-        z: thrust  (0..1)
-        r: yaw     (-1..1)
-        """
-        try:
-            logger.info("!!! Started manual input loop")
-            while True:
-                if self.aborted:
-                    logger.info("!!! Aborted, returning control to the RC...")
-                    await self.drone.param.set_param_int("COM_RC_IN_MODE", 0)
-                    await self.drone.param.set_param_int("COM_RC_OVERRIDE", 0)
-                    logger.info("!!! Aborted done")
-                    return
-
-                sticks = self.__sticks
-                # logger.debug("!!! manual input: %s", sticks)
-
-                now_ns = time.monotonic_ns()
-                since_last_command_ms = (now_ns - sticks.get('last_set_time', 0)) / 1_000_000
-                target_x = sticks["x"]
-                target_y = sticks["y"]
-                target_z = sticks["z"]
-                target_r = sticks.get("r", 0)
-
-                # OLD commands must eventually fade to 0
-                reduce_factor = since_last_command_ms / 100
-                # if reduce_factor > 1:
-                #     target_x /= reduce_factor
-                #     target_y /= reduce_factor
-                #     target_z /= reduce_factor
-                #     target_r /= reduce_factor
-
-                # logger.debug("!!! set_manual_control_input: %s, since_last_command_ms: %s, reduced by factor: %s",
-                #         (target_x, target_y, target_z, target_r),
-                #         since_last_command_ms,
-                #         reduce_factor)
-
-                await self.drone.manual_control.set_manual_control_input(
-                    target_x, target_y, target_z, target_r
-                )
-                await asyncio.sleep(0.2)  # 10 Hz
-        except:
-            logger.exception("manual inpt loop", exc_info=True, stack_info=True)
-
 
     async def startup_sequence(self, arm_attempts = 100, force_arm=False):
         logging.info("Connecting to drone... %s", self.drone_connection_string)
@@ -197,23 +145,12 @@ class DroneMover():
                 logging.debug("seems armable")
             break
 
-        # await self.move_to_xy(XY(0, 0), 0)
-        # manual_input_task = asyncio.create_task(self.__manual_input_loop(), name="manual_input_loop")
-        # manual_input_task.add_done_callback(self._log_background_task_result)
-        # self.tasks.append(manual_input_task)
-        # await asyncio.sleep(0.5)
-        # await self.move_to_xy(XY(0, 0), 0)
-
-        # await drone.manual_control.start_altitude_control()
 
         async def arm():
             logging.info("arming")
 
             # # Enable arming without GPS
             await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
-            # await drone.param.set_param_int("COM_RC_IN_MODE", 1) # 1 == drone flies autonomously
-            # await drone.param.set_param_int("COM_RC_OVERRIDE", 1)
-
             # keep armed even if not took off for long time (1000 seconds)
             await drone.param.set_param_float("COM_DISARM_PRFLT", 1000.0)
 
@@ -301,6 +238,7 @@ class DroneMover():
         # logging.debug("offboard mode: %s", await self.offboard.is_active())
 
         await self._ensure_telemetry_cache()
+        await self.start_upside_down_monitor()
 
         return
 
@@ -364,31 +302,6 @@ class DroneMover():
         return dotdict({aspect: self._telemetry_dict_cache.get(aspect) for aspect in self.telemetry_aspects})
 
 
-    # async def move_to_xy(self, xy : XY, thrust : float = 0.0, allow_unsafe = True) -> None:
-        # Keep commanded tilt within a safe envelope to avoid toppling.
-        # SAFE_MANUAL_VALUES = 0.9
-        # def _clamp(value: float) -> float:
-        #     if allow_unsafe == True:
-        #         return value
-        #     return max(-SAFE_MANUAL_VALUES, min(SAFE_MANUAL_VALUES, value))
-
-
-        # # x : float
-        # #      value between -1. to 1. negative -> backwards, positive -> forwards
-
-        # # y : float
-        # #      value between -1. to 1. negative -> left, positive -> right
-
-        # # z : float
-        # #      value between -1. to 1. negative -> down, positive -> up (usually for now, for multicopter 0 to 1 is expected)
-
-        # self.__sticks["x"] = _clamp(xy.y)
-        # self.__sticks["y"] = _clamp(xy.x)
-        # self.__sticks["z"] = _clamp(thrust)
-        # self.__sticks["r"] = 0
-        # self.__sticks["last_set_time"] = time.monotonic_ns()
-        # await self.drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.02))
-
 
     async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0) -> None:
         # Keep commanded tilt within a safe envelope to avoid toppling.
@@ -443,7 +356,65 @@ class DroneMover():
 
 
     def ABORT(self):
+        """Thread-safe abort: stops offboard mode, giving control back to the FC/RC."""
         self.aborted = True
+        logger.info("!!! Aborting, stopping offboard mode...")
+        loop = asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(self._stop_offboard(), loop)
+
+    async def _stop_offboard(self):
+        try:
+            await self.drone.offboard.stop()
+        except OffboardError as e:
+            logger.warning("Failed to stop offboard: %s", e)
+        logger.info("!!! Abort done, flight controller has control")
+
+    def _is_upside_down(self, attitude: EulerAngle) -> bool:
+        return abs(attitude.roll_deg) > self.upside_down_angle_deg or \
+               abs(attitude.pitch_deg) > self.upside_down_angle_deg
+
+    async def _upside_down_monitor(self) -> None:
+        """Background task: when the drone stays upside-down for
+        `upside_down_hold_s` seconds, command a level attitude to recover."""
+        upside_down_since: float | None = None
+
+        while not self.aborted:
+            attitude = await self.get_cached_attitude(wait_for_first=True)
+            if attitude is None:
+                await asyncio.sleep(0.05)
+                continue
+
+            now = time.monotonic()
+
+            if self._is_upside_down(attitude):
+                if upside_down_since is None:
+                    upside_down_since = now
+                    logger.info("Upside-down detected (roll=%.1f pitch=%.1f)",
+                                attitude.roll_deg, attitude.pitch_deg)
+
+                elapsed = now - upside_down_since
+                if elapsed >= self.upside_down_hold_s:
+                    logger.warning(
+                        "Upside-down for %.2fs — stabilizing to level attitude", elapsed)
+                    await self.drone.offboard.set_attitude(
+                        Attitude(0.0, 0.0, 0.0, 0.0))
+                    upside_down_since = None
+            else:
+                if upside_down_since is not None:
+                    logger.info("No longer upside-down, resetting timer")
+                upside_down_since = None
+
+            await asyncio.sleep(0.05)
+
+    async def start_upside_down_monitor(self) -> asyncio.Task:
+        """Launch the upside-down recovery monitor as a background task."""
+        task = asyncio.create_task(
+            self._upside_down_monitor(), name="upside_down_monitor")
+        task.add_done_callback(self._log_background_task_result)
+        self.tasks.append(task)
+        logger.info("Upside-down monitor started (threshold=%.0f° hold=%.2fs)",
+                     self.upside_down_angle_deg, self.upside_down_hold_s)
+        return task
 
 
 async def main():
