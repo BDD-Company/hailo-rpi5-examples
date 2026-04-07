@@ -290,7 +290,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 break
 
             update_timestamps()
-            logger.debug("!!!")
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
 
             # if DEBUG:
@@ -370,7 +369,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 # TODO maybe use frame capture time?
                 target_estimator.add_target_pos(
                     target_relative_pos,
-                    # estimation is too fra off, when using frame capture time.
+                    # estimation is too far off, when using frame capture time.
                     current_frame_timestamp_ns #frame_capture_timestampt_ns if frame_capture_timestampt_ns else current_frame_timestamp_ns
                 )
 
