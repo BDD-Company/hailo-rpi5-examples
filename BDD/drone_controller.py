@@ -50,6 +50,11 @@ def is_drone_moving(telemetry_dict):
             and abs(velocity["y_m_s"]) > 0.01
 
 
+def clamp(min_val, val, max_val):
+    typeof_val = type(val)
+    return typeof_val(max(min_val, min(max_val, val)))
+
+
 async def drone_controlling_thread_async(drone_connection_string, drone_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None):
     # from math import radians
 
@@ -76,8 +81,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pop('pd_coeff_p_dynamic_use_piecewise', False)
     PD_COEFF_P_MIN_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_min_target_size', 0.003)
     PD_COEFF_P_MAX_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_max_target_size', 0.005)
-    PD_COEFF_P_MIN  = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
-    PD_COEFF_P_MAX  = control_config.pop('pd_coeff_p_dynamic_max', 2)
+    PD_COEFF_P_DYNAMIC_MIN  = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
+    PD_COEFF_P_DYNAMIC_MAX  = control_config.pop('pd_coeff_p_dynamic_max', 2)
+
+    PD_COEFF_P_SAFE_MIN  = control_config.pop('pd_coeff_p_safe_min', 0.5)
+    PD_COEFF_P_MIN  = control_config.pop('pd_coeff_p_min', 0.5)
+    PD_COEFF_P_MAX  = control_config.pop('pd_coeff_p_max', 5)
 
     # Normalized target size thresholds for dynamic P profile:
     # s = 0.0 means target is at or below PD_COEFF_P_MIN_TARGET_SIZE
@@ -123,6 +132,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     seen_target = False
     last_seen_target_at_frame = 0
     frame_id = 0
+    pd_coeff_p_dynamic_stage = None
+
 
     drone = DroneMover(drone_connection_string, drone_config)
     logger.debug("starting up drone...")
@@ -189,49 +200,60 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
         return current_detection_timestamp_ns - prev_detection_timestamp_ns
 
     def piecewise_p_ratio(s: float) -> float:
-        s = max(0.0, min(1.0, s))
+        s = clamp(0.0, s, 1.0)
+        pd_coeff_p_dynamic_stage = None
 
         if s < PD_COEFF_P_STAGE_1_THRESHOLD:
+            pd_coeff_p_dynamic_stage = 1
             return PD_COEFF_P_STAGE_1_RATIO * (s / PD_COEFF_P_STAGE_1_THRESHOLD)
 
         if s < PD_COEFF_P_STAGE_2_THRESHOLD:
+            pd_coeff_p_dynamic_stage = 2
             return PD_COEFF_P_STAGE_1_RATIO + (
                 (PD_COEFF_P_STAGE_2_RATIO - PD_COEFF_P_STAGE_1_RATIO)
                 * ((s - PD_COEFF_P_STAGE_1_THRESHOLD) / (PD_COEFF_P_STAGE_2_THRESHOLD - PD_COEFF_P_STAGE_1_THRESHOLD))
             )
 
+        pd_coeff_p_dynamic_stage = 3
         return PD_COEFF_P_STAGE_2_RATIO + (
             (PD_COEFF_P_STAGE_3_RATIO - PD_COEFF_P_STAGE_2_RATIO)
             * ((s - PD_COEFF_P_STAGE_2_THRESHOLD) / (1.0 - PD_COEFF_P_STAGE_2_THRESHOLD))
         )
 
     def pd_coeff_p_for_target_size(target_size):
-        # avoid tipping over on hallucinations while close to the ground
-        if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
-            logger.warning("Initial stage of flight, reducing P to %s", PD_COEFF_P_MIN)
-            return PD_COEFF_P_MIN
+        def compute_p(target_size):
+            # avoid tipping over on hallucinations while close to the ground
+            if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
+                logger.warning("Initial stage of flight, reducing P to %s", PD_COEFF_P_MIN)
+                return PD_COEFF_P_SAFE_MIN
 
-        if not PD_COEFF_P_DYNAMIC:
-            return PD_COEFF_P
+            if not PD_COEFF_P_DYNAMIC:
+                return PD_COEFF_P
 
-        min_size = PD_COEFF_P_MIN_TARGET_SIZE
-        max_size = PD_COEFF_P_MAX_TARGET_SIZE
+            min_size = PD_COEFF_P_MIN_TARGET_SIZE
+            max_size = PD_COEFF_P_MAX_TARGET_SIZE
+            p_min = PD_COEFF_P_DYNAMIC_MIN
+            p_max = PD_COEFF_P_DYNAMIC_MAX
 
-        if max_size <= min_size:
-            logger.warning("Invalid target size range: min=%s max=%s", min_size, max_size)
-            return PD_COEFF_P_MIN
+            if max_size <= min_size:
+                logger.warning("Invalid target size range: min=%s max=%s", min_size, max_size)
+                return p_min
 
-        s = (target_size - min_size) / (max_size - min_size)
-        s = max(0.0, min(1.0, s))
+            s = (target_size - min_size) / (max_size - min_size)
+            s = clamp(0.0, s, 1.0)
 
-        if PD_COEFF_P_DYNAMIC_USE_PIECEWISE:
-            ratio = piecewise_p_ratio(s)
-            return PD_COEFF_P_MIN + ratio * (PD_COEFF_P_MAX - PD_COEFF_P_MIN)
+            if PD_COEFF_P_DYNAMIC_USE_PIECEWISE:
+                ratio = piecewise_p_ratio(s)
+                return p_min + ratio * (p_max - p_min)
 
-        result = PD_COEFF_P_MIN + s * (PD_COEFF_P_MAX - PD_COEFF_P_MIN)
+            result = p_min + s * (p_max - p_min)
 
-        deviance_coeff = 1 # could be 2
-        return min(PD_COEFF_P_MAX * deviance_coeff, max(PD_COEFF_P_MIN / deviance_coeff, result))
+            return clamp(p_min, result, p_max)
+
+        p = compute_p(target_size)
+        p = clamp(PD_COEFF_P_MIN, p, PD_COEFF_P_MIN)
+        return p
+
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
 
@@ -485,13 +507,16 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             logger.info("MODE: %s, ACTION: %s", mode, last_command)
 
             debug_info['extra'] = (
+                f"p_stage={pd_coeff_p_dynamic_stage} "
                 f"stage1_thr={PD_COEFF_P_STAGE_1_THRESHOLD:.3f} "
                 f"stage2_thr={PD_COEFF_P_STAGE_2_THRESHOLD:.3f} "
                 f"stage1_r={PD_COEFF_P_STAGE_1_RATIO:.2f} "
                 f"stage2_r={PD_COEFF_P_STAGE_2_RATIO:.2f} "
                 f"stage3_r={PD_COEFF_P_STAGE_3_RATIO:.2f} "
+                f"p_d_min={PD_COEFF_P_DYNAMIC_MIN:.2f} "
+                f"p_d_max={PD_COEFF_P_DYNAMIC_MAX:.2f} "
                 f"p_min={PD_COEFF_P_MIN:.2f} "
-                f"p_max={PD_COEFF_P_MAX:.2f}"
+                f"p_max={PD_COEFF_P_MAX:.2f} "
             )
 
             # -1 means that there was no frame and no detections
