@@ -251,7 +251,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             return clamp(p_min, result, p_max)
 
         p = compute_p(target_size)
-        p = clamp(PD_COEFF_P_MIN, p, PD_COEFF_P_MIN)
+        p = clamp(PD_COEFF_P_MIN, p, PD_COEFF_P_MAX)
         return p
 
 
