@@ -73,8 +73,8 @@ def compute_inertia_correction(telemetry_dict, frame_dt_ns, lookahead_frames, fo
     if gain == 0 or frame_dt_ns <= 0 or odometry is None or attitude is None:
         return XY(0.0, 0.0)
 
-    vel_ned = odometry.get('velocity_body')
-    angular_vel = odometry.get('angular_velocity_body')
+    vel_ned = odometry.get('velocity_body', None)
+    angular_vel = odometry.get('angular_velocity_body', None)
     yaw_deg = attitude.get('yaw_deg', 0)
     altitude = max(0.5, -1 * odometry.get('position_body', {}).get('z_m', 0))
 
@@ -116,7 +116,7 @@ def compute_inertia_correction(telemetry_dict, frame_dt_ns, lookahead_frames, fo
 
     return XY(
         (linear_x + angular_x) * gain,
-        (linear_y + angular_y) * gain,
+        (linear_y + angular_y) * gain * -1,
     )
 
 
