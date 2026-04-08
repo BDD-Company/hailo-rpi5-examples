@@ -132,10 +132,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     global DEBUG
     DEBUG           = control_config.pop('DEBUG', False)
     logger.debug("!!!!! DEBUG state: %s", DEBUG)
-    MIN_CONFIDENCE  = control_config.pop('confidence_min', 0.1)
+    CONFIDENCE_MIN  = control_config.pop('confidence_min', 0.1)
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
-    MAX_THRUST      = control_config.pop('thrust_max', 0.5)
-    MIN_THRUST      = control_config.pop('thrust_min', 0.4)
+
+    THRUST_MAX      = control_config.pop('thrust_max', 0.5)
+    THRUST_MIN      = control_config.pop('thrust_min', 0.4)
+    THRUST_DYNAMIC  = control_config.pop('thrust_dynamic', False)
+
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
 
@@ -419,7 +422,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             frame_id = detections_obj.frame_id
 
             detection = detections[0] if len(detections) > 0 else Detection()
-            if detection.confidence >= MIN_CONFIDENCE:
+            if detection.confidence >= CONFIDENCE_MIN:
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
                 estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
@@ -431,11 +434,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 # logger.debug("drone attitude: %s", drone_attitude)
                 mode = 'follow'
 
-                distance_to_center = detection.bbox.center.distance_to(center)
+                # distance_to_center = detection.bbox.center.distance_to(center)
                 target_size = detection.bbox.area()
                 pd_coeff_p = pd_coeff_p_for_target_size(target_size)
-                # if flight_time_ns >= 1_500_000_000:
-                    # pd_coeff_p = PD_COEFF_P_MAX
 
                 target_relative_pos = center - detection.bbox.center
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
@@ -449,7 +450,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 if True and target_estimator.history_size() >= 2:
                     # estimate target based on previous positions
-                    mode = 'follow* '
+                    mode += '* '
 
                     number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_FRAMES
                     if ESTIMATION_LOOKAHEAD_DYNAMIC and estimated_distance is not None:
@@ -502,20 +503,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 seen_target = True
 
-                thrust = MIN_THRUST
-                if distance_to_center < 0.2:
-                    thrust= MAX_THRUST
-                    mode += " GREEN "
-                    # pd_coeff_p /= 3
-                elif distance_to_center < 0.4:
-                    thrust= MIN_THRUST + (MAX_THRUST - MIN_THRUST) / 2
-                    mode += " YELLOW "
-                    # pd_coeff_p /= 1.5
-                else:
-                    thrust= MIN_THRUST
-                    mode += " RED "
-                    #pd_coeff_p
-
                 target_relative_pos_uncorrected = target_relative_pos
                 # Inertia correction: feedforward from actual velocity/angular rates
                 if INERTIA_CORRECTION_GAIN != 0 and target_relative_pos is not None:
@@ -527,6 +514,22 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     )
                     target_relative_pos = target_relative_pos + inertia_correction
                     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
+
+                distance_to_center = target_relative_pos.distance_to(center)
+                thrust = THRUST_MIN
+                if THRUST_DYNAMIC:
+                    if distance_to_center < 0.2:
+                        thrust= THRUST_MAX
+                        mode += " GREEN "
+                        # pd_coeff_p /= 3
+                    elif distance_to_center < 0.4:
+                        thrust= THRUST_MIN + (THRUST_MAX - THRUST_MIN) / 2
+                        mode += " YELLOW "
+                        # pd_coeff_p /= 1.5
+                    else:
+                        thrust= THRUST_MIN
+                        mode += " RED "
+                        #pd_coeff_p
 
                 # command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
                 target_relative_pos_pd = target_relative_pos

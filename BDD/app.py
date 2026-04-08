@@ -284,10 +284,11 @@ def main():
         record_videos=True)
 
     control_config = {
-        'confidence_min': 0.2,
+        'confidence_min': 0.4,
         'confidence_move': 0.4,
-        'thrust_max': 0.4,
-        'thrust_min': 0.4,
+        'thrust_max': 0.6,
+        'thrust_min': 0.6,
+        'thrust_dynamic': True,
 
         'target_lost_fade_per_frame': 0.75,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
@@ -298,7 +299,7 @@ def main():
         # Dynamically adjust P coeff based on target size.
         # Old mode: linear interpolation between min and max.
         # New mode: piecewise profile controlled by stage thresholds and ratios.
-        'pd_coeff_p_dynamic': True,
+        'pd_coeff_p_dynamic': False,
         'pd_coeff_p_dynamic_use_piecewise': True,
         'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
 
@@ -308,7 +309,7 @@ def main():
 
         'pd_coeff_p_dynamic_stage_1_threshold': 0.1,
         'pd_coeff_p_dynamic_stage_2_threshold': 0.642857,
-        'pd_coeff_p_dynamic_stage_1_ratio': 1,
+        'pd_coeff_p_dynamic_stage_1_ratio': 1.5,
         'pd_coeff_p_dynamic_stage_2_ratio': 1.5,
         'pd_coeff_p_dynamic_stage_3_ratio': 1.5,
 
@@ -325,6 +326,7 @@ def main():
         'estimation_lookahead_dynamic_frames_far': 8,
 
         'safe_takeoff_period_ns': 500_000_000,
+
         'DEBUG': DEBUG
     }
 
