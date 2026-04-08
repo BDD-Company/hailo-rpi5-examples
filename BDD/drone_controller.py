@@ -434,7 +434,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     mode += " GREEN "
                     # pd_coeff_p /= 3
                 elif distance_to_center < 0.4:
-                    thrust= MAX_THRUST + (MAX_THRUST - MIN_THRUST) / 2
+                    thrust= MIN_THRUST + (MAX_THRUST - MIN_THRUST) / 2
                     mode += " YELLOW "
                     # pd_coeff_p /= 1.5
                 else:
