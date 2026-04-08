@@ -189,13 +189,13 @@ def draw_move_goal(frame, target_pos : XY, color, line_thickness = 1):
             frame,
             target_pos_on_frame.to_tuple(to = int),
             color,
-            cv2.MARKER_TILTED_CROSS,
-            10,
-            1
+            cv2.MARKER_CROSS,
+            24 + line_thickness,
+            line_thickness
         )
 
 
-def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1):
+def draw_predicted_pos(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1):
     frame_size = XY(frame.shape[1], frame.shape[0])
     # since target is a diff from a frame center (0.5, 0.5) in a 0..1 frame
     target_pos_on_frame = (XY(0.5, 0.5) - target_pos).multiplied_by_XY(frame_size)
@@ -203,10 +203,19 @@ def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1
 
     frame_rect = Rect(XY(0, 0), frame_size)
     if frame_rect.is_point_inside(target_pos_on_frame):
+        # rect_size = XY(2, 2)
+        # cv2.circle(
+        #     frame,
+        #     (target_pos_on_frame - rect_size).to_tuple(to = int),
+        #     (target_pos_on_frame + rect_size).to_tuple(to = int),
+        #     color,
+        #     line_thickness,
+        #     cv2.LINE_AA
+        # )
         cv2.circle(
             frame,
             target_pos_on_frame.to_tuple(to = int),
-            line_thickness * 2 + 4, #
+            8,
             color,
             line_thickness,
             cv2.LINE_AA
@@ -215,19 +224,10 @@ def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1
         #     frame,
         #     target_pos_on_frame.to_tuple(to = int),
         #     color,
-        #     cv2.MARKER_TILTED_CROSS,
-        #     10,
+        #     cv2.MARKER_SQUARE,
+        #     8 + line_thickness,
         #     1
         # )
-
-    # cv2.circle(
-    #     frame,
-    #     (from_pos_on_frame + (target_pos_on_frame - from_pos_on_frame) * 2).to_tuple(to = int),
-    #     line_thickness * 2 + 1, #
-    #     color,
-    #     max(line_thickness / 2, 1),
-    #     cv2.LINE_AA
-    # )
 
     # do not draw arrow when it is very small
     if from_pos_on_frame is not None \
@@ -238,7 +238,9 @@ def draw_target(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1
             target_pos_on_frame.to_tuple(to = int),
             color,
             line_thickness,
-            cv2.LINE_AA
+            cv2.LINE_AA,
+            shift=0,
+            tipLength=0.1
         )
 
 
@@ -256,7 +258,7 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     selected : Detection|None = detection_dict.get('selected', None)
     move_command : MoveCommand | None = detection_dict.get('move_command', None)
     telemetry : dict | None = detection_dict.get('telemetry', {})
-    target : XY | None = detection_dict.get('selected_detection_projected_pos', None)
+    predicted_pos : XY | None = detection_dict.get('selected_detection_projected_pos', None)
     move_goal : XY | None = detection_dict.get('move_goal', None)
 
     frame = detections.frame if detections else None
@@ -343,8 +345,8 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     if selected is not None:
         draw_detection(frame, selected, SELECTED_OBJECT_COLOR, 2)
 
-    if target is not None and selected is not None:
-        draw_target(frame, target, selected.bbox.center, TARGET_COLOR, 1)
+    if predicted_pos is not None and selected is not None:
+        draw_predicted_pos(frame, predicted_pos, selected.bbox.center, TARGET_COLOR, 1)
 
     if move_goal is not None:
         draw_move_goal(frame, move_goal, TARGET_COLOR, 1)
@@ -553,14 +555,16 @@ if __name__ == '__main__':
                 'extra': dict(q=q, xy_delta=xy_delta, selected=selected)
             })
 
+            selected_detection_projected_pos = selected.bbox.center + xy_delta if selected is not None else None
+            move_goal = selected_detection_projected_pos + XY(0.1, 0.1) if selected_detection_projected_pos is not None else XY(0.5, 0.5) + xy_delta
             output_queue.put({
                 'detections': d,
                 'selected' : selected,
                 # 'move_command': move_command,
                 'telemetry' : telemetry,
-                'selected_detection_projected_pos' : selected.bbox.center + xy_delta if selected is not None else None,
+                'selected_detection_projected_pos' : selected_detection_projected_pos,
                 # emulate case when there are no detections
-                'move_goal' : selected.bbox.center + xy_delta if selected is not None else XY(0.5, 0.5) + xy_delta,
+                'move_goal' : move_goal,
             })
             time.sleep(delay_between_frames_ms / 1000)
         output_queue.put(None) # Just to terminate by exception

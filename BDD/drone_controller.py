@@ -516,16 +516,17 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     mode += " RED "
                     #pd_coeff_p
 
+                target_relative_pos_uncorrected = target_relative_pos
                 # Inertia correction: feedforward from actual velocity/angular rates
                 if INERTIA_CORRECTION_GAIN != 0 and target_relative_pos is not None:
                     frame_dt_ns = current_frame_timestamp_ns - prev_frame_timestamp_ns
-                    inertia_corr = compute_inertia_correction(
+                    inertia_correction = compute_inertia_correction(
                         telemetry_dict, frame_dt_ns,
                         INERTIA_CORRECTION_LOOKAHEAD_FRAMES,
                         FRAME_ANGLUAR_SIZE_DEG, INERTIA_CORRECTION_GAIN
                     )
-                    target_relative_pos = target_relative_pos + inertia_corr
-                    logger.debug("inertia correction: %s, adjusted target: %s", inertia_corr, target_relative_pos)
+                    target_relative_pos = target_relative_pos + inertia_correction
+                    logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 
                 # command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
                 target_relative_pos_pd = target_relative_pos
@@ -557,7 +558,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 #         logger.warning("Too steep atack close to the ground %s, clamping to %s ", angle_to_target, new_angle_to_target)
                 #         angle_to_target = new_angle_to_target
 
-                # await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
                 await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
                 debug_info["mode"] = mode
 
@@ -609,7 +609,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     'detections' : detections_obj,
                     'selected' : detection,
                     'telemetry': debug_info,
-                    'selected_detection_projected_pos' : target_relative_pos,
+                    'selected_detection_projected_pos' : target_relative_pos_uncorrected,
+                    # 'inertia_accumuated' : target_relative_pos,
                     'move_goal' : target_relative_pos
                 }
                 output_queue.put(output)

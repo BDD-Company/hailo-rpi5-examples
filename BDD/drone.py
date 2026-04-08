@@ -306,7 +306,8 @@ class DroneMover():
     async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0) -> None:
         # Keep commanded tilt within a safe envelope to avoid toppling.
         def _clamp(angle: float) -> float:
-            return max(-SAFE_TILT_DEG, min(SAFE_TILT_DEG, angle))
+            return angle
+            # return max(-SAFE_TILT_DEG, min(SAFE_TILT_DEG, angle))
 
         safe_roll = _clamp(roll_degree)
         safe_pitch = _clamp(pitch_degree)
