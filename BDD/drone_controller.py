@@ -590,18 +590,19 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             mode = debug_info.get('mode', '')
             logger.info("MODE: %s, ACTION: %s", mode, last_command)
 
-            debug_info['extra'] = (
-                f"p_stage={pd_coeff_p_dynamic_stage} "
-                f"stage1_thr={PD_COEFF_P_STAGE_1_THRESHOLD:.3f} "
-                f"stage2_thr={PD_COEFF_P_STAGE_2_THRESHOLD:.3f} "
-                f"stage1_r={PD_COEFF_P_STAGE_1_RATIO:.2f} "
-                f"stage2_r={PD_COEFF_P_STAGE_2_RATIO:.2f} "
-                f"stage3_r={PD_COEFF_P_STAGE_3_RATIO:.2f} "
-                f"p_d_min={PD_COEFF_P_DYNAMIC_MIN:.2f} "
-                f"p_d_max={PD_COEFF_P_DYNAMIC_MAX:.2f} "
-                f"p_min={PD_COEFF_P_MIN:.2f} "
-                f"p_max={PD_COEFF_P_MAX:.2f} "
-            )
+            if PD_COEFF_P_DYNAMIC:
+                debug_info['extra'] = (
+                    f"p_stage={pd_coeff_p_dynamic_stage} "
+                    f"stage1_thr={PD_COEFF_P_STAGE_1_THRESHOLD:.3f} "
+                    f"stage2_thr={PD_COEFF_P_STAGE_2_THRESHOLD:.3f} "
+                    f"stage1_r={PD_COEFF_P_STAGE_1_RATIO:.2f} "
+                    f"stage2_r={PD_COEFF_P_STAGE_2_RATIO:.2f} "
+                    f"stage3_r={PD_COEFF_P_STAGE_3_RATIO:.2f} "
+                    f"p_d_min={PD_COEFF_P_DYNAMIC_MIN:.2f} "
+                    f"p_d_max={PD_COEFF_P_DYNAMIC_MAX:.2f} "
+                    f"p_min={PD_COEFF_P_MIN:.2f} "
+                    f"p_max={PD_COEFF_P_MAX:.2f} "
+                )
 
             # -1 means that there was no frame and no detections
             if output_queue is not None:
