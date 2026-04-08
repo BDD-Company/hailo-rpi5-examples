@@ -142,8 +142,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
 
-    PD_COEFF_P      = control_config.pop('pd_coeff_p', 12)
-    PD_COEFF_D      = control_config.pop('pd_coeff_d', 1)
+    PD_COEFF_P      = control_config.pop('pd_coeff_p', 1)
+    PD_COEFF_D      = control_config.pop('pd_coeff_d', 0)
 
     PD_COEFF_P_DYNAMIC = control_config.pop('pd_coeff_p_dynamic', False)
     PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pop('pd_coeff_p_dynamic_use_piecewise', False)

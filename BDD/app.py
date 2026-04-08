@@ -286,15 +286,18 @@ def main():
     control_config = {
         'confidence_min': 0.4,
         'confidence_move': 0.4,
-        'thrust_max': 0.6,
-        'thrust_min': 0.6,
-        'thrust_dynamic': True,
+        'thrust_max': 0.5,
+        'thrust_min': 0.5,
+        'thrust_dynamic': False,
 
-        'target_lost_fade_per_frame': 0.75,
+        'target_lost_fade_per_frame': 0.9,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'pd_coeff_p': 4, #12.5
         'pd_coeff_d': 0,
+        'pd_coeff_p_safe_min': 0.6,
+        'pd_coeff_p_min' : 0.5,
+        'pd_coeff_p_max' : 10,
 
         # Dynamically adjust P coeff based on target size.
         # Old mode: linear interpolation between min and max.
@@ -307,16 +310,16 @@ def main():
         'pd_coeff_p_dynamic_max_target_size' : 0.0120,  # normalized target size
         'pd_coeff_p_dynamic_max' : 6,
 
-        'pd_coeff_p_dynamic_stage_1_threshold': 0.1,
-        'pd_coeff_p_dynamic_stage_2_threshold': 0.642857,
-        'pd_coeff_p_dynamic_stage_1_ratio': 1.5,
-        'pd_coeff_p_dynamic_stage_2_ratio': 1.5,
-        'pd_coeff_p_dynamic_stage_3_ratio': 1.5,
+        'pd_coeff_p_dynamic_stage_1_threshold': 0.01,
+        'pd_coeff_p_dynamic_stage_2_threshold': 0.05,
+        'pd_coeff_p_dynamic_stage_1_ratio': 1,
+        'pd_coeff_p_dynamic_stage_2_ratio': 1,
+        'pd_coeff_p_dynamic_stage_3_ratio': 1,
 
         'frame_angular_size_deg' : XY(120, 100),
         'target_size_m' : XY(0.2, 0.2),
 
-        'inertia_correction_gain' : 0.5,
+        'inertia_correction_gain' : 1,
         'inertia_correction_lookahead_frames' : 2,
 
         'estimation_lookahead_frames': 2,
