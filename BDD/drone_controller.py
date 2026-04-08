@@ -393,7 +393,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             frame_capture_timestampt_ns = detections_obj.meta.capture_timestamp_ns or None
 
             telemetry_dict = drone.get_telemetry_dict_cached()
-            logger.debug("!!!!!!!!!!! telemetry: %s", telemetry_dict)
+            logger.debug("telemetry: %s", telemetry_dict)
             debug_info = telemetry_dict
 
             ## Check if take off
