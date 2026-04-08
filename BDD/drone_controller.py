@@ -60,9 +60,10 @@ def compute_inertia_correction(telemetry_dict, frame_dt_ns, lookahead_frames, fo
     """
     Feedforward correction for drone velocity and angular rates.
 
-    Camera looks UP (zenith). Image top = pitch-UP direction (body backward).
-    Image right = roll-RIGHT direction (body right).
-    target_relative_pos convention: x>0 = target LEFT, y>0 = target UP/backward.
+    Camera looks UP (zenith), mounted on belly.
+    Image top  = body FORWARD (+X)  — positive pitch_deg_s tilts nose down, moves fwd.
+    Image right = body RIGHT  (+Y)  — positive roll_deg_s rolls right.
+    target_relative_pos: x>0 = target LEFT of centre, y>0 = target above centre (fwd).
 
     Returns XY correction to ADD to target_relative_pos (normalized image coords).
     """
@@ -95,18 +96,22 @@ def compute_inertia_correction(telemetry_dict, frame_dt_ns, lookahead_frames, fo
         v_fwd   =  v_n * cos_y + v_e * sin_y   # body-X  (forward)
         v_right = -v_n * sin_y + v_e * cos_y    # body-Y  (right)
 
-        # Moving right  → target drifts left  (positive camera X)
-        # Moving forward → target drifts up    (positive camera Y)
+        # Moving right   → target drifts left  (+ camera X).  Provides damping.
         linear_x =  v_right / altitude / fov_x_rad * lookahead_s
-        linear_y =  v_fwd   / altitude / fov_y_rad * lookahead_s
+        # Moving forward → target drifts toward centre (− camera Y).
+        # Sign is negative: forward velocity reduces the visual error.
+        linear_y = -v_fwd   / altitude / fov_y_rad * lookahead_s
 
     # Angular velocity: predict camera-aim shift over lookahead window.
+    # For an up-looking camera, tilting shifts the optical axis away from
+    # zenith, causing near-zenith targets to appear further from centre
+    # (positive feedback in image-plane coords).  The correction counteracts
+    # this for roll, and provides additional damping for pitch.
     if angular_vel:
-        # Roll right → aim shifts right → target appears left (+X). Augments
-        # natural roll damping.
+        # Roll right → optical axis shifts right → zenith target appears left (+X).
         angular_x =  angular_vel['roll_rad_s']  / fov_x_rad * lookahead_s
-        # Pitch up → aim shifts forward, but image-top is backward → target
-        # appears further from centre (positive feedback). Counteract with −.
+        # Pitch fwd (positive pitch_rad_s = nose down) → optical axis shifts fwd
+        # → zenith target appears backward (−Y in image).
         angular_y = -angular_vel['pitch_rad_s'] / fov_y_rad * lookahead_s
 
     return XY(
