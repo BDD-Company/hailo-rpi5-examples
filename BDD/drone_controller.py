@@ -200,8 +200,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
         return current_detection_timestamp_ns - prev_detection_timestamp_ns
 
     def piecewise_p_ratio(s: float) -> float:
+        nonlocal pd_coeff_p_dynamic_stage
         s = clamp(0.0, s, 1.0)
-        pd_coeff_p_dynamic_stage = None
 
         if s < PD_COEFF_P_STAGE_1_THRESHOLD:
             pd_coeff_p_dynamic_stage = 1
@@ -244,7 +244,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
             if PD_COEFF_P_DYNAMIC_USE_PIECEWISE:
                 ratio = piecewise_p_ratio(s)
-                return p_min + ratio * (p_max - p_min)
+                return clamp(p_min, p_min + ratio * (p_max - p_min), p_max)
 
             result = p_min + s * (p_max - p_min)
 
