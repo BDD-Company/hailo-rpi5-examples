@@ -61,9 +61,9 @@ def estimate_distance_class(
     if d is None:
         return None
 
-    if d < 5:
+    if d < distance_classes[0]:
         return DistanceClass.NEAR, d
-    if d < 10:
+    if d < distance_classes[1]:
         return DistanceClass.MEDIUM, d
     else:
         return DistanceClass.FAR, d

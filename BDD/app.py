@@ -403,7 +403,7 @@ def main():
     app.run(event)
     print("Done !!!")
     detections_queue.put(STOP)
-    drone_thread.join()
+    action_thread.join()
 
 if __name__ == "__main__":
     main()

@@ -7,7 +7,7 @@ import pytest
 from OverwriteQueue import OverwriteQueue
 
 def test_overwrite_drops_oldest():
-    q = OverwriteQueue(maxlen=3)
+    q = OverwriteQueue(maxsize=3)
     q.put(1)
     q.put(2)
     q.put(3)
@@ -22,13 +22,13 @@ def test_overwrite_drops_oldest():
 
 
 def test_get_nowait_empty_raises():
-    q = OverwriteQueue(maxlen=2)
+    q = OverwriteQueue(maxsize=2)
     with pytest.raises(queue.Empty):
         q.get_nowait()
 
 
 def test_get_blocks_until_item_available():
-    q = OverwriteQueue(maxlen=2)
+    q = OverwriteQueue(maxsize=2)
     out = {}
 
     def consumer():
@@ -47,7 +47,7 @@ def test_get_blocks_until_item_available():
 
 
 def test_get_timeout_raises_queue_empty():
-    q = OverwriteQueue(maxlen=2)
+    q = OverwriteQueue(maxsize=2)
 
     t0 = time.perf_counter()
     with pytest.raises(queue.Empty):
@@ -59,7 +59,7 @@ def test_get_timeout_raises_queue_empty():
 
 
 def test_unblocks_single_waiter():
-    q = OverwriteQueue(maxlen=1)
+    q = OverwriteQueue(maxsize=1)
     got = []
 
     def consumer():
@@ -76,7 +76,7 @@ def test_unblocks_single_waiter():
 
 
 def test_fifo_when_not_overwritten():
-    q = OverwriteQueue(maxlen=128)
+    q = OverwriteQueue(maxsize=128)
     N = 10_000
     out = []
 
@@ -111,7 +111,7 @@ def test_fifo_when_not_overwritten():
 
 
 def test_overwrite_keeps_latest_items():
-    q = OverwriteQueue(maxlen=50)
+    q = OverwriteQueue(maxsize=50)
     N = 20_000
     done = threading.Event()
     seen = []
