@@ -75,6 +75,7 @@ class DroneMover():
         self.tasks : list[asyncio.Task] = []
         self.drone_connection_string = drone_connection_string
         self.aborted = False
+        self.upside_down_state = False
 
         # Telemetry aspects to keep cached; edit this list to add/remove streams.
         self.telemetry_aspects = [
@@ -238,7 +239,7 @@ class DroneMover():
         # logging.debug("offboard mode: %s", await self.offboard.is_active())
 
         await self._ensure_telemetry_cache()
-        await self.start_upside_down_monitor()
+        # await self.start_upside_down_monitor()
 
         return
 
@@ -304,6 +305,10 @@ class DroneMover():
 
 
     async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0) -> None:
+        if self.upside_down_state:
+            logger.warning("drone is UPSIDE-DOWN, ignoring command")
+            return
+
         # Keep commanded tilt within a safe envelope to avoid toppling.
         def _clamp(angle: float) -> float:
             return angle
@@ -378,16 +383,19 @@ class DroneMover():
         """Background task: when the drone stays upside-down for
         `upside_down_hold_s` seconds, command a level attitude to recover."""
         upside_down_since: float | None = None
+        logger.debug("!!! Started upside-down monitor thread with angle= %s\thold time= %s s", self.upside_down_angle_deg, self.upside_down_hold_s)
 
         while not self.aborted:
             attitude = await self.get_cached_attitude(wait_for_first=True)
             if attitude is None:
                 await asyncio.sleep(0.05)
+                self.upside_down_state = False
                 continue
 
             now = time.monotonic()
 
-            if self._is_upside_down(attitude):
+            self.upside_down_state = self._is_upside_down(attitude)
+            if self.upside_down_state:
                 if upside_down_since is None:
                     upside_down_since = now
                     logger.info("Upside-down detected (roll=%.1f pitch=%.1f)",

@@ -14,6 +14,11 @@ class CommandRegulator:
         self.Pk = Pk
         self.Dk = Dk
 
+
+    def get_coeffs(self):
+        return (self.Pk, self.Dk)
+
+
     def next_command(self, command : XY, dt_ms : float):
         assert(isinstance(command, XY))
         commands = self.previous_commands
@@ -26,8 +31,9 @@ class CommandRegulator:
 
         Pk, Dk = self.Pk, self.Dk
 
-        return command * Pk + (command - prev_command) * (Dk / dt_ms)
-    
+        # Note: looks like introducing D leads to crazy command output, too big
+        return command * Pk #+ (command - prev_command) * (Dk / dt_ms)
+
 
 def test_CommandRegulator():
     c = CommandRegulator(12, 0.2)
