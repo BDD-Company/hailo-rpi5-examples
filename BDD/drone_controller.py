@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 
 import asyncio
+import math
 import time
 from queue import Empty, Queue
 
@@ -53,6 +54,65 @@ def is_drone_moving(telemetry_dict):
 def clamp(min_val, val, max_val):
     typeof_val = type(val)
     return typeof_val(max(min_val, min(max_val, val)))
+
+
+def compute_inertia_correction(telemetry_dict, frame_dt_ns, lookahead_frames, fov_deg, gain):
+    """
+    Feedforward correction for drone velocity and angular rates.
+
+    Camera looks UP (zenith). Image top = pitch-UP direction (body backward).
+    Image right = roll-RIGHT direction (body right).
+    target_relative_pos convention: x>0 = target LEFT, y>0 = target UP/backward.
+
+    Returns XY correction to ADD to target_relative_pos (normalized image coords).
+    """
+    odometry = telemetry_dict.get('odometry') or None
+    attitude = telemetry_dict.get('attitude_euler') or None
+
+    if gain == 0 or frame_dt_ns <= 0 or odometry is None or attitude is None:
+        return XY(0.0, 0.0)
+
+    vel_ned = odometry.get('velocity_body')
+    angular_vel = odometry.get('angular_velocity_body')
+    yaw_deg = attitude.get('yaw_deg', 0)
+    altitude = max(0.5, -1 * odometry.get('position_body', {}).get('z_m', 0))
+
+    fov_x_rad = math.radians(fov_deg.x)
+    fov_y_rad = math.radians(fov_deg.y)
+    lookahead_s = (frame_dt_ns / 1_000_000_000) * lookahead_frames
+
+    linear_x, linear_y = 0.0, 0.0
+    angular_x, angular_y = 0.0, 0.0
+
+    # Linear velocity: NED → body FRD, then to camera-frame drift rate.
+    if vel_ned:
+        v_n = vel_ned['x_m_s']
+        v_e = vel_ned['y_m_s']
+        yaw_rad = math.radians(yaw_deg)
+        cos_y = math.cos(yaw_rad)
+        sin_y = math.sin(yaw_rad)
+
+        v_fwd   =  v_n * cos_y + v_e * sin_y   # body-X  (forward)
+        v_right = -v_n * sin_y + v_e * cos_y    # body-Y  (right)
+
+        # Moving right  → target drifts left  (positive camera X)
+        # Moving forward → target drifts up    (positive camera Y)
+        linear_x =  v_right / altitude / fov_x_rad * lookahead_s
+        linear_y =  v_fwd   / altitude / fov_y_rad * lookahead_s
+
+    # Angular velocity: predict camera-aim shift over lookahead window.
+    if angular_vel:
+        # Roll right → aim shifts right → target appears left (+X). Augments
+        # natural roll damping.
+        angular_x =  angular_vel['roll_rad_s']  / fov_x_rad * lookahead_s
+        # Pitch up → aim shifts forward, but image-top is backward → target
+        # appears further from centre (positive feedback). Counteract with −.
+        angular_y = -angular_vel['pitch_rad_s'] / fov_y_rad * lookahead_s
+
+    return XY(
+        (linear_x + angular_x) * gain,
+        (linear_y + angular_y) * gain,
+    )
 
 
 async def drone_controlling_thread_async(drone_connection_string, drone_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None):
@@ -122,6 +182,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
     FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
 
+    INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
+    INERTIA_CORRECTION_LOOKAHEAD_FRAMES = control_config.pop('inertia_correction_lookahead_frames', 2)
 
     ESTIMATION_LOOKAHEAD_FRAMES         = control_config.pop('estimation_lookahead_frames', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC        = control_config.pop('estimation_lookahead_dynamic', False)
@@ -448,6 +510,17 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     thrust= MIN_THRUST
                     mode += " RED "
                     #pd_coeff_p
+
+                # Inertia correction: feedforward from actual velocity/angular rates
+                if INERTIA_CORRECTION_GAIN != 0 and target_relative_pos is not None:
+                    frame_dt_ns = current_frame_timestamp_ns - prev_frame_timestamp_ns
+                    inertia_corr = compute_inertia_correction(
+                        telemetry_dict, frame_dt_ns,
+                        INERTIA_CORRECTION_LOOKAHEAD_FRAMES,
+                        FRAME_ANGLUAR_SIZE_DEG, INERTIA_CORRECTION_GAIN
+                    )
+                    target_relative_pos = target_relative_pos + inertia_corr
+                    logger.debug("inertia correction: %s, adjusted target: %s", inertia_corr, target_relative_pos)
 
                 # command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
                 target_relative_pos_pd = target_relative_pos

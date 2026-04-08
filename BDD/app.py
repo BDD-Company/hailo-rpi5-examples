@@ -315,6 +315,8 @@ def main():
         'frame_angular_size_deg' : XY(120, 100),
         'target_size_m' : XY(0.2, 0.2),
 
+        'inertia_correction_gain' : 0.5,
+        'inertia_correction_lookahead_frames' : 2,
 
         'estimation_lookahead_frames': 2,
         'estimation_lookahead_dynamic': False,
