@@ -513,7 +513,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         INERTIA_CORRECTION_LOOKAHEAD_FRAMES,
                         FRAME_ANGLUAR_SIZE_DEG, INERTIA_CORRECTION_GAIN
                     )
-                    target_relative_pos = target_relative_pos + inertia_correction
+                    target_relative_pos = target_relative_pos - inertia_correction
                     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 
                 distance_to_center = target_relative_pos.distance_to(center)
