@@ -531,12 +531,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         mode += " RED "
                         #pd_coeff_p
 
-                # command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
+                logger.info("Setting new command regulator coeffs P=%s D=%s", pd_coeff_p, PD_COEFF_D)
+                command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
                 target_relative_pos_pd = target_relative_pos
                 if target_relative_pos is not None:
                     logger.debug("!!! target before PD: %s", target_relative_pos)
                     target_relative_pos_pd = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
-                    logger.debug("!!! target after PD: %s", target_relative_pos)
+                    logger.debug("!!! target after PD: %s, regulator coeffs: %s", target_relative_pos_pd, command_regulator.get_coeffs())
 
                 angle_to_target  = target_relative_pos_pd.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                 prev_angle_to_target = angle_to_target
@@ -570,7 +571,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     # logger.info("!!! IN AIR since: %s", takeoff_time_ns)
 
             else:
-                if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES:
+                if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES and target_estimator.history_size() > 0:
                     logger.warning("!!! CLEARING HISTORY")
                     target_estimator.clear_history()
 
