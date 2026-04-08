@@ -47,7 +47,7 @@ def is_drone_moving(telemetry_dict):
     if velocity:
         return abs(velocity["x_m_s"]) > 0.01 \
             and abs(velocity["y_m_s"]) > 0.01 \
-            and abs(velocity["y_m_s"]) > 0.01
+            and abs(velocity["z_m_s"]) > 0.01
 
 
 def clamp(min_val, val, max_val):
