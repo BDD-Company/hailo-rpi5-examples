@@ -122,6 +122,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
     FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
 
+
+    ESTIMATION_LOOKAHEAD_FRAMES         = control_config.pop('estimation_lookahead_frames', 2)
+    ESTIMATION_LOOKAHEAD_DYNAMIC        = control_config.pop('estimation_lookahead_dynamic', False)
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
+
     SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
     if len(control_config) > 0:
         logger.warning("Unknonw/unused config parameters: %s", control_config)
@@ -377,15 +384,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     # estimate target based on previous positions
                     mode = 'follow* '
 
-                    number_of_frames_to_estimate_pos = 2
-                    # if estimated_distance is not None:
-                    #     estimated_distance_class, estimated_distance_meters = estimated_distance
-                    #     if estimated_distance_class == DistanceClass.FAR:
-                    #         number_of_frames_to_estimate_pos = 10
-                    #     elif estimated_distance_class == DistanceClass.MEDIUM:
-                    #         number_of_frames_to_estimate_pos = 5
-                    #     elif estimated_distance_class == DistanceClass.NEAR:
-                    #         number_of_frames_to_estimate_pos = 2
+                    number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_FRAMES
+                    if ESTIMATION_LOOKAHEAD_DYNAMIC and estimated_distance is not None:
+                        estimated_distance_class, estimated_distance_meters = estimated_distance
+                        if estimated_distance_class == DistanceClass.FAR:
+                            number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR
+                        elif estimated_distance_class == DistanceClass.MEDIUM:
+                            number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM
+                        elif estimated_distance_class == DistanceClass.NEAR:
+                            number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
 
                     estimation_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
                     target_relative_pos_old = target_relative_pos
