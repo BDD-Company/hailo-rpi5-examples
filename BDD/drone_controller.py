@@ -419,6 +419,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             # detections.sort(reverse=True, key = lambda d : d.track_id)
             detections.sort(reverse=True, key = lambda d : d.confidence)
             target_relative_pos = None
+            target_relative_pos_uncorrected = None
             frame_id = detections_obj.frame_id
 
             detection = detections[0] if len(detections) > 0 else Detection()
