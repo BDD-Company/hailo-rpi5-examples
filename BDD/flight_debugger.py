@@ -342,7 +342,7 @@ class LogView(QWidget):
     """Scrollable log with current-frame lines highlighted."""
 
     # Customize the colour used to highlight text-search matches
-    SEARCH_HIGHLIGHT = QColor(180, 100, 255, 90)   # soft purple
+    SEARCH_HIGHLIGHT = QColor(200, 100, 255, 90)   # soft purple
 
     def __init__(self, lines: list[str], frame_to_lines: dict[int, list[int]],
                  frames: list[FramePose]):
