@@ -107,7 +107,7 @@ def compute_inertia_correction(telemetry_dict, frame_dt_ns, lookahead_frames, fo
     # zenith, causing near-zenith targets to appear further from centre
     # (positive feedback in image-plane coords).  The correction counteracts
     # this for roll, and provides additional damping for pitch.
-    if angular_vel:
+    if False and angular_vel:
         # Roll right → optical axis shifts right → zenith target appears left (+X).
         angular_x =  angular_vel['roll_rad_s']  / fov_x_rad * lookahead_s
         # Pitch fwd (positive pitch_rad_s = nose down) → optical axis shifts fwd
