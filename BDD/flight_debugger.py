@@ -12,11 +12,15 @@ Usage:
 """
 
 import bisect
+import os
 import sys
 import re
 import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
+
+# Suppress harmless Wayland warning about mouse grabbing
+os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.input=false")
 
 import cv2
 import numpy as np
@@ -612,8 +616,7 @@ class TelemetryView(QWidget):
         )
         self._info.adjustSize()
 
-        self._canvas.draw()
-        self._canvas.flush_events()
+        self._canvas.draw_idle()
 
 
 # ===========================================================================
@@ -709,7 +712,7 @@ class FlightDebugger(QMainWindow):
                  video: VideoReader, video_offset: int = 0):
         super().__init__()
         self.setWindowTitle("Flight Debugger")
-        self.resize(1600, 900)
+        self.showMaximized()
 
         # Bottom dock area spans full width
         self.setCorner(Qt.Corner.BottomLeftCorner,
@@ -735,9 +738,13 @@ class FlightDebugger(QMainWindow):
         self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, tb)
 
         # ---- central widget (minimal — docks fill the space) ----
+        # Empty central widget — docks fill all space
         central = QWidget()
-        central.setMaximumHeight(0)
+        # central.setFixedHeight(0)
+        central.hide()
         self.setCentralWidget(central)
+        # Allow docks to occupy the central area for full resizability
+        self.setDockNestingEnabled(True)
 
         # ---- dock widgets ----
         self._video_dock = QDockWidget("Video", self)
@@ -755,11 +762,14 @@ class FlightDebugger(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea,
                            self._log_dock)
 
-        # ---- View menu (re-open closed docks) ----
-        view_menu = self.menuBar().addMenu("&View")
-        view_menu.addAction(self._video_dock.toggleViewAction())
-        view_menu.addAction(self._telem_dock.toggleViewAction())
-        view_menu.addAction(self._log_dock.toggleViewAction())
+        # Defer dock sizing until after maximize has taken effect
+        QTimer.singleShot(0, self._apply_dock_sizes)
+
+        # # ---- View menu (re-open closed docks) ----
+        # view_menu = self.menuBar().addMenu("&View")
+        # view_menu.addAction(self._video_dock.toggleViewAction())
+        # view_menu.addAction(self._telem_dock.toggleViewAction())
+        # view_menu.addAction(self._log_dock.toggleViewAction())
 
         # ---- connect views to controller ----
         self._ctrl.frame_changed.connect(self._log_view.update_frame)
@@ -778,6 +788,23 @@ class FlightDebugger(QMainWindow):
         self._log_view.update_frame(0)
         self._video_view.update_frame(0)
         self._telem_view.update_frame(0)
+
+    def _apply_dock_sizes(self):
+        """Set dock proportions after the window has its final size."""
+        h = self.height()
+        w = self.width()
+        # Log = 1/4 height, top views = 3/4 height
+        self.resizeDocks(
+            [self._video_dock, self._telem_dock, self._log_dock],
+            [h * 4 // 5, h * 4 // 5, h // 5],
+            Qt.Orientation.Vertical,
+        )
+        # Video and telemetry = 50/50 width
+        self.resizeDocks(
+            [self._video_dock, self._telem_dock],
+            [w // 2, w // 2],
+            Qt.Orientation.Horizontal,
+        )
 
 
 # ===========================================================================
