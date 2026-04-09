@@ -557,7 +557,20 @@ if __name__ == '__main__':
             ),
         ]
         detections_template = Detections(0, frame=None, detections=detections)
-        telemetry = json.loads('{"odometry": {"angular_velocity_body": {"pitch_rad_s": -0.0010726579930633307, "roll_rad_s": 0.0010208315216004848, "yaw_rad_s": 0.0006282856920734048}, "child_frame_id": "1 (BODY_NED)", "frame_id": "1 (BODY_NED)", "pose_covariance": {"covariance_matrix": [0.00013371351815294474, NaN, NaN, NaN, NaN, NaN, 0.00013370705710258335, NaN, NaN, NaN, NaN, 0.07561597973108292, NaN, NaN, NaN, 1.736115154926665e-05, NaN, NaN, 1.3997990208736155e-05, NaN, 0.0010160470847040415]}, "position_body": {"x_m": 0.0010958998464047909, "y_m": -0.00166346225887537, "z_m": -1.66695237159729}, "q": {"timestamp_us": 0, "w": 0.7084895968437195, "x": 0.02082471176981926, "y": 0.019742604345083237, "z": -0.7051376104354858}, "time_usec": 1102239786672, "velocity_body": {"x_m_s": 0.0006445666076615453, "y_m_s": 0.001224401406943798, "z_m_s": 0.005852778907865286}, "velocity_covariance": {"covariance_matrix": [0.0014366698451340199, NaN, NaN, NaN, NaN, NaN, 0.0014359699562191963, NaN, NaN, NaN, NaN, 0.004651403985917568, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]}}, "scaled_pressure": {"absolute_pressure_hpa": 1008.449951171875, "differential_pressure_hpa": 0.0, "differential_pressure_temperature_deg": 0.0, "temperature_deg": 36.290000915527344, "timestamp_us": 1102240195000}, "attitude_euler": {"pitch_deg": 3.287358045578003, "roll_deg": 0.0956246480345726, "timestamp_us": 1102239771000, "yaw_deg": -89.72563171386719}, "flight_mode": "7 (OFFBOARD)"}')
+        telemetry = json.loads('''{
+    "attitude_euler": {"pitch_deg": 3.6743834018707275, "roll_deg": 1.7437494993209839, "timestamp_us": 1627122000, "yaw_deg": 113.81243896484375},
+    "odometry": {
+        "angular_velocity_body": {"pitch_rad_s": 0.07458771020174026, "roll_rad_s": 0.13471518456935883, "yaw_rad_s": 0.007425887044519186},
+        "child_frame_id": "1 (BODY_NED)", "frame_id": "1 (BODY_NED)", "position_body": {"x_m": -1646.2294921875, "y_m": -430.0689697265625, "z_m": -2.2903800010681152}, "q": {"timestamp_us": 0, "w": 0.5410939455032349, "x": -0.021065043285489082, "y": 0.040498968213796616, "z": 0.8397223353385925}, "time_usec": 1627207751,
+        "velocity_body": {"x_m_s": -10.08529601991176605, "y_m_s": 4.004382029641419649, "z_m_s": -2.2076573371887207},
+        "imu": {
+            "acceleration_frd": {"down_m_s2": -17.85015296936035, "forward_m_s2": 1.5201350450515747, "right_m_s2": -0.4461444318294525},
+            "angular_velocity_frd": {"down_rad_s": 3.03031160868704319, "forward_rad_s": 5.21173709630966187, "right_rad_s": 1.13436970114707947},
+            "magnetic_field_frd": {"down_gauss": 0.14580856263637543, "forward_gauss": -0.20437178015708923, "right_gauss": -0.2330736517906189},
+            "temperature_degc": 15.0, "timestamp_us": 1627227750
+        }
+    }
+}''')
 
         flight_time_ns = time.monotonic_ns() / 1000_000
         for frame, i in zip(generate_frames(), range(0, n_frames)):
@@ -606,7 +619,7 @@ if __name__ == '__main__':
                 # emulate case when there are no detections
                 'move_goal' : move_goal,
             })
-            time.sleep(delay_between_frames_ms / 1000)
+            time.sleep(delay_between_frames_ms / 100)
         output_queue.put(None) # Just to terminate by exception
 
     producer_thread = threading.Thread(
