@@ -353,7 +353,7 @@ class LogView(QWidget):
         self._edit = QPlainTextEdit()
         self._edit.setReadOnly(True)
         self._edit.setFont(QFont("Monospace", 9))
-        self._edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self._edit.setPlainText("\n".join(lines))
         lo.addWidget(self._edit)
 
@@ -709,7 +709,8 @@ class NavigationBar(QWidget):
 class FlightDebugger(QMainWindow):
     def __init__(self, frames: list[FramePose], log_lines: list[str],
                  frame_to_lines: dict[int, list[int]],
-                 video: VideoReader, video_offset: int = 0):
+                 video: VideoReader, log_path: Path,
+                 video_path: Path | None = None):
         super().__init__()
         self.setWindowTitle("Flight Debugger")
         self.showMaximized()
@@ -747,7 +748,8 @@ class FlightDebugger(QMainWindow):
         self.setDockNestingEnabled(True)
 
         # ---- dock widgets ----
-        self._video_dock = QDockWidget("Video", self)
+        vid_title = f"Video — {video_path.name}" if video_path else "Video"
+        self._video_dock = QDockWidget(vid_title, self)
         self._video_dock.setWidget(self._video_view)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,
                            self._video_dock)
@@ -757,7 +759,7 @@ class FlightDebugger(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,
                            self._telem_dock)
 
-        self._log_dock = QDockWidget("Log", self)
+        self._log_dock = QDockWidget(f"Log — {log_path.name}", self)
         self._log_dock.setWidget(self._log_view)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea,
                            self._log_dock)
@@ -843,7 +845,7 @@ def main():
 
     app = QApplication(sys.argv)
     win = FlightDebugger(frames, log_lines, frame_to_lines,
-                         video, args.video_offset)
+                         video, args.log_file, args.video)
     win.show()
     ret = app.exec()
     video.close()
