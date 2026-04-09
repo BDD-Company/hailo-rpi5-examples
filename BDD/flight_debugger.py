@@ -26,9 +26,9 @@ import cv2
 import numpy as np
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QSlider, QLabel, QPlainTextEdit, QTextEdit, QToolBar,
-    QSizePolicy, QMenu,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QGroupBox,
+    QPushButton, QSlider, QLabel, QPlainTextEdit, QTextEdit,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QPoint
 from PyQt6.QtGui import (
@@ -361,45 +361,34 @@ class LogView(QWidget):
         fid = self._frames[idx].frame_id
         line_idxs = self._ftl.get(fid, [])
 
-        # Build two formats: one for full-width background, one for text
-        line_fmt = QTextCharFormat()
-        line_fmt.setBackground(HighlightStyle.BACKGROUND)
-        line_fmt.setProperty(_FULL_WIDTH_SELECTION, True)
-
-        text_fmt = QTextCharFormat()
-        text_fmt.setBackground(HighlightStyle.BACKGROUND)
+        fmt = QTextCharFormat()
+        fmt.setBackground(HighlightStyle.BACKGROUND)
         if HighlightStyle.FOREGROUND:
-            text_fmt.setForeground(HighlightStyle.FOREGROUND)
+            fmt.setForeground(HighlightStyle.FOREGROUND)
         if HighlightStyle.BOLD:
-            text_fmt.setFontWeight(QFont.Weight.Bold)
+            fmt.setFontWeight(QFont.Weight.Bold)
 
         doc = self._edit.document()
         sels = []
+        first_block = None
         for li in line_idxs:
-            block = doc.findBlockByLineNumber(li)
+            block = doc.findBlockByNumber(li)
             if not block.isValid():
                 continue
-            # Full-width background highlight (cursor with no selection)
-            sel_bg = QTextEdit.ExtraSelection()
-            sel_bg.format = line_fmt
-            sel_bg.cursor = QTextCursor(block)
-            sels.append(sel_bg)
-            # Text highlight (select the whole line text)
-            sel_txt = QTextEdit.ExtraSelection()
-            sel_txt.format = text_fmt
+            if first_block is None:
+                first_block = block
+            sel = QTextEdit.ExtraSelection()
+            sel.format = fmt
             cursor = QTextCursor(block)
-            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
             cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock,
                                 QTextCursor.MoveMode.KeepAnchor)
-            sel_txt.cursor = cursor
-            sels.append(sel_txt)
+            sel.cursor = cursor
+            sels.append(sel)
         self._edit.setExtraSelections(sels)
 
-        # Scroll to the middle highlighted line
-        if line_idxs:
-            mid = line_idxs[len(line_idxs) // 2]
-            block = doc.findBlockByLineNumber(mid)
-            cursor = QTextCursor(block)
+        # Scroll to first highlighted line
+        if first_block is not None:
+            cursor = QTextCursor(first_block)
             self._edit.setTextCursor(cursor)
             self._edit.centerCursor()
 
@@ -706,7 +695,16 @@ class NavigationBar(QWidget):
 # Main window
 # ===========================================================================
 
-class FlightDebugger(QMainWindow):
+def _titled(title: str, widget: QWidget) -> QGroupBox:
+    """Wrap a widget in a titled QGroupBox."""
+    box = QGroupBox(title)
+    lo = QVBoxLayout(box)
+    lo.setContentsMargins(2, 2, 2, 2)
+    lo.addWidget(widget)
+    return box
+
+
+class FlightDebugger(QWidget):
     def __init__(self, frames: list[FramePose], log_lines: list[str],
                  frame_to_lines: dict[int, list[int]],
                  video: VideoReader, log_path: Path,
@@ -714,12 +712,6 @@ class FlightDebugger(QMainWindow):
         super().__init__()
         self.setWindowTitle("Flight Debugger")
         self.showMaximized()
-
-        # Bottom dock area spans full width
-        self.setCorner(Qt.Corner.BottomLeftCorner,
-                       Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.setCorner(Qt.Corner.BottomRightCorner,
-                       Qt.DockWidgetArea.BottomDockWidgetArea)
 
         self._ctrl = FrameController(len(frames))
 
@@ -730,48 +722,29 @@ class FlightDebugger(QMainWindow):
         pos, vel, acc, mag = precompute_telemetry(frames)
         self._telem_view = TelemetryView(frames, pos, vel, acc, mag)
 
-        # ---- navigation (bottom toolbar) ----
         self._nav = NavigationBar(self._ctrl, frames)
-        tb = QToolBar("Navigation", self)
-        tb.setMovable(False)
-        tb.setFloatable(False)
-        tb.addWidget(self._nav)
-        self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, tb)
 
-        # ---- central widget (minimal — docks fill the space) ----
-        # Empty central widget — docks fill all space
-        central = QWidget()
-        # central.setFixedHeight(0)
-        central.hide()
-        self.setCentralWidget(central)
-        # Allow docks to occupy the central area for full resizability
-        self.setDockNestingEnabled(True)
-
-        # ---- dock widgets ----
+        # ---- layout: splitters ----
         vid_title = f"Video — {video_path.name}" if video_path else "Video"
-        self._video_dock = QDockWidget(vid_title, self)
-        self._video_dock.setWidget(self._video_view)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,
-                           self._video_dock)
 
-        self._telem_dock = QDockWidget("Telemetry 3D", self)
-        self._telem_dock.setWidget(self._telem_view)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,
-                           self._telem_dock)
+        # Top row: video | telemetry (horizontal splitter)
+        top_split = QSplitter(Qt.Orientation.Horizontal)
+        top_split.addWidget(_titled(vid_title, self._video_view))
+        top_split.addWidget(_titled("Telemetry 3D", self._telem_view))
+        top_split.setSizes([1, 1])   # equal 50/50
 
-        self._log_dock = QDockWidget(f"Log — {log_path.name}", self)
-        self._log_dock.setWidget(self._log_view)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea,
-                           self._log_dock)
+        # Main: top_split / log (vertical splitter)
+        main_split = QSplitter(Qt.Orientation.Vertical)
+        main_split.addWidget(top_split)
+        main_split.addWidget(_titled(f"Log — {log_path.name}", self._log_view))
+        main_split.setStretchFactor(0, 4)   # top gets 4/5
+        main_split.setStretchFactor(1, 1)   # log gets 1/5
 
-        # Defer dock sizing until after maximize has taken effect
-        QTimer.singleShot(0, self._apply_dock_sizes)
-
-        # # ---- View menu (re-open closed docks) ----
-        # view_menu = self.menuBar().addMenu("&View")
-        # view_menu.addAction(self._video_dock.toggleViewAction())
-        # view_menu.addAction(self._telem_dock.toggleViewAction())
-        # view_menu.addAction(self._log_dock.toggleViewAction())
+        # Outer layout: main_split + nav bar
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.addWidget(main_split, 1)
+        outer.addWidget(self._nav, 0)
 
         # ---- connect views to controller ----
         self._ctrl.frame_changed.connect(self._log_view.update_frame)
@@ -790,23 +763,6 @@ class FlightDebugger(QMainWindow):
         self._log_view.update_frame(0)
         self._video_view.update_frame(0)
         self._telem_view.update_frame(0)
-
-    def _apply_dock_sizes(self):
-        """Set dock proportions after the window has its final size."""
-        h = self.height()
-        w = self.width()
-        # Log = 1/4 height, top views = 3/4 height
-        self.resizeDocks(
-            [self._video_dock, self._telem_dock, self._log_dock],
-            [h * 4 // 5, h * 4 // 5, h // 5],
-            Qt.Orientation.Vertical,
-        )
-        # Video and telemetry = 50/50 width
-        self.resizeDocks(
-            [self._video_dock, self._telem_dock],
-            [w // 2, w // 2],
-            Qt.Orientation.Horizontal,
-        )
 
 
 # ===========================================================================
@@ -846,7 +802,6 @@ def main():
     app = QApplication(sys.argv)
     win = FlightDebugger(frames, log_lines, frame_to_lines,
                          video, args.log_file, args.video)
-    win.show()
     ret = app.exec()
     video.close()
     sys.exit(ret)
