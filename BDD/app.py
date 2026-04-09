@@ -284,16 +284,24 @@ def main():
         record_videos=True)
 
     control_config = {
-        'confidence_min': 0.4,
-        'confidence_move': 0.4,
+        'confidence_min': 0.3,
+        'confidence_move': 0.3,
 
-        'thrust_takeoff' : 0.5,
-        'thrust_min': 0.5,
-        'thrust_max': 0.5,
-        'thrust_dynamic': False,
+        'thrust_takeoff' : 0.4,
+        'thrust_min': 0.7,
+        'thrust_max': 0.8,
+        'thrust_dynamic': True,
+        'thrust_proportional_to_target_size' : True,
 
         'target_lost_fade_per_frame': 0.9,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
+
+        'estimation_lookahead_frames': 2,
+        'estimation_lookahead_dynamic': True,
+        'estimation_lookahead_dynamic_frames_near':   2,
+        'estimation_lookahead_dynamic_frames_medium': 3,
+        'estimation_lookahead_dynamic_frames_far':    3,
+
 
         'pd_coeff_p': 4, #12.5
         'pd_coeff_d': 0,
@@ -319,18 +327,14 @@ def main():
         'pd_coeff_p_dynamic_stage_3_ratio': 1,
 
         'frame_angular_size_deg' : XY(120, 100),
-        'target_size_m' : XY(0.2, 0.2),
+        'target_size_m' : XY(0.4, 0.4),
 
-        'inertia_correction_gain' : 1,
+        'inertia_correction_gain' : 0,
         'inertia_correction_lookahead_frames' : 2,
 
-        'estimation_lookahead_frames': 2,
-        'estimation_lookahead_dynamic': False,
-        'estimation_lookahead_dynamic_frames_near': 2,
-        'estimation_lookahead_dynamic_frames_medium': 4,
-        'estimation_lookahead_dynamic_frames_far': 8,
+        'safe_takeoff_period_ns': 300_000_000,
 
-        'safe_takeoff_period_ns': 500_000_000,
+        'aim_point': XY(0.5, 0.6),
 
         'DEBUG': DEBUG
     }

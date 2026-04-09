@@ -262,6 +262,7 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     telemetry : dict | None = detection_dict.get('telemetry', {})
     predicted_pos : XY | None = detection_dict.get('selected_detection_projected_pos', None)
     move_goal : XY | None = detection_dict.get('move_goal', None)
+    aim_point : XY = detection_dict.get('aim_point', XY(0.5, 0.5))
 
     frame = detections.frame if detections else None
 
@@ -285,7 +286,7 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     # )
 
     frame_size = XY(frame.shape[1], frame.shape[0])
-    frame_center = frame_size / 2
+    frame_center = frame_size.multiplied_by_XY(aim_point)
 
     if telemetry is not None:
         debug_info = make_debug_info_dict(detections.frame_id, telemetry, detections.meta)

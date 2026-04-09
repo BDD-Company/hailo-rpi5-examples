@@ -202,11 +202,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
 
+    AIM_POINT = control_config.pop('aim_point', XY(0.5, 0.5))
+    aim_point = AIM_POINT
+    # AIM_POINT = XY(0.5, 0.5)
+
     SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
     if len(control_config) > 0:
         logger.warning("Unknonw/unused config parameters: %s", control_config)
 
-    center = XY(0.5, 0.5)
+
     distance_r = 0.1
     distance_r *= distance_r
     seen_target = False
@@ -443,7 +447,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 target_size = detection.bbox.area()
                 pd_coeff_p = pd_coeff_p_for_target_size(target_size)
 
-                target_relative_pos = center - detection.bbox.center
+                target_relative_pos = AIM_POINT - detection.bbox.center
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
 
                 # TODO maybe use frame capture time?
@@ -453,7 +457,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     current_frame_timestamp_ns #frame_capture_timestampt_ns if frame_capture_timestampt_ns else current_frame_timestamp_ns
                 )
 
-                if True and target_estimator.history_size() >= 2:
+                if target_estimator.history_size() >= 2:
                     # estimate target based on previous positions
                     mode += '* '
 
@@ -520,39 +524,41 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     target_relative_pos = target_relative_pos - inertia_correction
                     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 
-                distance_to_center = target_relative_pos.distance_to(center)
+                distance_to_center = target_relative_pos.distance_to(AIM_POINT)
                 thrust = THRUST_MIN
                 if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
                     thrust = THRUST_TAKEOFF
+                    logger.warning('takeoff low thrust mode: %s', thrust)
+                else:
+                    if THRUST_DYNAMIC:
+                        if distance_to_center < 0.2:
+                            thrust= THRUST_MAX
+                            mode += " GREEN "
+                            # pd_coeff_p /= 3
+                        elif distance_to_center < 0.4:
+                            thrust= THRUST_MIN + (THRUST_MAX - THRUST_MIN) / 2
+                            mode += " YELLOW "
+                            # pd_coeff_p /= 1.5
+                        else:
+                            thrust= THRUST_MIN
+                            mode += " RED "
+                            #pd_coeff_p
 
-                if THRUST_DYNAMIC:
-                    if distance_to_center < 0.2:
-                        thrust= THRUST_MAX
-                        mode += " GREEN "
-                        # pd_coeff_p /= 3
-                    elif distance_to_center < 0.4:
-                        thrust= THRUST_MIN + (THRUST_MAX - THRUST_MIN) / 2
-                        mode += " YELLOW "
-                        # pd_coeff_p /= 1.5
-                    else:
-                        thrust= THRUST_MIN
-                        mode += " RED "
-                        #pd_coeff_p
-
-                if THRUST_PROPORTIONAL_TO_TARGET_SIZE:
-                    if estimated_distance_m < 7:
-                        thrust *= 1.1
-                        pd_coeff_p *= 1.1
-
-                        if estimated_distance_m < 5:
+                    if THRUST_PROPORTIONAL_TO_TARGET_SIZE:
+                        if estimated_distance_m < 7:
                             thrust *= 1.1
-                            pd_coeff_p *= 1.1
+                            pd_coeff_p *= 1
 
-                        if estimated_distance_m < 3:
-                            thrust *= 1.1
-                            pd_coeff_p *= 1.1
+                            if estimated_distance_m < 5:
+                                thrust *= 1.1
+                                pd_coeff_p *= 1.2
 
-                        extra += f' WE ARE SOOOO CLOSE, BOOSTING thrust to: {thrust}, p to: {pd_coeff_p} '
+                            if estimated_distance_m < 3:
+                                thrust *= 1.1
+                                # pd_coeff_p *= 1.2
+                                pass
+
+                            extra += f' WE ARE SOOOO CLOSE, BOOSTING thrust to: {thrust}, p to: {pd_coeff_p} '
 
 
                 logger.info("Setting new command regulator coeffs P=%s D=%s", pd_coeff_p, PD_COEFF_D)
@@ -636,6 +642,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             if output_queue is not None:
                 output = {
                     'detections' : detections_obj,
+                    'aim_point'  : aim_point,
                     'selected' : detection,
                     'telemetry': debug_info,
                     'selected_detection_projected_pos' : target_relative_pos_uncorrected,
