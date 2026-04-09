@@ -54,7 +54,7 @@ class HighlightStyle:
     FOREGROUND : QColor | None — text colour (None keeps the default)
     BOLD       : bool — whether highlighted text is bold
     """
-    BACKGROUND = QColor(255, 255, 150)   # light yellow
+    BACKGROUND = QColor(50, 50, 100)
     FOREGROUND = None                     # keep default text colour
     BOLD = False
 
@@ -357,13 +357,17 @@ class LogView(QWidget):
         fid = self._frames[idx].frame_id
         line_idxs = self._ftl.get(fid, [])
 
-        fmt = QTextCharFormat()
-        fmt.setBackground(HighlightStyle.BACKGROUND)
+        # Build two formats: one for full-width background, one for text
+        line_fmt = QTextCharFormat()
+        line_fmt.setBackground(HighlightStyle.BACKGROUND)
+        line_fmt.setProperty(_FULL_WIDTH_SELECTION, True)
+
+        text_fmt = QTextCharFormat()
+        text_fmt.setBackground(HighlightStyle.BACKGROUND)
         if HighlightStyle.FOREGROUND:
-            fmt.setForeground(HighlightStyle.FOREGROUND)
+            text_fmt.setForeground(HighlightStyle.FOREGROUND)
         if HighlightStyle.BOLD:
-            fmt.setFontWeight(QFont.Weight.Bold)
-        fmt.setProperty(_FULL_WIDTH_SELECTION, True)
+            text_fmt.setFontWeight(QFont.Weight.Bold)
 
         doc = self._edit.document()
         sels = []
@@ -371,10 +375,20 @@ class LogView(QWidget):
             block = doc.findBlockByLineNumber(li)
             if not block.isValid():
                 continue
-            sel = QTextEdit.ExtraSelection()
-            sel.format = fmt
-            sel.cursor = QTextCursor(block)
-            sels.append(sel)
+            # Full-width background highlight (cursor with no selection)
+            sel_bg = QTextEdit.ExtraSelection()
+            sel_bg.format = line_fmt
+            sel_bg.cursor = QTextCursor(block)
+            sels.append(sel_bg)
+            # Text highlight (select the whole line text)
+            sel_txt = QTextEdit.ExtraSelection()
+            sel_txt.format = text_fmt
+            cursor = QTextCursor(block)
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock,
+                                QTextCursor.MoveMode.KeepAnchor)
+            sel_txt.cursor = cursor
+            sels.append(sel_txt)
         self._edit.setExtraSelections(sels)
 
         # Scroll to the middle highlighted line
@@ -598,7 +612,8 @@ class TelemetryView(QWidget):
         )
         self._info.adjustSize()
 
-        self._canvas.draw_idle()
+        self._canvas.draw()
+        self._canvas.flush_events()
 
 
 # ===========================================================================
