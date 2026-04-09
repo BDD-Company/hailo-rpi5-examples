@@ -27,6 +27,8 @@ FRAME_METADATA_COLOR = (0, 255, 0)    # green
 FRAME_METADATA_COLOR_BG = (80, 80, 80) #(120, 120, 0)
 MOVE_COMMAND_COLOR = (0, 0, 255) # red
 
+ACCELERATION_COLOR = (1, 1, 1) # black
+VELOCITY_COLOR = FRAME_METADATA_COLOR
 
 def change_color(color, diff = (0, 0, 0), factor : float = 1):
     assert len(color) == len(diff)
@@ -240,7 +242,7 @@ def draw_predicted_pos(frame, target_pos : XY, from_pos : XY, color, line_thickn
             line_thickness,
             cv2.LINE_AA,
             shift=0,
-            tipLength=0.1
+            tipLength=0.02
         )
 
 
@@ -325,10 +327,7 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         imu_dict = debug_info.get('imu', {}) or {}
         add_line('acceleration_frd    ', imu_dict)
         add_line('angular_velocity_frd', imu_dict)
-        add_line('acceleration_frd', imu_dict)
         add_line('magnetic_field_frd', imu_dict)
-        add_line('temperature_degc', imu_dict)
-        add_line('timestamp_us', imu_dict)
 
         add_line('mode', debug_info)
         add_line('action', debug_info)
@@ -338,6 +337,43 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         for line_no, line in enumerate(lines):
             font_scale = 0.4
             draw_text(frame, line, XY(0, 20 + 40 * line_no * font_scale), font_scale=font_scale, color=FRAME_METADATA_COLOR, bg_color=FRAME_METADATA_COLOR_BG, line_width=1)
+
+        # # convert from [-20, 20] to [0, 1]
+        # min_val = -20
+        # max_val = 20
+        # def normalize(value):
+        #     return max(0, min(1, (value - min_val) / (max_val - min_val)))
+
+        # def normalize_xy(x, y):
+        #     return XY(normalize(x), normalize(y))
+
+        # velocity_body = odo_dict.get('velocity_body', {})
+        # velocity_body_xy = normalize_xy(velocity_body.get('z_m_s', 0), velocity_body.get('y_m_s', 0)).multiplied_by_XY(frame_size)
+        # acceleration = imu_dict.get('acceleration_frd', {})
+        # acceleration_xy = normalize_xy(acceleration.get('right_m_s2', 0), acceleration.get('forward_m_s2', 0)).multiplied_by_XY(frame_size)
+
+        # cv2.arrowedLine(
+        #     frame,
+        #     frame_center.to_tuple(to=int),
+        #     velocity_body_xy.to_tuple(to=int),
+        #     color=VELOCITY_COLOR,
+        #     thickness=3,
+        #     line_type=cv2.LINE_AA,
+        #     shift=0,
+        #     tipLength=0.1
+        # )
+
+        # cv2.arrowedLine(
+        #     frame,
+        #     frame_center.to_tuple(to=int),
+        #     acceleration_xy.to_tuple(to=int),
+        #     color=ACCELERATION_COLOR,
+        #     thickness=2,
+        #     line_type=cv2.LINE_AA,
+        #     shift=0,
+        #     tipLength=0.1
+        # )
+
 
     for detection in detections.detections:
         draw_detection(frame, detection, DETECTED_OBJECT_COLOR, 1)
@@ -538,6 +574,10 @@ if __name__ == '__main__':
             odo_pb['x_m'] += 0.05
             odo_pb['y_m'] += 0.05
             odo_pb['z_m'] += 0.05
+            imu = odo['imu']
+            accel = imu['acceleration_frd']
+            accel['forward_m_s2'] += 0.01
+            accel['right_m_s2'] += 0.01
 
             d = dataclasses.replace(detections_template, frame_id = i, frame=frame.copy())
             q = i / 10

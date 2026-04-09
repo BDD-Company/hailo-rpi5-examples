@@ -136,8 +136,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
 
     THRUST_MAX      = control_config.pop('thrust_max', 0.5)
-    THRUST_MIN      = control_config.pop('thrust_min', 0.4)
+    THRUST_MIN      = control_config.pop('thrust_min', 0.5)
+    THRUST_TAKEOFF  = control_config.pop('thrust_takeoff', 0.5)
     THRUST_DYNAMIC  = control_config.pop('thrust_dynamic', False)
+    THRUST_PROPORTIONAL_TO_TARGET_SIZE = control_config.pop('THRUST_PROPORTIONAL_TO_TARGET_SIZE', False)
 
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
@@ -155,6 +157,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     PD_COEFF_P_SAFE_MIN  = control_config.pop('pd_coeff_p_safe_min', 0.5)
     PD_COEFF_P_MIN  = control_config.pop('pd_coeff_p_min', 0.5)
     PD_COEFF_P_MAX  = control_config.pop('pd_coeff_p_max', 5)
+
 
     # Normalized target size thresholds for dynamic P profile:
     # s = 0.0 means target is at or below PD_COEFF_P_MIN_TARGET_SIZE
@@ -333,8 +336,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
-
     while True:
+        extra = ''
         try:
             detections_obj = Detections(-1)
             distance_to_center : float = float('NaN')
@@ -345,7 +348,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             # logger.debug("!!! awaiting detection... ")
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
-                r : Detections = detections_queue.get(0.01)
+                r : Detections = detections_queue.get(0.02)
                 if r is STOP:
                     logger.info("stopping")
                     break
@@ -427,6 +430,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
                 estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
+                estimated_distance_class, estimated_distance_m = estimated_distance
                 # logger.debug("!!! Detection: %s", detection)
 
                 # drone_attitude = telemetry_dict.get('attitude_euler', 0)
@@ -455,7 +459,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                     number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_FRAMES
                     if ESTIMATION_LOOKAHEAD_DYNAMIC and estimated_distance is not None:
-                        estimated_distance_class, estimated_distance_meters = estimated_distance
                         if estimated_distance_class == DistanceClass.FAR:
                             number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR
                         elif estimated_distance_class == DistanceClass.MEDIUM:
@@ -513,11 +516,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         INERTIA_CORRECTION_LOOKAHEAD_FRAMES,
                         FRAME_ANGLUAR_SIZE_DEG, INERTIA_CORRECTION_GAIN
                     )
+                    extra += f'inertia correction gain: {INERTIA_CORRECTION_GAIN} val: {inertia_correction}'
                     target_relative_pos = target_relative_pos - inertia_correction
                     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 
                 distance_to_center = target_relative_pos.distance_to(center)
                 thrust = THRUST_MIN
+                if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
+                    thrust = THRUST_TAKEOFF
+
                 if THRUST_DYNAMIC:
                     if distance_to_center < 0.2:
                         thrust= THRUST_MAX
@@ -531,6 +538,22 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         thrust= THRUST_MIN
                         mode += " RED "
                         #pd_coeff_p
+
+                if THRUST_PROPORTIONAL_TO_TARGET_SIZE:
+                    if estimated_distance_m < 7:
+                        thrust *= 1.1
+                        pd_coeff_p *= 1.1
+
+                        if estimated_distance_m < 5:
+                            thrust *= 1.1
+                            pd_coeff_p *= 1.1
+
+                        if estimated_distance_m < 3:
+                            thrust *= 1.1
+                            pd_coeff_p *= 1.1
+
+                        extra += f' WE ARE SOOOO CLOSE, BOOSTING thrust to: {thrust}, p to: {pd_coeff_p} '
+
 
                 logger.info("Setting new command regulator coeffs P=%s D=%s", pd_coeff_p, PD_COEFF_D)
                 command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
@@ -596,8 +619,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             logger.info("MODE: %s, ACTION: %s", mode, last_command)
 
             if PD_COEFF_P_DYNAMIC:
-                debug_info['extra'] = (
-                    f"p_stage={pd_coeff_p_dynamic_stage} "
+                extra += (f"p_stage={pd_coeff_p_dynamic_stage} "
                     f"stage1_thr={PD_COEFF_P_STAGE_1_THRESHOLD:.3f} "
                     f"stage2_thr={PD_COEFF_P_STAGE_2_THRESHOLD:.3f} "
                     f"stage1_r={PD_COEFF_P_STAGE_1_RATIO:.2f} "
@@ -606,8 +628,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     f"p_d_min={PD_COEFF_P_DYNAMIC_MIN:.2f} "
                     f"p_d_max={PD_COEFF_P_DYNAMIC_MAX:.2f} "
                     f"p_min={PD_COEFF_P_MIN:.2f} "
-                    f"p_max={PD_COEFF_P_MAX:.2f} "
-                )
+                    f"p_max={PD_COEFF_P_MAX:.2f} ")
+
+            debug_info['extra'] = extra
 
             # -1 means that there was no frame and no detections
             if output_queue is not None:

@@ -286,8 +286,10 @@ def main():
     control_config = {
         'confidence_min': 0.4,
         'confidence_move': 0.4,
-        'thrust_max': 0.5,
+
+        'thrust_takeoff' : 0.5,
         'thrust_min': 0.5,
+        'thrust_max': 0.5,
         'thrust_dynamic': False,
 
         'target_lost_fade_per_frame': 0.9,
@@ -303,7 +305,7 @@ def main():
         # Old mode: linear interpolation between min and max.
         # New mode: piecewise profile controlled by stage thresholds and ratios.
         'pd_coeff_p_dynamic': False,
-        'pd_coeff_p_dynamic_use_piecewise': True,
+        'pd_coeff_p_dynamic_use_piecewise': False,
         'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
 
         'pd_coeff_p_dynamic_min' : 0.6,
