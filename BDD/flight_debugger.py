@@ -341,12 +341,17 @@ class FrameController(QObject):
 class LogView(QWidget):
     """Scrollable log with current-frame lines highlighted."""
 
+    # Customize the colour used to highlight text-search matches
+    SEARCH_HIGHLIGHT = QColor(180, 100, 255, 90)   # soft purple
+
     def __init__(self, lines: list[str], frame_to_lines: dict[int, list[int]],
                  frames: list[FramePose]):
         super().__init__()
         self._lines = lines
         self._ftl = frame_to_lines
         self._frames = frames
+        self._last_idx = 0
+        self._search_text = ""
 
         lo = QVBoxLayout(self)
         lo.setContentsMargins(0, 0, 0, 0)
@@ -355,12 +360,44 @@ class LogView(QWidget):
         self._edit.setFont(QFont("Monospace", 9))
         self._edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self._edit.setPlainText("\n".join(lines))
+        self._edit.selectionChanged.connect(self._on_selection_changed)
         lo.addWidget(self._edit)
 
+    def _on_selection_changed(self):
+        """Update search term from user selection and re-highlight."""
+        selected = self._edit.textCursor().selectedText().strip()
+        if selected:
+            self._search_text = selected
+        elif not self._edit.textCursor().hasSelection():
+            # Only clear when the user explicitly deselects (clicks away),
+            # not when setTextCursor clears it during scrolling
+            self._search_text = ""
+        self._apply_highlights(self._last_idx)
+
     def update_frame(self, idx: int):
+        self._last_idx = idx
+        self._apply_highlights(idx)
+
+        # Scroll to first highlighted line — block signals to avoid
+        # clearing the search text
+        fid = self._frames[idx].frame_id
+        line_idxs = self._ftl.get(fid, [])
+        if line_idxs:
+            doc = self._edit.document()
+            block = doc.findBlockByNumber(line_idxs[0])
+            if block.isValid():
+                self._edit.blockSignals(True)
+                cursor = self._edit.textCursor()
+                cursor.setPosition(block.position())
+                self._edit.setTextCursor(cursor)
+                self._edit.centerCursor()
+                self._edit.blockSignals(False)
+
+    def _apply_highlights(self, idx: int):
         fid = self._frames[idx].frame_id
         line_idxs = self._ftl.get(fid, [])
 
+        # Frame-line highlight format
         fmt = QTextCharFormat()
         fmt.setBackground(HighlightStyle.BACKGROUND)
         if HighlightStyle.FOREGROUND:
@@ -369,14 +406,13 @@ class LogView(QWidget):
             fmt.setFontWeight(QFont.Weight.Bold)
 
         doc = self._edit.document()
-        sels = []
-        first_block = None
+        sels: list[QTextEdit.ExtraSelection] = []
+
+        # 1) Current-frame line highlights
         for li in line_idxs:
             block = doc.findBlockByNumber(li)
             if not block.isValid():
                 continue
-            if first_block is None:
-                first_block = block
             sel = QTextEdit.ExtraSelection()
             sel.format = fmt
             cursor = QTextCursor(block)
@@ -384,13 +420,23 @@ class LogView(QWidget):
                                 QTextCursor.MoveMode.KeepAnchor)
             sel.cursor = cursor
             sels.append(sel)
-        self._edit.setExtraSelections(sels)
 
-        # Scroll to first highlighted line
-        if first_block is not None:
-            cursor = QTextCursor(first_block)
-            self._edit.setTextCursor(cursor)
-            self._edit.centerCursor()
+        # 2) Highlight all occurrences of the persisted search text
+        selected = self._search_text
+        if len(selected) >= 2:
+            search_fmt = QTextCharFormat()
+            search_fmt.setBackground(self.SEARCH_HIGHLIGHT)
+            cursor = QTextCursor(doc)
+            while True:
+                cursor = doc.find(selected, cursor)
+                if cursor.isNull():
+                    break
+                sel = QTextEdit.ExtraSelection()
+                sel.format = search_fmt
+                sel.cursor = cursor
+                sels.append(sel)
+
+        self._edit.setExtraSelections(sels)
 
 
 # ===========================================================================
