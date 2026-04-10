@@ -91,7 +91,8 @@ PLAYBACK_INTERVAL_MS = 50
 CAMERA_HFOV_DEG = 120.0   # horizontal full field-of-view
 CAMERA_VFOV_DEG = 90.0   # vertical full field-of-view
 CAMERA_PYRAMID_LEN = 50  # visual length of the pyramid (metres)
-CAMERA_COLOR = (0.5, 0.5, 0.5, 0.05)  # grey, semi-transparent
+CAMERA_COLOR = (1,   0.5, 0.5, 0.1)
+GROUND_COLOR = (0.2, 1, 0.2, 0.3) #
 
 
 # ===========================================================================
@@ -653,23 +654,20 @@ class TelemetryView(QWidget):
             cx, cy, cz, up[0], up[1], up[2],
             color="orange", arrow_length_ratio=0.15, lw=2.0)
 
-        # Camera FOV pyramid — tip at normal endpoint, base extends outward
+        # Camera FOV pyramid — tip at drone centre, extends along body -Z (up)
         if self._cam_polys is not None:
             self._cam_polys.remove()
             self._cam_polys = None
-        # tip = np.array([cx, cy, cz]) + up  # tip = normal endpoint
-        tip = np.array([0, 0, 0])
+        tip = np.array([cx, cy, cz])  # drone centre = base of normal
         L = CAMERA_PYRAMID_LEN
         hh = L * math.tan(math.radians(CAMERA_HFOV_DEG / 2))
         hv = L * math.tan(math.radians(CAMERA_VFOV_DEG / 2))
         # Base corners in FRD: camera looks along -Z, X=forward, Y=right
-        # Offset from body centre along -Z by (normal_len + pyramid_len)
-        d = ARM_LEN * 1.5 + L
         base_frd = np.array([
-            [-hv, -hh, -d],
-            [-hv,  hh, -d],
-            [ hv,  hh, -d],
-            [ hv, -hh, -d],
+            [-hv, -hh, -L],
+            [-hv,  hh, -L],
+            [ hv,  hh, -L],
+            [ hv, -hh, -L],
         ])
         base_ned = _quat_rotate_array(p.quaternion, base_frd)
         base_plot = _ned_array_to_plot(base_ned) + np.array([cx, cy, cz])
@@ -682,7 +680,7 @@ class TelemetryView(QWidget):
             [b[0], b[1], b[2], b[3]],
         ]
         self._cam_polys = Poly3DCollection(
-            faces, color=CAMERA_COLOR, edgecolor=(0.4, 0.4, 0.4, 0.3),
+            faces, color=CAMERA_COLOR, edgecolor=(0.4, 0.4, 0.4, 0.1),
             linewidth=0.5, zorder=4)
         self._ax.add_collection3d(self._cam_polys)
 
