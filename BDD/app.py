@@ -326,7 +326,7 @@ def main():
         'pd_coeff_p_dynamic_stage_2_ratio': 1,
         'pd_coeff_p_dynamic_stage_3_ratio': 1,
 
-        'frame_angular_size_deg' : XY(120, 100),
+        'frame_angular_size_deg' : XY(107, 85),
         'target_size_m' : XY(0.4, 0.4),
 
         'inertia_correction_gain' : 0,

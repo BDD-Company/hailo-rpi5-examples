@@ -95,8 +95,8 @@ PLAYBACK_INTERVAL_MS = 50
 
 # Camera FOV pyramid — camera points along body -Z (up from drone back).
 # Tip sits at the normal endpoint; base extends outward.
-CAMERA_HFOV_DEG = 120.0   # horizontal full field-of-view
-CAMERA_VFOV_DEG = 90.0   # vertical full field-of-view
+CAMERA_HFOV_DEG = 107.0   # horizontal full field-of-view
+CAMERA_VFOV_DEG = 85.0   # vertical full field-of-view
 CAMERA_PYRAMID_LEN = 50  # visual length of the pyramid (metres)
 CAMERA_COLOR =       (1,    0.5,  0.5,  0.1 )
 GROUND_COLOR =       (0.2,  1,    0.2,  0.3 )
