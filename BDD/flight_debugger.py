@@ -12,6 +12,7 @@ Usage:
 """
 
 import bisect
+import math
 import os
 import sys
 import re
@@ -73,7 +74,7 @@ FRAME_RE = re.compile(r"frame=#(\d+)")
 _FULL_WIDTH_SELECTION = 0x06010
 
 # Drone body geometry (FRD frame)
-ARM_LEN = 0.8
+ARM_LEN = 5
 BODY_VERTS_FRD = np.array([
     [ ARM_LEN, 0.0, 0.0], [-ARM_LEN, 0.0, 0.0],
     [0.0,  ARM_LEN, 0.0], [0.0, -ARM_LEN, 0.0],
@@ -84,6 +85,13 @@ BODY_VERTS_FRD = np.array([
 
 VECTOR_SCALE = {"vel": 3.0, "acc": 0.3, "mag": 8.0}
 PLAYBACK_INTERVAL_MS = 50
+
+# Camera FOV pyramid — camera points along body -Z (up from drone back).
+# Tip sits at the normal endpoint; base extends outward.
+CAMERA_HFOV_DEG = 120.0   # horizontal full field-of-view
+CAMERA_VFOV_DEG = 90.0   # vertical full field-of-view
+CAMERA_PYRAMID_LEN = 50  # visual length of the pyramid (metres)
+CAMERA_COLOR = (0.5, 0.5, 0.5, 0.05)  # grey, semi-transparent
 
 
 # ===========================================================================
@@ -558,6 +566,8 @@ class TelemetryView(QWidget):
         self._quiv_vel = None
         self._quiv_acc = None
         self._quiv_mag = None
+        self._quiv_normal = None
+        self._cam_polys = None
 
         # Axis limits
         pad = 3.0
@@ -578,6 +588,7 @@ class TelemetryView(QWidget):
             Line2D([0], [0], color="green", lw=2, label="Velocity"),
             Line2D([0], [0], color="red", lw=2, label="Acceleration"),
             Line2D([0], [0], color="dodgerblue", lw=2, label="Mag. bearing"),
+            Line2D([0], [0], color="orange", lw=2, label="Body normal (up)"),
             Line2D([0], [0], color="steelblue", lw=1.5, label="Past trail"),
         ], loc="upper right", fontsize=7)
 
@@ -616,7 +627,7 @@ class TelemetryView(QWidget):
         self._ax.add_collection3d(self._nose_poly)
 
         # Remove old quiver arrows
-        for q in (self._quiv_vel, self._quiv_acc, self._quiv_mag):
+        for q in (self._quiv_vel, self._quiv_acc, self._quiv_mag, self._quiv_normal):
             if q is not None:
                 q.remove()
 
@@ -634,6 +645,46 @@ class TelemetryView(QWidget):
         self._quiv_mag = self._ax.quiver(
             cx, cy, cz, m[0], m[1], m[2],
             color="dodgerblue", arrow_length_ratio=0.15, lw=1.8)
+
+        # Body-normal (FRD "up" = 0, 0, -1) rotated to NED then plot coords
+        nn, ne, nd = rotate_frd_to_ned(p.quaternion, 0.0, 0.0, -1.0)
+        up = np.array(_ned_to_plot(nn, ne, nd)) * ARM_LEN * 1.5
+        self._quiv_normal = self._ax.quiver(
+            cx, cy, cz, up[0], up[1], up[2],
+            color="orange", arrow_length_ratio=0.15, lw=2.0)
+
+        # Camera FOV pyramid — tip at normal endpoint, base extends outward
+        if self._cam_polys is not None:
+            self._cam_polys.remove()
+            self._cam_polys = None
+        # tip = np.array([cx, cy, cz]) + up  # tip = normal endpoint
+        tip = np.array([0, 0, 0])
+        L = CAMERA_PYRAMID_LEN
+        hh = L * math.tan(math.radians(CAMERA_HFOV_DEG / 2))
+        hv = L * math.tan(math.radians(CAMERA_VFOV_DEG / 2))
+        # Base corners in FRD: camera looks along -Z, X=forward, Y=right
+        # Offset from body centre along -Z by (normal_len + pyramid_len)
+        d = ARM_LEN * 1.5 + L
+        base_frd = np.array([
+            [-hv, -hh, -d],
+            [-hv,  hh, -d],
+            [ hv,  hh, -d],
+            [ hv, -hh, -d],
+        ])
+        base_ned = _quat_rotate_array(p.quaternion, base_frd)
+        base_plot = _ned_array_to_plot(base_ned) + np.array([cx, cy, cz])
+        b = base_plot
+        faces = [
+            [tip, b[0], b[1]],
+            [tip, b[1], b[2]],
+            [tip, b[2], b[3]],
+            [tip, b[3], b[0]],
+            [b[0], b[1], b[2], b[3]],
+        ]
+        self._cam_polys = Poly3DCollection(
+            faces, color=CAMERA_COLOR, edgecolor=(0.4, 0.4, 0.4, 0.3),
+            linewidth=0.5, zorder=4)
+        self._ax.add_collection3d(self._cam_polys)
 
         # Info overlay
         ref = self._frames[0].pose
