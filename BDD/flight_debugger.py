@@ -892,24 +892,37 @@ class FlightDebugger(QWidget):
         # ---- layout: splitters ----
         vid_title = f"Video — {video_path.name}" if video_path else "Video"
 
+        self._settings = QSettings("FlightDebugger", "FlightDebugger")
+
         # Top row: video | telemetry (horizontal splitter)
-        top_split = QSplitter(Qt.Orientation.Horizontal)
-        top_split.addWidget(_titled(vid_title, self._video_view))
-        top_split.addWidget(_titled("Telemetry 3D", self._telem_view))
-        top_split.setSizes([1, 1])   # equal 50/50
+        self._top_split = QSplitter(Qt.Orientation.Horizontal)
+        self._top_split.addWidget(_titled(vid_title, self._video_view))
+        self._top_split.addWidget(_titled("Telemetry 3D", self._telem_view))
 
         # Main: top_split / log (vertical splitter)
-        main_split = QSplitter(Qt.Orientation.Vertical)
-        main_split.addWidget(top_split)
-        main_split.addWidget(_titled(f"Log — {log_path.name}", self._log_view))
-        # main_split.setSizes([1, 1])   # equal 50/50
-        main_split.setStretchFactor(0, 2)   # top gets 4/5
-        main_split.setStretchFactor(1, 2)   # log gets 1/5
+        self._main_split = QSplitter(Qt.Orientation.Vertical)
+        self._main_split.addWidget(self._top_split)
+        self._main_split.addWidget(_titled(f"Log — {log_path.name}", self._log_view))
+
+        # Restore saved sizes or use defaults (50/50 top, 50/50 vertical)
+        saved_top = self._settings.value("top_split_sizes")
+        saved_main = self._settings.value("main_split_sizes")
+        if saved_top:
+            self._top_split.setSizes([int(s) for s in saved_top])
+        else:
+            self._top_split.setSizes([1, 1])
+        if saved_main:
+            self._main_split.setSizes([int(s) for s in saved_main])
+        else:
+            self._main_split.setSizes([1, 1])
+
+        # Save on every resize
+        self._top_split.splitterMoved.connect(self._save_splitter_sizes)
+        self._main_split.splitterMoved.connect(self._save_splitter_sizes)
 
         # Outer layout: main_split + nav bar
         outer = QVBoxLayout(self)
-        # outer.setContentsMargins(4, 4, 4, 4)
-        outer.addWidget(main_split, 1)
+        outer.addWidget(self._main_split, 1)
         outer.addWidget(self._nav, 0)
 
         # ---- connect views to controller ----
@@ -929,6 +942,10 @@ class FlightDebugger(QWidget):
         self._log_view.update_frame(0)
         self._video_view.update_frame(0)
         self._telem_view.update_frame(0)
+
+    def _save_splitter_sizes(self):
+        self._settings.setValue("top_split_sizes", self._top_split.sizes())
+        self._settings.setValue("main_split_sizes", self._main_split.sizes())
 
 
 # ===========================================================================
