@@ -83,6 +83,15 @@ BODY_VERTS_FRD = np.array([
     [ARM_LEN * 1.15, -0.08, 0.0],
 ])
 
+# Prop circles: unit circle in FRD body plane (Z=0), 24 segments
+PROP_RADIUS = ARM_LEN / 2
+_PROP_N = 24
+_prop_theta = np.linspace(0, 2 * np.pi, _PROP_N + 1)
+_PROP_UNIT_X = np.cos(_prop_theta) * PROP_RADIUS
+_PROP_UNIT_Y = np.sin(_prop_theta) * PROP_RADIUS
+# Arm tip centres in FRD: forward, back, right, left (indices 0-3 of BODY_VERTS_FRD)
+PROP_CENTRES_FRD = BODY_VERTS_FRD[:4]
+
 VECTOR_SCALE = {"vel": 3.0, "acc": 0.3, "mag": 8.0}
 PLAYBACK_INTERVAL_MS = 50
 
@@ -91,8 +100,10 @@ PLAYBACK_INTERVAL_MS = 50
 CAMERA_HFOV_DEG = 120.0   # horizontal full field-of-view
 CAMERA_VFOV_DEG = 90.0   # vertical full field-of-view
 CAMERA_PYRAMID_LEN = 50  # visual length of the pyramid (metres)
-CAMERA_COLOR = (1,   0.5, 0.5, 0.1)
-GROUND_COLOR = (0.2, 1, 0.2, 0.3) #
+CAMERA_COLOR =       (1,    0.5,  0.5,  0.1 )
+GROUND_COLOR =       (0.2,  1,    0.2,  0.3 )
+GROUND_EDGE_COLOR =  (0.2,  0.5,  0.2,  0.3 )
+GROUND_GRIND_COLOR = (0.2,  0.5,  0.2,  0.4 )
 
 
 # ===========================================================================
@@ -464,8 +475,9 @@ class VideoView(QWidget):
         lo.setContentsMargins(0, 0, 0, 0)
         self._label = QLabel("No video")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setSizePolicy(QSizePolicy.Policy.Expanding,
-                                  QSizePolicy.Policy.Expanding)
+        self._label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                  QSizePolicy.Policy.Ignored)
+        self._label.setMinimumSize(1, 1)
         self._label.setStyleSheet("background: black; color: white;")
         lo.addWidget(self._label)
 
@@ -563,6 +575,10 @@ class TelemetryView(QWidget):
         self._marker, = self._ax.plot([], [], [], "ko", ms=5, zorder=5)
         self._arm1, = self._ax.plot([], [], [], "-k", lw=2.5, zorder=6)
         self._arm2, = self._ax.plot([], [], [], "-k", lw=2.5, zorder=6)
+        self._prop_lines = [
+            self._ax.plot([], [], [], "-", color="0.35", lw=1.0, zorder=6)[0]
+            for _ in range(4)
+        ]
         self._nose_poly = None
         self._quiv_vel = None
         self._quiv_acc = None
@@ -585,20 +601,52 @@ class TelemetryView(QWidget):
         self._ax.set_title("Drone Telemetry")
         self._ax.view_init(elev=30, azim=45)
 
-        # Ground plane at z=0
-        x0, x1 = mid[0] - rng / 2, mid[0] + rng / 2
-        y0, y1 = mid[1] - rng / 2, mid[1] + rng / 2
+        # Ground plane at z=0 with cross-hatch grid
+        ground_scale = 0.6
+        x0, x1 = mid[0] - rng * ground_scale, mid[0] + rng * ground_scale
+        y0, y1 = mid[1] - rng * ground_scale, mid[1] + rng * ground_scale
         ground = Poly3DCollection(
             [[(x0, y0, 0), (x1, y0, 0), (x1, y1, 0), (x0, y1, 0)]],
             color=GROUND_COLOR, edgecolor=(0.2, 0.5, 0.2, 0.3),
             linewidth=0.5, zorder=0)
         self._ax.add_collection3d(ground)
 
+        # Diagonal cross-hatch lines
+        grid_step = max(1.0, round(rng * ground_scale * 2 / 10))
+        grid_color = (0.2, 0.5, 0.2, 0.25)
+        span = max(x1 - x0, y1 - y0)
+        for d in np.arange(-span, span + grid_step, grid_step):
+            # Lines along x+y = const (bottom-left to top-right)
+            lx0, ly0 = x0, x0 + d - x0  # y = d - x => at x=x0: y=d-x0
+            lx1, ly1 = x1, d - x1
+            lx0, ly0, lx1, ly1 = np.clip([lx0, ly0, lx1, ly1],
+                                          [x0, y0, x0, y0], [x1, y1, x1, y1])
+            # Clip: solve for intersections with box edges
+            pts = []
+            for bx, by in [(x0, d - x0), (x1, d - x1),
+                           (d - y0, y0), (d - y1, y1)]:
+                if x0 <= bx <= x1 and y0 <= by <= y1:
+                    pts.append((bx, by))
+            if len(pts) >= 2:
+                self._ax.plot([pts[0][0], pts[1][0]],
+                              [pts[0][1], pts[1][1]], [0, 0],
+                              "-", color=grid_color, lw=0.4, zorder=0)
+            # Lines along x-y = const (top-left to bottom-right)
+            pts2 = []
+            for bx, by in [(x0, x0 - d), (x1, x1 - d),
+                           (d + y0, y0), (d + y1, y1)]:
+                if x0 <= bx <= x1 and y0 <= by <= y1:
+                    pts2.append((bx, by))
+            if len(pts2) >= 2:
+                self._ax.plot([pts2[0][0], pts2[1][0]],
+                              [pts2[0][1], pts2[1][1]], [0, 0],
+                              "-", color=grid_color, lw=0.4, zorder=0)
+
         self._ax.legend(handles=[
             Line2D([0], [0], color="green", lw=2, label="Velocity"),
             Line2D([0], [0], color="red", lw=2, label="Acceleration"),
             Line2D([0], [0], color="dodgerblue", lw=2, label="Mag. bearing"),
-            Line2D([0], [0], color="orange", lw=2, label="Body normal (up)"),
+            # Line2D([0], [0], color="orange", lw=2, label="Body normal (up)"),
             Line2D([0], [0], color="steelblue", lw=1.5, label="Past trail"),
         ], loc="upper right", fontsize=7)
 
@@ -629,6 +677,19 @@ class TelemetryView(QWidget):
         self._arm2.set_data_3d(
             [pv[2, 0], pv[3, 0]], [pv[2, 1], pv[3, 1]], [pv[2, 2], pv[3, 2]])
 
+        # Prop circles at each arm tip
+        for pi in range(4):
+            centre = PROP_CENTRES_FRD[pi]
+            # Circle points in FRD body plane (Z=0), centred at arm tip
+            circle_frd = np.column_stack([
+                centre[0] + _PROP_UNIT_X,
+                centre[1] + _PROP_UNIT_Y,
+                np.zeros(_PROP_N + 1),
+            ])
+            circle_ned = _quat_rotate_array(p.quaternion, circle_frd)
+            cp = _ned_array_to_plot(circle_ned) + self._pos[idx]
+            self._prop_lines[pi].set_data_3d(cp[:, 0], cp[:, 1], cp[:, 2])
+
         # Nose triangle
         if self._nose_poly is not None:
             self._nose_poly.remove()
@@ -656,12 +717,12 @@ class TelemetryView(QWidget):
             cx, cy, cz, m[0], m[1], m[2],
             color="dodgerblue", arrow_length_ratio=0.15, lw=1.8)
 
-        # Body-normal (FRD "up" = 0, 0, -1) rotated to NED then plot coords
-        nn, ne, nd = rotate_frd_to_ned(p.quaternion, 0.0, 0.0, -1.0)
-        up = np.array(_ned_to_plot(nn, ne, nd)) * ARM_LEN * 1.5
-        self._quiv_normal = self._ax.quiver(
-            cx, cy, cz, up[0], up[1], up[2],
-            color="orange", arrow_length_ratio=0.15, lw=2.0)
+        # # Body-normal (FRD "up" = 0, 0, -1) rotated to NED then plot coords
+        # nn, ne, nd = rotate_frd_to_ned(p.quaternion, 0.0, 0.0, -1.0)
+        # up = np.array(_ned_to_plot(nn, ne, nd)) * ARM_LEN * 1.5
+        # self._quiv_normal = self._ax.quiver(
+        #     cx, cy, cz, up[0], up[1], up[2],
+        #     color="orange", arrow_length_ratio=0.15, lw=2.0)
 
         # Camera FOV pyramid — tip at drone centre, extends along body -Z (up)
         if self._cam_polys is not None:
@@ -842,12 +903,13 @@ class FlightDebugger(QWidget):
         main_split = QSplitter(Qt.Orientation.Vertical)
         main_split.addWidget(top_split)
         main_split.addWidget(_titled(f"Log — {log_path.name}", self._log_view))
-        main_split.setStretchFactor(0, 4)   # top gets 4/5
-        main_split.setStretchFactor(1, 1)   # log gets 1/5
+        # main_split.setSizes([1, 1])   # equal 50/50
+        main_split.setStretchFactor(0, 2)   # top gets 4/5
+        main_split.setStretchFactor(1, 2)   # log gets 1/5
 
         # Outer layout: main_split + nav bar
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(4, 4, 4, 4)
+        # outer.setContentsMargins(4, 4, 4, 4)
         outer.addWidget(main_split, 1)
         outer.addWidget(self._nav, 0)
 
