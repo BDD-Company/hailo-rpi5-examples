@@ -498,7 +498,8 @@ class DraggableInfoBox(QLabel):
     def __init__(self, parent: QWidget):
         super().__init__(parent)
         self.setStyleSheet(
-            "background: rgba(255,255,255,210); border: 1px solid #888;"
+            "background: rgba(255,255,255,210); color: #000000;"
+            "border: 1px solid #888;"
             "padding: 6px; font-family: monospace; font-size: 10px;"
         )
         self.setWordWrap(False)
