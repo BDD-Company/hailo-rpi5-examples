@@ -585,6 +585,15 @@ class TelemetryView(QWidget):
         self._ax.set_title("Drone Telemetry")
         self._ax.view_init(elev=30, azim=45)
 
+        # Ground plane at z=0
+        x0, x1 = mid[0] - rng / 2, mid[0] + rng / 2
+        y0, y1 = mid[1] - rng / 2, mid[1] + rng / 2
+        ground = Poly3DCollection(
+            [[(x0, y0, 0), (x1, y0, 0), (x1, y1, 0), (x0, y1, 0)]],
+            color=GROUND_COLOR, edgecolor=(0.2, 0.5, 0.2, 0.3),
+            linewidth=0.5, zorder=0)
+        self._ax.add_collection3d(ground)
+
         self._ax.legend(handles=[
             Line2D([0], [0], color="green", lw=2, label="Velocity"),
             Line2D([0], [0], color="red", lw=2, label="Acceleration"),
