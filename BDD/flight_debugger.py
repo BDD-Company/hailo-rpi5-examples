@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QSlider, QLabel, QPlainTextEdit, QTextEdit,
     QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QPoint
+from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal, QObject, QPoint
 from PyQt6.QtGui import (
     QImage, QPixmap, QTextCursor, QTextCharFormat, QColor, QFont,
     QAction, QShortcut, QKeySequence,
@@ -70,8 +70,6 @@ class HighlightStyle:
 
 FRAME_RE = re.compile(r"frame=#(\d+)")
 
-# Qt property id for full-width extra-selection highlight
-_FULL_WIDTH_SELECTION = 0x06010
 
 # Drone body geometry (FRD frame)
 ARM_LEN = 5
@@ -92,7 +90,7 @@ _PROP_UNIT_Y = np.sin(_prop_theta) * PROP_RADIUS
 # Arm tip centres in FRD: forward, back, right, left (indices 0-3 of BODY_VERTS_FRD)
 PROP_CENTRES_FRD = BODY_VERTS_FRD[:4]
 
-VECTOR_SCALE = {"vel": 3.0, "acc": 0.3, "mag": 8.0}
+VECTOR_SCALE = {"vel": 1, "acc": 1, "mag": 8.0}
 PLAYBACK_INTERVAL_MS = 50
 
 # Camera FOV pyramid — camera points along body -Z (up from drone back).
@@ -645,7 +643,7 @@ class TelemetryView(QWidget):
         self._ax.legend(handles=[
             Line2D([0], [0], color="green", lw=2, label="Velocity"),
             Line2D([0], [0], color="red", lw=2, label="Acceleration"),
-            Line2D([0], [0], color="dodgerblue", lw=2, label="Mag. bearing"),
+            # Line2D([0], [0], color="dodgerblue", lw=2, label="Mag. bearing"),
             # Line2D([0], [0], color="orange", lw=2, label="Body normal (up)"),
             Line2D([0], [0], color="steelblue", lw=1.5, label="Past trail"),
         ], loc="upper right", fontsize=7)
@@ -712,10 +710,11 @@ class TelemetryView(QWidget):
             cx, cy, cz, a[0], a[1], a[2],
             color="red", arrow_length_ratio=0.15, lw=1.8)
 
-        m = self._mag[idx] * VECTOR_SCALE["mag"]
-        self._quiv_mag = self._ax.quiver(
-            cx, cy, cz, m[0], m[1], m[2],
-            color="dodgerblue", arrow_length_ratio=0.15, lw=1.8)
+        # magnetic bearing
+        # m = self._mag[idx] * VECTOR_SCALE["mag"]
+        # self._quiv_mag = self._ax.quiver(
+        #     cx, cy, cz, m[0], m[1], m[2],
+        #     color="dodgerblue", arrow_length_ratio=0.15, lw=1.8)
 
         # # Body-normal (FRD "up" = 0, 0, -1) rotated to NED then plot coords
         # nn, ne, nd = rotate_frd_to_ned(p.quaternion, 0.0, 0.0, -1.0)
