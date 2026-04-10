@@ -334,10 +334,12 @@ def main():
 
         'safe_takeoff_period_ns': 300_000_000,
 
-        'aim_point': XY(0.5, 0.6),
+        'aim_point': XY(0.5, 0.5),
 
         'DEBUG': DEBUG
     }
+
+    logger.info("!!! Config: %s", control_config)
 
     action_thread = None
     if app.options_menu.action == 'platform':
