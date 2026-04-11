@@ -308,7 +308,7 @@ def precompute_telemetry(frames: list[FramePose]):
             an, ae, ad = rotate_frd_to_ned(
                 p.quaternion, p.acceleration.forward_m_s2,
                 p.acceleration.right_m_s2, p.acceleration.down_m_s2)
-            acc[i] = _ned_to_plot(an, ae, ad)
+            acc[i] = _ned_to_plot(-an, -ae, -ad)
         if p.magnetic_field:
             mn, me, md = rotate_frd_to_ned(
                 p.quaternion, p.magnetic_field.forward_gauss,
