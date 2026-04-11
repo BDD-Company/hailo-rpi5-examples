@@ -329,10 +329,12 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
         'target_size_m' : XY(0.4, 0.4),
 
-        'inertia_correction_gain' : 0,
+        'inertia_correction_gain' : 10,
+        'inertia_correction_gain_limits': XY(.5, .5),
         'inertia_correction_lookahead_frames' : 2,
 
         'safe_takeoff_period_ns': 300_000_000,
+        'delay_takeof_until_n_detection_frames' : 3,
 
         'aim_point': XY(0.5, 0.5),
 

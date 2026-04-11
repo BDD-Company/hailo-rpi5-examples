@@ -194,6 +194,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
 
     INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
+    INERTIA_CORRECTION_GAIN_LIMITS : XY = control_config.pop('inertia_correction_gain_limits', XY(1, 1))
+
     INERTIA_CORRECTION_LOOKAHEAD_FRAMES = control_config.pop('inertia_correction_lookahead_frames', 2)
 
     ESTIMATION_LOOKAHEAD_FRAMES         = control_config.pop('estimation_lookahead_frames', 2)
@@ -201,6 +203,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
+
+    DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.pop('delay_takeof_until_n_detection_frames', 3)
 
     AIM_POINT = control_config.pop('aim_point', XY(0.5, 0.5))
     aim_point = AIM_POINT
@@ -520,6 +524,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         INERTIA_CORRECTION_LOOKAHEAD_FRAMES,
                         FRAME_ANGLUAR_SIZE_DEG, INERTIA_CORRECTION_GAIN
                     )
+
+                    # clamping to the limits
+                    inertia_correction = XY(
+                        clamp(-INERTIA_CORRECTION_GAIN_LIMITS.x, inertia_correction.x, INERTIA_CORRECTION_GAIN_LIMITS.x),
+                        clamp(-INERTIA_CORRECTION_GAIN_LIMITS.y, inertia_correction.y, INERTIA_CORRECTION_GAIN_LIMITS.y)
+                    )
                     extra += f'inertia correction gain: {INERTIA_CORRECTION_GAIN} val: {inertia_correction}'
                     target_relative_pos = target_relative_pos - inertia_correction
                     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
@@ -592,13 +602,17 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 #         logger.warning("Too steep atack close to the ground %s, clamping to %s ", angle_to_target, new_angle_to_target)
                 #         angle_to_target = new_angle_to_target
 
-                await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
                 debug_info["mode"] = mode
+                if not moving and target_estimator.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES:
+                    logger.warning("Delaying takeoff for %s frames (now have %s)", DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES, target_estimator.history_size())
+                    pass
+                else:
+                    await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
+                    moving = True
 
-                moving = True
-                if takeoff_time_ns is None:
-                    takeoff_time_ns = time.monotonic_ns()
-                    # logger.info("!!! IN AIR since: %s", takeoff_time_ns)
+                    if takeoff_time_ns is None:
+                        takeoff_time_ns = time.monotonic_ns()
+                        # logger.info("!!! IN AIR since: %s", takeoff_time_ns)
 
             else:
                 if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES and target_estimator.history_size() > 0:
