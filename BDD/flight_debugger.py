@@ -29,7 +29,7 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QGroupBox,
     QPushButton, QSlider, QLabel, QPlainTextEdit, QTextEdit,
-    QSizePolicy,
+    QSizePolicy, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal, QObject, QPoint
 from PyQt6.QtGui import (
@@ -582,7 +582,36 @@ class TelemetryView(QWidget):
 
         self._fig = Figure(figsize=(8, 6), dpi=100)
         self._canvas = FigureCanvasQTAgg(self._fig)
-        lo.addWidget(self._canvas)
+        lo.addWidget(self._canvas, 1)
+
+        # ---- vector visibility controls ----
+        self._show_velocity = True
+        self._show_acceleration = True
+        self._show_target = True
+        self._drone_view = False
+        self._saved_view = None
+        self._last_idx = 0
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(4, 0, 4, 2)
+        self._cb_vel = QCheckBox("Velocity")
+        self._cb_vel.setChecked(True)
+        self._cb_acc = QCheckBox("Acceleration")
+        self._cb_acc.setChecked(True)
+        self._cb_target = QCheckBox("Target")
+        self._cb_target.setChecked(True)
+        self._cb_drone_view = QCheckBox("Drone View")
+        self._cb_drone_view.setChecked(False)
+        for cb in (self._cb_vel, self._cb_acc, self._cb_target, self._cb_drone_view):
+            cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            controls.addWidget(cb)
+        controls.addStretch()
+        lo.addLayout(controls)
+
+        self._cb_vel.toggled.connect(lambda c: self._toggle("_show_velocity", c))
+        self._cb_acc.toggled.connect(lambda c: self._toggle("_show_acceleration", c))
+        self._cb_target.toggled.connect(lambda c: self._toggle("_show_target", c))
+        self._cb_drone_view.toggled.connect(self._on_toggle_drone_view)
 
         self._ax = self._fig.add_subplot(111, projection="3d")
 
@@ -682,7 +711,39 @@ class TelemetryView(QWidget):
 
     # -----------------------------------------------------------------
 
+    _TOGGLE_TO_QUIV = {
+        "_show_velocity": "_quiv_vel",
+        "_show_acceleration": "_quiv_acc",
+        "_show_target": "_quiv_target",
+    }
+
+    def _toggle(self, attr: str, checked: bool):
+        setattr(self, attr, checked)
+        q = getattr(self, self._TOGGLE_TO_QUIV[attr])
+        if q is not None:
+            q.set_visible(checked)
+        self._canvas.draw_idle()
+
+    def _on_toggle_drone_view(self, checked: bool):
+        if checked:
+            self._saved_view = (
+                self._ax.elev, self._ax.azim,
+                self._ax.get_xlim(), self._ax.get_ylim(), self._ax.get_zlim(),
+            )
+            self._drone_view = True
+            self.update_frame(self._last_idx)
+        else:
+            self._drone_view = False
+            if self._saved_view:
+                elev, azim, xlim, ylim, zlim = self._saved_view
+                self._ax.view_init(elev=elev, azim=azim)
+                self._ax.set_xlim(xlim)
+                self._ax.set_ylim(ylim)
+                self._ax.set_zlim(zlim)
+            self._canvas.draw_idle()
+
     def update_frame(self, idx: int):
+        self._last_idx = idx
         fp = self._frames[idx]
         p = fp.pose
         cx, cy, cz = self._pos[idx]
@@ -722,11 +783,15 @@ class TelemetryView(QWidget):
             [pv[[0, 5, 6]]], color="red", alpha=0.8, zorder=7)
         self._ax.add_collection3d(self._nose_poly)
 
-        # Remove old quiver arrows
-        for q in (self._quiv_vel, self._quiv_acc, self._quiv_mag, self._quiv_normal, self._quiv_front, self._quiv_target):
+        # Remove old quiver arrows and camera polys
+        for attr in ("_quiv_vel", "_quiv_acc", "_quiv_front", "_quiv_target"):
+            q = getattr(self, attr)
             if q is not None:
-                q.remove()
-        self._quiv_target = None
+                q.set_visible(False)
+                setattr(self, attr, None)
+        if self._cam_polys is not None:
+            self._cam_polys.remove()
+            self._cam_polys = None
 
         # Front direction arrow (FRD +X projected onto body plane)
         fwd_frd = np.array([[ARM_LEN * 0.5, 0.0, 0.0]])
@@ -736,40 +801,25 @@ class TelemetryView(QWidget):
             cx, cy, cz, f[0], f[1], f[2],
             color="black", arrow_length_ratio=0.25, lw=3, zorder=7)
 
-        #Velocity
+        # Velocity
         v = self._vel[idx] * VECTOR_SCALE["vel"]
         self._quiv_vel = self._ax.quiver(
             cx, cy, cz, v[0], v[1], v[2],
             color=VELOCITY_ARROW_COLOR, arrow_length_ratio=0.15, lw=1.8)
+        self._quiv_vel.set_visible(self._show_velocity)
 
         # Acceleration
         a = self._acc[idx] * VECTOR_SCALE["acc"]
         self._quiv_acc = self._ax.quiver(
             cx, cy, cz, a[0], a[1], a[2],
             color=ACCELERATION_ARROW_COLOR, arrow_length_ratio=0.15, lw=1.8)
-
-        # magnetic bearing
-        # m = self._mag[idx] * VECTOR_SCALE["mag"]
-        # self._quiv_mag = self._ax.quiver(
-        #     cx, cy, cz, m[0], m[1], m[2],
-        #     color="dodgerblue", arrow_length_ratio=0.15, lw=1.8)
-
-        # # Body-normal (FRD "up" = 0, 0, -1) rotated to NED then plot coords
-        # nn, ne, nd = rotate_frd_to_ned(p.quaternion, 0.0, 0.0, -1.0)
-        # up = np.array(_ned_to_plot(nn, ne, nd)) * ARM_LEN * 1.5
-        # self._quiv_normal = self._ax.quiver(
-        #     cx, cy, cz, up[0], up[1], up[2],
-        #     color="orange", arrow_length_ratio=0.15, lw=2.0)
+        self._quiv_acc.set_visible(self._show_acceleration)
 
         # Camera FOV pyramid — tip at drone centre, extends along body -Z (up)
-        if self._cam_polys is not None:
-            self._cam_polys.remove()
-            self._cam_polys = None
-        tip = np.array([cx, cy, cz])  # drone centre = base of normal
+        tip = np.array([cx, cy, cz])
         L = CAMERA_PYRAMID_LEN
         hh = L * math.tan(math.radians(CAMERA_HFOV_DEG / 2))
         hv = L * math.tan(math.radians(CAMERA_VFOV_DEG / 2))
-        # Base corners in FRD: camera looks along -Z, X=forward, Y=right
         base_frd = np.array([
             [-hv, -hh, -L],
             [-hv,  hh, -L],
@@ -795,14 +845,13 @@ class TelemetryView(QWidget):
         target = self._target_xy.get(fp.frame_id)
         if target is not None:
             tx, ty = target
-            # Map normalized frame coords to FRD direction on camera plane
-            # Frame X: -left/+right → FRD Y; Frame Y: -front/+back → FRD -X
             target_frd = np.array([[-ty * 2 * hv, -tx * 2 * hh, -L]])
             target_ned = _quat_rotate_array(p.quaternion, target_frd)
             t = _ned_array_to_plot(target_ned)[0]
             self._quiv_target = self._ax.quiver(
                 cx, cy, cz, t[0], t[1], t[2],
                 color=TARGET_COLOR, arrow_length_ratio=0.05, lw=2.0)
+            self._quiv_target.set_visible(self._show_target)
 
         # Info overlay
         ref = self._frames[0].pose
@@ -820,6 +869,16 @@ class TelemetryView(QWidget):
             f"|V|={vel_m:.2f} m/s  |A|={acc_m:.2f} m/s\u00b2"
         )
         self._info.adjustSize()
+
+        # Drone-view: camera follows behind drone
+        if self._drone_view:
+            view_range = 30
+            self._ax.set_xlim(cx - view_range, cx + view_range)
+            self._ax.set_ylim(cy - view_range, cy + view_range)
+            self._ax.set_zlim(cz - view_range, cz + view_range)
+            # Plot coords: X=East, Y=North; yaw=0 → north (+Y)
+            azim = -p.orientation.yaw_deg - 90
+            self._ax.view_init(elev=20, azim=azim)
 
         self._canvas.draw_idle()
 
