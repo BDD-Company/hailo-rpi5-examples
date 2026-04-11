@@ -1013,6 +1013,8 @@ def main():
                         help="Video file or directory of MP4s")
     parser.add_argument("--video-offset", type=int, default=0,
                         help="Video frame offset: video_idx = frame_idx + offset")
+    parser.add_argument("--allow-no-video", type=bool, default=False,
+                        help="Do not error if video can't be loaded")
     args = parser.parse_args()
 
     print(f"Loading log: {args.log_file}")
@@ -1032,7 +1034,11 @@ def main():
         else:
             print("  WARNING: could not detect video start time; using frame offset")
     else:
-        print("  (no video)")
+        if args.allow_no_video:
+            print("  (no video)")
+        else:
+            print(f"Can't load video from {args.video}")
+            sys.exit(-1)
 
     app = QApplication(sys.argv)
     win = FlightDebugger(frames, log_lines, frame_to_lines,
