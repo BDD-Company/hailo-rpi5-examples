@@ -69,16 +69,23 @@ class HighlightStyle:
 # ===========================================================================
 
 FRAME_RE = re.compile(r"frame=#(\d+)")
+TARGET_RE = re.compile(r"frame=#(\d+).*?!!! target : XY\(([^,]+),\s*([^)]+)\)")
 
 
-# Drone body geometry (FRD frame)
+# Drone body geometry (FRD frame) — arms at 45° for X-shaped quad
 ARM_LEN = 5
+_R45 = math.sqrt(2) / 2
+_D = ARM_LEN * _R45          # arm component along each axis
+_ND = ARM_LEN * 1.15 * _R45  # nose tip along arm direction
+_NP = 0.08 * _R45            # nose tip perpendicular offset
 BODY_VERTS_FRD = np.array([
-    [ ARM_LEN, 0.0, 0.0], [-ARM_LEN, 0.0, 0.0],
-    [0.0,  ARM_LEN, 0.0], [0.0, -ARM_LEN, 0.0],
-    [0.0, 0.0, 0.0],
-    [ARM_LEN * 1.15,  0.08, 0.0],
-    [ARM_LEN * 1.15, -0.08, 0.0],
+    [ _D,  _D, 0.0],                   # 0: front-right arm tip
+    [-_D, -_D, 0.0],                   # 1: back-left arm tip
+    [-_D,  _D, 0.0],                   # 2: back-right arm tip
+    [ _D, -_D, 0.0],                   # 3: front-left arm tip
+    [0.0, 0.0, 0.0],                   # 4: centre
+    [_ND - _NP, _ND + _NP, 0.0],      # 5: nose marker
+    [_ND + _NP, _ND - _NP, 0.0],      # 6: nose marker
 ])
 
 # Prop circles: unit circle in FRD body plane (Z=0), 24 segments
@@ -91,17 +98,20 @@ _PROP_UNIT_Y = np.sin(_prop_theta) * PROP_RADIUS
 PROP_CENTRES_FRD = BODY_VERTS_FRD[:4]
 
 VECTOR_SCALE = {"vel": 1, "acc": 1, "mag": 8.0}
+TARGET_COLOR = (0.0, 0.75, 0.75)  # cyan/teal
 PLAYBACK_INTERVAL_MS = 50
 
 # Camera FOV pyramid — camera points along body -Z (up from drone back).
 # Tip sits at the normal endpoint; base extends outward.
 CAMERA_HFOV_DEG = 107.0   # horizontal full field-of-view
 CAMERA_VFOV_DEG = 85.0   # vertical full field-of-view
-CAMERA_PYRAMID_LEN = 50  # visual length of the pyramid (metres)
+CAMERA_PYRAMID_LEN = 10  # visual length of the pyramid (metres)
 CAMERA_COLOR =       (1,    0.5,  0.5,  0.1 )
 GROUND_COLOR =       (0.2,  1,    0.2,  0.3 )
 GROUND_EDGE_COLOR =  (0.2,  0.5,  0.2,  0.3 )
 GROUND_GRIND_COLOR = (0.2,  0.5,  0.2,  0.4 )
+VELOCITY_ARROW_COLOR = "green"
+ACCELERATION_ARROW_COLOR = "red"
 
 
 # ===========================================================================
@@ -138,6 +148,18 @@ def parse_log_lines(path: Path) -> tuple[list[str], dict[int, list[int]]]:
         if m:
             frame_to_lines.setdefault(int(m.group(1)), []).append(i)
     return lines, frame_to_lines
+
+
+def parse_target_xy(lines: list[str]) -> dict[int, tuple[float, float]]:
+    """Extract target XY per frame from log lines containing '!!! target'."""
+    targets: dict[int, tuple[float, float]] = {}
+    for line in lines:
+        m = TARGET_RE.search(line)
+        if m:
+            fid = int(m.group(1))
+            x, y = float(m.group(2)), float(m.group(3))
+            targets[fid] = (x, y)
+    return targets
 
 
 class VideoReader:
@@ -545,13 +567,15 @@ class DraggableInfoBox(QLabel):
 class TelemetryView(QWidget):
     """Matplotlib-based 3-D visualisation of the drone state."""
 
-    def __init__(self, frames: list[FramePose], pos, vel, acc, mag):
+    def __init__(self, frames: list[FramePose], pos, vel, acc, mag,
+                 target_xy: dict[int, tuple[float, float]]):
         super().__init__()
         self._frames = frames
         self._pos = pos
         self._vel = vel
         self._acc = acc
         self._mag = mag
+        self._target_xy = target_xy
 
         lo = QVBoxLayout(self)
         lo.setContentsMargins(0, 0, 0, 0)
@@ -582,6 +606,8 @@ class TelemetryView(QWidget):
         self._quiv_acc = None
         self._quiv_mag = None
         self._quiv_normal = None
+        self._quiv_front = None
+        self._quiv_target = None
         self._cam_polys = None
 
         # Axis limits
@@ -641,8 +667,9 @@ class TelemetryView(QWidget):
                               "-", color=grid_color, lw=0.4, zorder=0)
 
         self._ax.legend(handles=[
-            Line2D([0], [0], color="green", lw=2, label="Velocity"),
-            Line2D([0], [0], color="red", lw=2, label="Acceleration"),
+            Line2D([0], [0], color=ACCELERATION_ARROW_COLOR, lw=2, label="Velocity"),
+            Line2D([0], [0], color=ACCELERATION_ARROW_COLOR, lw=2, label="Acceleration"),
+            Line2D([0], [0], color=TARGET_COLOR, lw=2, label="Target"),
             # Line2D([0], [0], color="dodgerblue", lw=2, label="Mag. bearing"),
             # Line2D([0], [0], color="orange", lw=2, label="Body normal (up)"),
             Line2D([0], [0], color="steelblue", lw=1.5, label="Past trail"),
@@ -696,19 +723,30 @@ class TelemetryView(QWidget):
         self._ax.add_collection3d(self._nose_poly)
 
         # Remove old quiver arrows
-        for q in (self._quiv_vel, self._quiv_acc, self._quiv_mag, self._quiv_normal):
+        for q in (self._quiv_vel, self._quiv_acc, self._quiv_mag, self._quiv_normal, self._quiv_front, self._quiv_target):
             if q is not None:
                 q.remove()
+        self._quiv_target = None
 
+        # Front direction arrow (FRD +X projected onto body plane)
+        fwd_frd = np.array([[ARM_LEN * 0.5, 0.0, 0.0]])
+        fwd_ned = _quat_rotate_array(p.quaternion, fwd_frd)
+        f = _ned_array_to_plot(fwd_ned)[0]
+        self._quiv_front = self._ax.quiver(
+            cx, cy, cz, f[0], f[1], f[2],
+            color="black", arrow_length_ratio=0.25, lw=3, zorder=7)
+
+        #Velocity
         v = self._vel[idx] * VECTOR_SCALE["vel"]
         self._quiv_vel = self._ax.quiver(
             cx, cy, cz, v[0], v[1], v[2],
-            color="green", arrow_length_ratio=0.15, lw=1.8)
+            color=VELOCITY_ARROW_COLOR, arrow_length_ratio=0.15, lw=1.8)
 
+        # Acceleration
         a = self._acc[idx] * VECTOR_SCALE["acc"]
         self._quiv_acc = self._ax.quiver(
             cx, cy, cz, a[0], a[1], a[2],
-            color="red", arrow_length_ratio=0.15, lw=1.8)
+            color=ACCELERATION_ARROW_COLOR, arrow_length_ratio=0.15, lw=1.8)
 
         # magnetic bearing
         # m = self._mag[idx] * VECTOR_SCALE["mag"]
@@ -752,6 +790,19 @@ class TelemetryView(QWidget):
             faces, color=CAMERA_COLOR, edgecolor=(0.4, 0.4, 0.4, 0.1),
             linewidth=0.5, zorder=4)
         self._ax.add_collection3d(self._cam_polys)
+
+        # Target direction vector
+        target = self._target_xy.get(fp.frame_id)
+        if target is not None:
+            tx, ty = target
+            # Map normalized frame coords to FRD direction on camera plane
+            # Frame X: -left/+right → FRD Y; Frame Y: -front/+back → FRD -X
+            target_frd = np.array([[-ty * 2 * hv, -tx * 2 * hh, -L]])
+            target_ned = _quat_rotate_array(p.quaternion, target_frd)
+            t = _ned_array_to_plot(target_ned)[0]
+            self._quiv_target = self._ax.quiver(
+                cx, cy, cz, t[0], t[1], t[2],
+                color=TARGET_COLOR, arrow_length_ratio=0.05, lw=2.0)
 
         # Info overlay
         ref = self._frames[0].pose
@@ -885,7 +936,8 @@ class FlightDebugger(QWidget):
         self._video_view = VideoView(video)
 
         pos, vel, acc, mag = precompute_telemetry(frames)
-        self._telem_view = TelemetryView(frames, pos, vel, acc, mag)
+        target_xy = parse_target_xy(log_lines)
+        self._telem_view = TelemetryView(frames, pos, vel, acc, mag, target_xy)
 
         self._nav = NavigationBar(self._ctrl, frames)
 
