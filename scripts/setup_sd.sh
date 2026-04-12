@@ -156,11 +156,10 @@ mount_partitions() {
 
 # -- Boot config (cmdline.txt + config.txt) ------------------------------------
 configure_boot() {
-    local bootfs="$1"
-    local perf_opts="$2"
+    local perf_opts="$1"
 
     # Extract PARTUUID from the image's own cmdline.txt — must not be hardcoded.
-    local cmdline_src="$bootfs/cmdline.txt"
+    local cmdline_src="$BOOTFS/cmdline.txt"
     [[ ! -f "$cmdline_src" ]] && \
         die "$cmdline_src not found — is this a valid RPi OS image?"
     local partuuid
@@ -172,11 +171,11 @@ configure_boot() {
     # cmdline.txt — must be a single line.
     step "Writing cmdline.txt..."
     printf 'console=tty1 root=PARTUUID=%s rootfstype=ext4 fsck.repair=yes rootwait elevator=deadline isolcpus=2 quiet splash plymouth.ignore-serial-consoles cfg80211.ieee80211_regdom=PL quiet\n' \
-        "$partuuid" | sudo tee "$bootfs/cmdline.txt" > /dev/null
+        "$partuuid" | sudo tee "$BOOTFS/cmdline.txt" > /dev/null
 
     # config.txt — main body.
     step "Writing config.txt..."
-    sudo tee "$bootfs/config.txt" > /dev/null <<'ENDMAIN'
+    sudo tee "$BOOTFS/config.txt" > /dev/null <<'ENDMAIN'
 # For more options and information see http://rptl.io/configtxt
 
 # Enable audio (loads snd_bcm2835)
@@ -230,7 +229,7 @@ ENDMAIN
 
     # config.txt — optional performance block.
     if $perf_opts; then
-        sudo tee -a "$bootfs/config.txt" > /dev/null <<'ENDPERF'
+        sudo tee -a "$BOOTFS/config.txt" > /dev/null <<'ENDPERF'
 
 # -- Performance optimizations (disable with --no-perf) ------------------------
 # Hold CPU at maximum frequency — prevents latency spikes from frequency scaling.
@@ -240,11 +239,11 @@ over_voltage_delta=50000
 ENDPERF
     else
         printf '\n# Performance optimizations disabled (--no-perf)\n' \
-            | sudo tee -a "$bootfs/config.txt" > /dev/null
+            | sudo tee -a "$BOOTFS/config.txt" > /dev/null
     fi
 
     # config.txt — board-specific sections.
-    sudo tee -a "$bootfs/config.txt" > /dev/null <<'ENDBOARDS'
+    sudo tee -a "$BOOTFS/config.txt" > /dev/null <<'ENDBOARDS'
 
 [cm4]
 # Enable host-mode XHCI USB on CM4
@@ -255,25 +254,24 @@ dtoverlay=dwc2,dr_mode=host
 ENDBOARDS
 }
 
+
+
 # -- User setup (userconf + SSH key) ------------------------------------------
 configure_user() {
-    local bootfs="$1"
-    local rootfs="$2"
-
     # userconf.txt — creates user 'bdd' with password '1111' on first boot.
     step "Writing userconf.txt (user: bdd / password: 1111)..."
-    printf '%s\n' "$USERCONF_LINE" | sudo tee "$bootfs/userconf.txt" > /dev/null
+    printf '%s\n' "$USERCONF_LINE" | sudo tee "$BOOTFS/userconf.txt" > /dev/null
 }
 
 configure_ssh() {
     # Enable SSH.
     step "Enabling SSH..."
-    sudo touch "$bootfs/ssh"
+    sudo touch "$BOOTFS/ssh"
 
     # SSH authorized_keys — collect all public keys from the host's ~/.ssh/*.pub
     # and write them to the SD card. Fall back to the hardcoded key if none found.
     # First user on RPi OS is always UID/GID 1000.
-    local bdd_ssh="$rootfs/home/bdd/.ssh"
+    local bdd_ssh="$ROOTFS/home/bdd/.ssh"
     sudo mkdir -p "$bdd_ssh"
 
     local host_ssh_dir
@@ -289,28 +287,27 @@ configure_ssh() {
         printf '%s\n' "$SSH_PUBKEY" | sudo tee "$bdd_ssh/authorized_keys" > /dev/null
     fi
 
-    sudo chown -R 1000:1000 "$rootfs/home/bdd"
+    sudo chown -R 1000:1000 "$ROOTFS/home/bdd"
     sudo chmod 700 "$bdd_ssh"
     sudo chmod 600 "$bdd_ssh/authorized_keys"
 
     # Allow password-based SSH login.
     # RPi OS ships with PasswordAuthentication no; override via drop-in.
     step "Enabling password SSH authentication..."
-    sudo mkdir -p "$rootfs/etc/ssh/sshd_config.d"
-    sudo tee "$rootfs/etc/ssh/sshd_config.d/10-allow-password.conf" > /dev/null <<'ENDSSH'
+    sudo mkdir -p "$ROOTFS/etc/ssh/sshd_config.d"
+    sudo tee "$ROOTFS/etc/ssh/sshd_config.d/10-allow-password.conf" > /dev/null <<'ENDSSH'
 PasswordAuthentication yes
 ENDSSH
 }
 
 # -- Network config (static IP + WiFi) ----------------------------------------
 configure_network() {
-    local rootfs="$1"
-    local static_ip="$2"
-    local gateway="$3"
+    local static_ip="$1"
+    local gateway="$2"
 
     step "Configuring static IP: $static_ip, gateway: $gateway ..."
-    sudo mkdir -p "$rootfs/etc/network/interfaces.d"
-    sudo tee "$rootfs/etc/network/interfaces.d/eth0" > /dev/null <<ENDETH
+    sudo mkdir -p "$ROOTFS/etc/network/interfaces.d"
+    sudo tee "$ROOTFS/etc/network/interfaces.d/eth0" > /dev/null <<ENDETH
 allow-hotplug eth0
 iface eth0 inet static
 address ${static_ip}
@@ -324,10 +321,10 @@ ENDETH
 # host, presents a numbered selection menu, then writes a wpa_supplicant.conf
 # to the SD rootfs for the chosen networks.
 configure_wifi() {
-    local rootfs="$1"
+    local mode="${1:-interactive}"   # "auto" = last 7 days, no prompt
 
     # Collect WiFi connections sorted by timestamp descending, newest first.
-    # nmcli outputs: TIMESTAMP:NAME  (tab-separated when -t is used)
+    # nmcli outputs: TYPE:TIMESTAMP:NAME  (colon-separated with -t)
     local -a names timestamps
     while IFS=: read -r _type ts name; do
         names+=("$name")
@@ -342,25 +339,51 @@ configure_wifi() {
         return
     fi
 
-    # Show selection menu.
-    echo ""
-    echo "-- WiFi networks (most recent first) ----------------------------------------"
-    local i
-    for (( i=0; i<${#names[@]}; i++ )); do
-        # Convert epoch timestamp to human-readable date.
-        local ts_human
-        ts_human=$(date -d "@${timestamps[$i]}" '+%Y-%m-%d %H:%M' 2>/dev/null \
-                   || echo "unknown date")
-        printf "  [%2d] %s\t\t\t(%s)\n" $(( i+1 )) "${names[$i]}" "$ts_human"
-    done
-    echo "-----------------------------------------------------------------------------"
-    echo "  Enter numbers separated by spaces, or press Enter to skip."
-    read -rp "  Selection: " selection
+    # Build the list of selected indices (0-based).
+    local -a selected=()
 
-    [[ -z "$selection" ]] && { echo "  Skipping WiFi config."; return; }
+    if [[ "$mode" == "auto" ]]; then
+        # Non-interactive: pick all networks used in the last 7 days.
+        local cutoff
+        cutoff=$(date -d '7 days ago' +%s)
+        local i
+        for (( i=0; i<${#names[@]}; i++ )); do
+            (( timestamps[i] >= cutoff )) && selected+=("$i")
+        done
+        if [[ ${#selected[@]} -eq 0 ]]; then
+            echo "  No WiFi networks used in the last 7 days — skipping WiFi config."
+            return
+        fi
+        step "Auto-selecting ${#selected[@]} WiFi network(s) used in the last 7 days."
+    else
+        # Interactive: show selection menu.
+        echo ""
+        echo "-- WiFi networks (most recent first) ----------------------------------------"
+        local i
+        for (( i=0; i<${#names[@]}; i++ )); do
+            local ts_human
+            ts_human=$(date -d "@${timestamps[$i]}" '+%Y-%m-%d %H:%M' 2>/dev/null \
+                       || echo "unknown date")
+            printf "  [%2d] %s\t\t\t(%s)\n" $(( i+1 )) "${names[$i]}" "$ts_human"
+        done
+        echo "-----------------------------------------------------------------------------"
+        echo "  Enter numbers separated by spaces, or press Enter to skip."
+        read -rp "  Selection: " selection
+
+        [[ -z "$selection" ]] && { echo "  Skipping WiFi config."; return; }
+
+        for token in $selection; do
+            if ! [[ "$token" =~ ^[0-9]+$ ]] || (( token < 1 || token > ${#names[@]} )); then
+                echo "  WARNING: '$token' is not a valid selection — skipped."
+                continue
+            fi
+            selected+=("$(( token - 1 ))")
+        done
+        [[ ${#selected[@]} -eq 0 ]] && { echo "  No valid networks selected — skipping WiFi config."; return; }
+    fi
 
     # Build wpa_supplicant.conf on the rootfs.
-    local wpa_conf="$rootfs/etc/wpa_supplicant/wpa_supplicant.conf"
+    local wpa_conf="$ROOTFS/etc/wpa_supplicant/wpa_supplicant.conf"
     sudo mkdir -p "$(dirname "$wpa_conf")"
     sudo tee "$wpa_conf" > /dev/null <<'ENDWPA'
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
@@ -370,13 +393,7 @@ country=PL
 ENDWPA
 
     local copied=0
-    for token in $selection; do
-        # Validate input is a number in range.
-        if ! [[ "$token" =~ ^[0-9]+$ ]] || (( token < 1 || token > ${#names[@]} )); then
-            echo "  WARNING: '$token' is not a valid selection — skipped."
-            continue
-        fi
-        local idx=$(( token - 1 ))
+    for idx in "${selected[@]}"; do
         local ssid="${names[$idx]}"
 
         # Extract PSK via nmcli (requires root; the script already runs as root).
@@ -404,11 +421,11 @@ ENDNET
     if (( copied > 0 )); then
         sudo chmod 600 "$wpa_conf"
         # Enable wpa_supplicant for wlan0 via systemd symlink.
-        local systemd_wpa="$rootfs/etc/systemd/system/multi-user.target.wants"
+        local systemd_wpa="$ROOTFS/etc/systemd/system/multi-user.target.wants"
         sudo mkdir -p "$systemd_wpa"
         local svc_src="/lib/systemd/system/wpa_supplicant@.service"
         local svc_dst="$systemd_wpa/wpa_supplicant@wlan0.service"
-        [[ -f "$rootfs$svc_src" ]] && \
+        [[ -f "$ROOTFS$svc_src" ]] && \
             sudo ln -sf "$svc_src" "$svc_dst" 2>/dev/null || true
         step "$copied WiFi network(s) written to wpa_supplicant.conf."
     else
@@ -506,20 +523,43 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate --only value.
+# Validate and resolve --only value (allows partial names without 'configure_' prefix).
+ONLY_FUNCS=(flash_sd configure_boot configure_user configure_ssh configure_network configure_wifi configure_px4)
 if [[ -n "$ONLY" ]]; then
-    case "$ONLY" in
-        flash_sd|configure_boot|configure_user|configure_ssh|configure_network|configure_wifi|configure_px4) ;;
-        *) die "--only: unknown function '$ONLY'. Valid values: flash_sd configure_boot configure_user configure_ssh configure_network configure_wifi configure_px4" ;;
-    esac
+    resolved=""
+    # 1. Exact match.
+    for f in "${ONLY_FUNCS[@]}"; do
+        [[ "$f" == "$ONLY" ]] && { resolved="$f"; break; }
+    done
+    # 2. Match with configure_ prefix.
+    if [[ -z "$resolved" ]]; then
+        for f in "${ONLY_FUNCS[@]}"; do
+            [[ "$f" == "configure_$ONLY" ]] && { resolved="$f"; break; }
+        done
+    fi
+    # 3. Substring match (input appears anywhere in function name).
+    if [[ -z "$resolved" ]]; then
+        local_matches=()
+        for f in "${ONLY_FUNCS[@]}"; do
+            [[ "$f" == *"$ONLY"* ]] && local_matches+=("$f")
+        done
+        if [[ ${#local_matches[@]} -eq 1 ]]; then
+            resolved="${local_matches[0]}"
+        elif [[ ${#local_matches[@]} -gt 1 ]]; then
+            die "--only='$ONLY' is ambiguous — matches: ${local_matches[*]}"
+        fi
+    fi
+    [[ -z "$resolved" ]] && \
+        die "--only: no match for '$ONLY'. Valid values: ${ONLY_FUNCS[*]}"
+    ONLY="$resolved"
 fi
 
 [[ -z "$DEVICE" ]]   && { echo "Error: device not specified."; usage; }
 [[ ! -b "$DEVICE" ]] && die "'$DEVICE' is not a block device."
 
 # -- Main ----------------------------------------------------------------------
-BOOTFS=$(mktemp -d /tmp/rpi-bootfs-XXXXXX)
-ROOTFS=$(mktemp -d /tmp/rpi-rootfs-XXXXXX)
+readonly BOOTFS=$(mktemp -d /tmp/rpi-bootfs-XXXXXX)
+readonly ROOTFS=$(mktemp -d /tmp/rpi-rootfs-XXXXXX)
 trap cleanup EXIT
 
 if [[ -n "$ONLY" ]]; then
@@ -529,37 +569,37 @@ if [[ -n "$ONLY" ]]; then
             ;;
         configure_boot)
             mount_partitions "$DEVICE"
-            configure_boot "$BOOTFS" "$PERF_OPTS"
+            configure_boot "$PERF_OPTS"
             ;;
         configure_user)
             mount_partitions "$DEVICE"
-            configure_user "$BOOTFS" "$ROOTFS"
+            configure_user
             ;;
         configure_ssh)
             mount_partitions "$DEVICE"
-            configure_user "$BOOTFS" "$ROOTFS"
+            configure_ssh
             ;;
         configure_network)
             mount_partitions "$DEVICE"
-            configure_network "$ROOTFS" "$STATIC_IP" "$GATEWAY"
+            configure_network "$STATIC_IP" "$GATEWAY"
             ;;
         configure_wifi)
             mount_partitions "$DEVICE"
-            configure_wifi "$ROOTFS"
+            configure_wifi
             ;;
         configure_px4)
             mount_partitions "$DEVICE"
-            configure_px4 "$ROOTFS"
+            configure_px4
             ;;
     esac
 else
     flash_sd          "$DEVICE" "$IMAGE"
-    configure_boot    "$BOOTFS" "$PERF_OPTS"
-    configure_user    "$BOOTFS" "$ROOTFS"
-    configure_ssh     "$BOOTFS" "$ROOTFS"
-    configure_network "$ROOTFS" "$STATIC_IP" "$GATEWAY"
-    configure_wifi    "$ROOTFS"
-    configure_px4     "$ROOTFS"
+    configure_boot    "$PERF_OPTS"
+    configure_user
+    configure_ssh
+    configure_network "$STATIC_IP" "$GATEWAY"
+    configure_wifi    auto
+    # configure_px4     "$ROOTFS"
 fi
 
 step "Syncing and unmounting..."
@@ -567,8 +607,6 @@ sync
 cleanup
 
 trap - EXIT
-BOOTFS=""
-ROOTFS=""
 
 echo ""
 if [[ -n "$ONLY" ]]; then
