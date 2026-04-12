@@ -292,12 +292,14 @@ configure_ssh() {
     sudo chmod 600 "$bdd_ssh/authorized_keys"
 
     # Allow password-based SSH login.
-    # RPi OS ships with PasswordAuthentication no; override via drop-in.
+    # RPi OS ships with PasswordAuthentication no; override via drop-in and main config.
     step "Enabling password SSH authentication..."
     sudo mkdir -p "$ROOTFS/etc/ssh/sshd_config.d"
     sudo tee "$ROOTFS/etc/ssh/sshd_config.d/10-allow-password.conf" > /dev/null <<'ENDSSH'
 PasswordAuthentication yes
 ENDSSH
+    sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' \
+        "$ROOTFS/etc/ssh/sshd_config"
 }
 
 # -- Network config (static IP + WiFi) ----------------------------------------
