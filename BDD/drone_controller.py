@@ -236,7 +236,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     if DEBUG:
         await drone.startup_sequence(1, force_arm=True)
     else:
-        await drone.startup_sequence(100)
+        await drone.startup_sequence(100_000)
 
     logger.debug("drone started")
 
@@ -371,7 +371,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 elif skipped_detetions > 30:
                     await drone.idle()
 
-                logger.warning("No frames (%d times), no detections, input queue empty? ACTION: %s", skipped_detetions, drone.last_command())
+                if skipped_detetions > 4:
+                    logger.warning("No frames (%d times), no detections, input queue empty? prev action: %s", skipped_detetions, drone.last_command())
+
                 continue
             except:
                 logger.exception("Serious error getting next detection from a queue", exc_info=True)
