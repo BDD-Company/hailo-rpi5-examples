@@ -116,7 +116,7 @@ def compute_inertia_correction(telemetry_dict, frame_dt_ns, lookahead_frames, fo
 
     return XY(
         (linear_x + angular_x) * gain,
-        (linear_y + angular_y) * gain * -1,
+        (linear_y + angular_y) * gain,
     )
 
 
@@ -527,13 +527,14 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         FRAME_ANGLUAR_SIZE_DEG, INERTIA_CORRECTION_GAIN
                     )
 
+                    logger.info("inertia correction before clamping: %s", inertia_correction)
                     # clamping to the limits
                     inertia_correction = XY(
                         clamp(-INERTIA_CORRECTION_GAIN_LIMITS.x, inertia_correction.x, INERTIA_CORRECTION_GAIN_LIMITS.x),
                         clamp(-INERTIA_CORRECTION_GAIN_LIMITS.y, inertia_correction.y, INERTIA_CORRECTION_GAIN_LIMITS.y)
                     )
                     extra += f'inertia correction gain: {INERTIA_CORRECTION_GAIN} val: {inertia_correction}'
-                    target_relative_pos = target_relative_pos - inertia_correction
+                    target_relative_pos = target_relative_pos + inertia_correction
                     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 
                 distance_to_center = target_relative_pos.distance_to(AIM_POINT)
