@@ -29,7 +29,7 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QGroupBox,
     QPushButton, QSlider, QLabel, QPlainTextEdit, QTextEdit,
-    QSizePolicy, QCheckBox,
+    QSizePolicy, QCheckBox, QSpinBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal, QObject, QPoint
 from PyQt6.QtGui import (
@@ -107,7 +107,7 @@ CAMERA_HFOV_DEG = 107.0   # horizontal full field-of-view
 CAMERA_VFOV_DEG = 85.0   # vertical full field-of-view
 CAMERA_PYRAMID_LEN = 10  # visual length of the pyramid (metres)
 CAMERA_COLOR =       (1,    0.5,  0.5,  0.1 )
-GROUND_COLOR =       (0.2,  1,    0.2,  0.3 )
+GROUND_COLOR =       (0.2,  1,    0.2,  0.1 )
 GROUND_EDGE_COLOR =  (0.2,  0.5,  0.2,  0.3 )
 GROUND_GRIND_COLOR = (0.2,  0.5,  0.2,  0.4 )
 VELOCITY_ARROW_COLOR = "green"
@@ -382,7 +382,7 @@ class LogView(QWidget):
     """Scrollable log with current-frame lines highlighted."""
 
     # Customize the colour used to highlight text-search matches
-    SEARCH_HIGHLIGHT = QColor(200, 100, 255, 90)   # soft purple
+    SEARCH_HIGHLIGHT = QColor(200, 100, 255, 200)   # soft purple
 
     def __init__(self, lines: list[str], frame_to_lines: dict[int, list[int]],
                  frames: list[FramePose]):
@@ -602,10 +602,24 @@ class TelemetryView(QWidget):
         self._cb_target.setChecked(True)
         self._cb_drone_view = QCheckBox("Drone View")
         self._cb_drone_view.setChecked(False)
+
         for cb in (self._cb_vel, self._cb_acc, self._cb_target, self._cb_drone_view):
             cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             controls.addWidget(cb)
+
         controls.addStretch()
+
+        self._camera_pyramid_len = CAMERA_PYRAMID_LEN
+        lbl_pyr = QLabel("Pyramid len:")
+        self._spin_pyramid = QSpinBox()
+        self._spin_pyramid.setRange(1, 100)
+        self._spin_pyramid.setValue(CAMERA_PYRAMID_LEN)
+        self._spin_pyramid.setSingleStep(1)
+        self._spin_pyramid.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._spin_pyramid.valueChanged.connect(self._on_pyramid_len_changed)
+        controls.addWidget(lbl_pyr)
+        controls.addWidget(self._spin_pyramid)
+
         lo.addLayout(controls)
 
         self._cb_vel.toggled.connect(lambda c: self._toggle("_show_velocity", c))
@@ -651,7 +665,7 @@ class TelemetryView(QWidget):
         self._ax.set_xlabel("East (m)")
         self._ax.set_ylabel("North (m)")
         self._ax.set_zlabel("Up (m)")
-        self._ax.set_title("Drone Telemetry")
+        # self._ax.set_title("Drone Telemetry")
         self._ax.view_init(elev=30, azim=45)
 
         # Ground plane at z=0 with cross-hatch grid
@@ -696,7 +710,7 @@ class TelemetryView(QWidget):
                               "-", color=grid_color, lw=0.4, zorder=0)
 
         self._ax.legend(handles=[
-            Line2D([0], [0], color=ACCELERATION_ARROW_COLOR, lw=2, label="Velocity"),
+            Line2D([0], [0], color=VELOCITY_ARROW_COLOR, lw=2, label="Velocity"),
             Line2D([0], [0], color=ACCELERATION_ARROW_COLOR, lw=2, label="Acceleration"),
             Line2D([0], [0], color=TARGET_COLOR, lw=2, label="Target"),
             # Line2D([0], [0], color="dodgerblue", lw=2, label="Mag. bearing"),
@@ -724,10 +738,15 @@ class TelemetryView(QWidget):
             q.set_visible(checked)
         self._canvas.draw_idle()
 
+    def _on_pyramid_len_changed(self, value: int):
+        self._camera_pyramid_len = value
+        self.update_frame(self._last_idx)
+
     def _on_toggle_drone_view(self, checked: bool):
         if checked:
             self._saved_view = (
                 self._ax.elev, self._ax.azim,
+                getattr(self._ax, 'roll', 0),
                 self._ax.get_xlim(), self._ax.get_ylim(), self._ax.get_zlim(),
             )
             self._drone_view = True
@@ -735,8 +754,8 @@ class TelemetryView(QWidget):
         else:
             self._drone_view = False
             if self._saved_view:
-                elev, azim, xlim, ylim, zlim = self._saved_view
-                self._ax.view_init(elev=elev, azim=azim)
+                elev, azim, roll, xlim, ylim, zlim = self._saved_view
+                self._ax.view_init(elev=elev, azim=azim, roll=roll)
                 self._ax.set_xlim(xlim)
                 self._ax.set_ylim(ylim)
                 self._ax.set_zlim(zlim)
@@ -817,7 +836,7 @@ class TelemetryView(QWidget):
 
         # Camera FOV pyramid — tip at drone centre, extends along body -Z (up)
         tip = np.array([cx, cy, cz])
-        L = CAMERA_PYRAMID_LEN
+        L = self._camera_pyramid_len
         hh = L * math.tan(math.radians(CAMERA_HFOV_DEG / 2))
         hv = L * math.tan(math.radians(CAMERA_VFOV_DEG / 2))
         base_frd = np.array([
@@ -870,15 +889,15 @@ class TelemetryView(QWidget):
         )
         self._info.adjustSize()
 
-        # Drone-view: camera follows behind drone
+        # Drone-view: top-down, yaw-following
         if self._drone_view:
-            view_range = 30
+            azim = -p.orientation.yaw_deg - 90
+            self._ax.view_init(elev=90, azim=azim, roll=0)
+
+            view_range = self._camera_pyramid_len
             self._ax.set_xlim(cx - view_range, cx + view_range)
             self._ax.set_ylim(cy - view_range, cy + view_range)
             self._ax.set_zlim(cz - view_range, cz + view_range)
-            # Plot coords: X=East, Y=North; yaw=0 → north (+Y)
-            azim = -p.orientation.yaw_deg - 90
-            self._ax.view_init(elev=20, azim=azim)
 
         self._canvas.draw_idle()
 
