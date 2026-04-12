@@ -194,21 +194,21 @@ class VideoReader:
             cap = cv2.VideoCapture(str(f))
             if not cap.isOpened():
                 continue
-            n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            video_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             times: list[float] = []
-            if n <= 0:
+            if video_frame_count <= 0:
                 # MKV / unreliable count — scan and collect timestamps
                 while cap.grab():
                     times.append(cum_ms + cap.get(cv2.CAP_PROP_POS_MSEC))
-                n = len(times)
+                video_frame_count = len(times)
             else:
                 fps = cap.get(cv2.CAP_PROP_FPS)
                 if fps <= 0:
                     fps = 30.0
-                times = [cum_ms + i * 1000.0 / fps for i in range(n)]
+                times = [cum_ms + i * 1000.0 / fps for i in range(video_frame_count)]
             cap.release()
             self._files.append(f)
-            self._file_counts.append(n)
+            self._file_counts.append(video_frame_count)
             self._frame_times_ms.extend(times)
             if times:
                 cum_ms = times[-1] + (times[-1] - times[-2] if len(times) > 1 else 33.0)
@@ -587,6 +587,7 @@ class TelemetryView(QWidget):
         # ---- vector visibility controls ----
         self._show_velocity = True
         self._show_acceleration = True
+        self._show_normal = True
         self._show_target = True
         self._drone_view = False
         self._saved_view = None
@@ -598,19 +599,21 @@ class TelemetryView(QWidget):
         self._cb_vel.setChecked(True)
         self._cb_acc = QCheckBox("Acceleration")
         self._cb_acc.setChecked(True)
+        self._cb_normal = QCheckBox("Normal")
+        self._cb_normal.setChecked(True)
         self._cb_target = QCheckBox("Target")
         self._cb_target.setChecked(True)
         self._cb_drone_view = QCheckBox("Drone View")
         self._cb_drone_view.setChecked(False)
 
-        for cb in (self._cb_vel, self._cb_acc, self._cb_target, self._cb_drone_view):
+        for cb in (self._cb_vel, self._cb_acc, self._cb_normal, self._cb_target, self._cb_drone_view):
             cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             controls.addWidget(cb)
 
         controls.addStretch()
 
         self._camera_pyramid_len = CAMERA_PYRAMID_LEN
-        lbl_pyr = QLabel("Pyramid len:")
+        lbl_pyr = QLabel("Camera pyramid:")
         self._spin_pyramid = QSpinBox()
         self._spin_pyramid.setRange(1, 100)
         self._spin_pyramid.setValue(CAMERA_PYRAMID_LEN)
@@ -624,6 +627,7 @@ class TelemetryView(QWidget):
 
         self._cb_vel.toggled.connect(lambda c: self._toggle("_show_velocity", c))
         self._cb_acc.toggled.connect(lambda c: self._toggle("_show_acceleration", c))
+        self._cb_normal.toggled.connect(lambda c: self._toggle("_show_normal", c))
         self._cb_target.toggled.connect(lambda c: self._toggle("_show_target", c))
         self._cb_drone_view.toggled.connect(self._on_toggle_drone_view)
 
@@ -676,7 +680,7 @@ class TelemetryView(QWidget):
             [[(x0, y0, 0), (x1, y0, 0), (x1, y1, 0), (x0, y1, 0)]],
             color=GROUND_COLOR, edgecolor=(0.2, 0.5, 0.2, 0.3),
             linewidth=0.5, zorder=0)
-        self._ax.add_collection3d(ground)
+        self.ground_poly : Poly3DCollection = self._ax.add_collection3d(ground)
 
         # Diagonal cross-hatch lines
         grid_step = max(1.0, round(rng * ground_scale * 2 / 10))
@@ -710,12 +714,11 @@ class TelemetryView(QWidget):
                               "-", color=grid_color, lw=0.4, zorder=0)
 
         self._ax.legend(handles=[
-            Line2D([0], [0], color=VELOCITY_ARROW_COLOR, lw=2, label="Velocity"),
-            Line2D([0], [0], color=ACCELERATION_ARROW_COLOR, lw=2, label="Acceleration"),
-            Line2D([0], [0], color=TARGET_COLOR, lw=2, label="Target"),
+            Line2D([0], [0], color=VELOCITY_ARROW_COLOR, lw=3, label="Velocity"),
+            Line2D([0], [0], color=ACCELERATION_ARROW_COLOR, lw=3, label="Acceleration"),
+            Line2D([0], [0], color=TARGET_COLOR, lw=3, label="Target"),
             # Line2D([0], [0], color="dodgerblue", lw=2, label="Mag. bearing"),
-            # Line2D([0], [0], color="orange", lw=2, label="Body normal (up)"),
-            Line2D([0], [0], color="steelblue", lw=1.5, label="Past trail"),
+            Line2D([0], [0], color="steelblue", lw=3, label="Past trail"),
         ], loc="upper right", fontsize=7)
 
         try:
@@ -728,6 +731,7 @@ class TelemetryView(QWidget):
     _TOGGLE_TO_QUIV = {
         "_show_velocity": "_quiv_vel",
         "_show_acceleration": "_quiv_acc",
+        "_show_normal": "_quiv_normal",
         "_show_target": "_quiv_target",
     }
 
@@ -803,7 +807,7 @@ class TelemetryView(QWidget):
         self._ax.add_collection3d(self._nose_poly)
 
         # Remove old quiver arrows and camera polys
-        for attr in ("_quiv_vel", "_quiv_acc", "_quiv_front", "_quiv_target"):
+        for attr in ("_quiv_vel", "_quiv_acc", "_quiv_front", "_quiv_normal", "_quiv_target"):
             q = getattr(self, attr)
             if q is not None:
                 q.set_visible(False)
@@ -819,6 +823,16 @@ class TelemetryView(QWidget):
         self._quiv_front = self._ax.quiver(
             cx, cy, cz, f[0], f[1], f[2],
             color="black", arrow_length_ratio=0.25, lw=3, zorder=7)
+
+        # Body normal (FRD -Z = "up" from the drone)
+        normal_frd = np.array([[0.0, 0.0, -ARM_LEN * 0.5]])
+        normal_ned = _quat_rotate_array(p.quaternion, normal_frd)
+        normal_plot = _ned_array_to_plot(normal_ned)[0]
+        self._quiv_normal = self._ax.quiver(
+            cx, cy, cz, normal_plot[0], normal_plot[1], normal_plot[2],
+            color="purple", arrow_length_ratio=0.25, lw=2.5, zorder=7)
+        self._quiv_normal.set_visible(self._show_normal)
+        self._quiv_normal
 
         # Velocity
         v = self._vel[idx] * VECTOR_SCALE["vel"]
@@ -869,8 +883,13 @@ class TelemetryView(QWidget):
             t = _ned_array_to_plot(target_ned)[0]
             self._quiv_target = self._ax.quiver(
                 cx, cy, cz, t[0], t[1], t[2],
-                color=TARGET_COLOR, arrow_length_ratio=0.05, lw=2.0)
+                color=TARGET_COLOR, arrow_length_ratio=0.05, lw=4.0)
             self._quiv_target.set_visible(self._show_target)
+
+        # Body normal orientation (normal_plot is in plot coords: East, North, Up)
+        n_horiz = math.hypot(normal_plot[0], normal_plot[1])
+        normal_elev = math.degrees(math.atan2(normal_plot[2], n_horiz))
+        normal_azim = math.degrees(math.atan2(normal_plot[0], normal_plot[1])) % 360
 
         # Info overlay
         ref = self._frames[0].pose
@@ -885,19 +904,51 @@ class TelemetryView(QWidget):
             f"Yaw={p.orientation.yaw_deg:.1f}\u00b0  "
             f"Pitch={p.orientation.pitch_deg:.1f}\u00b0  "
             f"Roll={p.orientation.roll_deg:.1f}\u00b0\n"
+            # f"Normal: El={normal_elev:.1f}\u00b0  "
+            # f"Az={normal_azim:.1f}\u00b0\n"
             f"|V|={vel_m:.2f} m/s  |A|={acc_m:.2f} m/s\u00b2"
         )
         self._info.adjustSize()
 
-        # Drone-view: top-down, yaw-following
-        if self._drone_view:
-            azim = -p.orientation.yaw_deg - 90
-            self._ax.view_init(elev=90, azim=azim, roll=0)
+        # too much clutter in drone view
+        self.ground_poly.set_visible(not self._drone_view)
 
-            view_range = self._camera_pyramid_len
-            self._ax.set_xlim(cx - view_range, cx + view_range)
-            self._ax.set_ylim(cy - view_range, cy + view_range)
-            self._ax.set_zlim(cz - view_range, cz + view_range)
+        # Drone-view: camera looks through body +Z (down), forward points down
+        if self._drone_view:
+            # toward-eye = body normal (body -Z in FRD = up from drone)
+            n_unit = normal_plot / np.linalg.norm(normal_plot)
+
+            # Desired screen up = body -X (so body +X / forward points down)
+            up_n, up_e, up_d = rotate_frd_to_ned(p.quaternion, -1, 0, 0)
+            desired_up = np.array(_ned_to_plot(up_n, up_e, up_d), dtype=float)
+            desired_up -= np.dot(desired_up, n_unit) * n_unit
+            desired_up /= np.linalg.norm(desired_up)
+
+            # Replicate matplotlib's default view axes at roll=0
+            # (see proj3d.view_transformation: u=cross(V,n), v=cross(n,u))
+            world_up = np.array([0.0, 0.0,
+                                 -1.0 if normal_elev < -90 else 1.0])
+            u0 = np.cross(world_up, n_unit)            # default screen right
+            if np.linalg.norm(u0) < 1e-6:
+                u0 = np.cross(np.array([0.0, 1.0, 0.0]), n_unit)
+            u0 /= np.linalg.norm(u0)
+            v0 = np.cross(n_unit, u0)                  # default screen up
+
+            # Roll that rotates default up (v0) to desired_up around n_unit
+            roll = math.degrees(math.atan2(
+                -float(np.dot(desired_up, u0)),
+                float(np.dot(desired_up, v0))))
+
+            # matplotlib azim = atan2(North, East), not compass bearing
+            view_azim = math.degrees(math.atan2(normal_plot[1], normal_plot[0]))
+            self._ax.view_init(elev=normal_elev, azim=view_azim, roll=roll)
+
+            # Centre view along camera direction
+            center = np.array([cx, cy, cz]) + n_unit * CAMERA_PYRAMID_LEN * 0.5
+            view_range = CAMERA_PYRAMID_LEN * 0.7
+            self._ax.set_xlim(center[0] - view_range, center[0] + view_range)
+            self._ax.set_ylim(center[1] - view_range, center[1] + view_range)
+            self._ax.set_zlim(center[2] - view_range, center[2] + view_range)
 
         self._canvas.draw_idle()
 
@@ -972,7 +1023,7 @@ class NavigationBar(QWidget):
     def toggle_play(self):
         self._playing = not self._playing
         if self._playing:
-            self._btn_play.setText("\u23f8 Pause")
+            self._btn_play.setText("\u275A\u275A Pause")
             self._timer.start()
         else:
             self._btn_play.setText("\u25b6 Play")
