@@ -9,6 +9,7 @@ Three synchronized, dockable views:
 Usage:
     cd BDD
     python flight_debugger.py path/to/log_file.log [--video path/to/video.mp4]
+    python flight_debugger.py --dir path/to/_DEBUG_dir/
 """
 
 import bisect
@@ -29,7 +30,7 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QGroupBox,
     QPushButton, QSlider, QLabel, QPlainTextEdit, QTextEdit,
-    QSizePolicy, QCheckBox, QSpinBox,
+    QSizePolicy, QCheckBox, QSpinBox, QDialog, QListWidget,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal, QObject, QPoint
 from PyQt6.QtGui import (
@@ -42,6 +43,7 @@ matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from mpl_toolkits.mplot3d import proj3d
 from matplotlib.lines import Line2D
 
 from debug_telemetry_position import FramePose, parse_telemetry_log
@@ -170,7 +172,7 @@ class VideoReader:
     Supports timestamp-based frame lookup for log synchronization.
     """
 
-    def __init__(self, path: Path | None):
+    def __init__(self, path: Path | list[Path] | None):
         self._files: list[Path] = []
         self._file_counts: list[int] = []   # frames per file
         self._total = 0
@@ -184,11 +186,12 @@ class VideoReader:
 
         if path is None:
             return
-        files = (
-            sorted(path.glob("*.mp4")) + sorted(path.glob("*.mkv"))
-            if path.is_dir()
-            else [path] if path.exists() else []
-        )
+        if isinstance(path, list):
+            files = sorted(path)
+        elif path.is_dir():
+            files = sorted(path.glob("*.mp4")) + sorted(path.glob("*.mkv"))
+        else:
+            files = [path] if path.exists() else []
         cum_ms = 0.0
         for f in files:
             cap = cv2.VideoCapture(str(f))
@@ -648,7 +651,6 @@ class TelemetryView(QWidget):
             self._ax.plot([], [], [], "-", color="0.35", lw=1.0, zorder=6)[0]
             for _ in range(4)
         ]
-        self._nose_poly = None
         self._quiv_vel = None
         self._quiv_acc = None
         self._quiv_mag = None
@@ -799,12 +801,6 @@ class TelemetryView(QWidget):
             cp = _ned_array_to_plot(circle_ned) + self._pos[idx]
             self._prop_lines[pi].set_data_3d(cp[:, 0], cp[:, 1], cp[:, 2])
 
-        # Nose triangle
-        if self._nose_poly is not None:
-            self._nose_poly.remove()
-        self._nose_poly = Poly3DCollection(
-            [pv[[0, 5, 6]]], color="red", alpha=0.8, zorder=7)
-        self._ax.add_collection3d(self._nose_poly)
 
         # Remove old quiver arrows and camera polys
         for attr in ("_quiv_vel", "_quiv_acc", "_quiv_front", "_quiv_normal", "_quiv_target"):
@@ -830,9 +826,8 @@ class TelemetryView(QWidget):
         normal_plot = _ned_array_to_plot(normal_ned)[0]
         self._quiv_normal = self._ax.quiver(
             cx, cy, cz, normal_plot[0], normal_plot[1], normal_plot[2],
-            color="purple", arrow_length_ratio=0.25, lw=2.5, zorder=7)
+            color="black", arrow_length_ratio=0.25, lw=2.5, zorder=7)
         self._quiv_normal.set_visible(self._show_normal)
-        self._quiv_normal
 
         # Velocity
         v = self._vel[idx] * VECTOR_SCALE["vel"]
@@ -913,42 +908,46 @@ class TelemetryView(QWidget):
         # too much clutter in drone view
         self.ground_poly.set_visible(not self._drone_view)
 
-        # Drone-view: camera looks through body +Z (down), forward points down
+        # Drone-view: bypass elev/azim/roll — build view matrix directly from
+        # the camera pyramid body axes so the view is pixel-locked to them.
         if self._drone_view:
-            # toward-eye = body normal (body -Z in FRD = up from drone)
-            n_unit = normal_plot / np.linalg.norm(normal_plot)
-
-            # Desired screen up = body -X (so body +X / forward points down)
+            # Body axes in plot coords (East, North, Up)
+            # toward-eye  = body -Z  (normal, up from drone)
+            n_vec = normal_plot / np.linalg.norm(normal_plot)
+            # screen right = body -Y  (right-handed: u×v = n)
+            rt_n, rt_e, rt_d = rotate_frd_to_ned(p.quaternion, 0, -1, 0)
+            u_vec = np.array(_ned_to_plot(rt_n, rt_e, rt_d), dtype=float)
+            u_vec /= np.linalg.norm(u_vec)
+            # screen up    = body -X  (forward points down on screen)
             up_n, up_e, up_d = rotate_frd_to_ned(p.quaternion, -1, 0, 0)
-            desired_up = np.array(_ned_to_plot(up_n, up_e, up_d), dtype=float)
-            desired_up -= np.dot(desired_up, n_unit) * n_unit
-            desired_up /= np.linalg.norm(desired_up)
+            v_vec = np.array(_ned_to_plot(up_n, up_e, up_d), dtype=float)
+            v_vec /= np.linalg.norm(v_vec)
 
-            # Replicate matplotlib's default view axes at roll=0
-            # (see proj3d.view_transformation: u=cross(V,n), v=cross(n,u))
-            world_up = np.array([0.0, 0.0,
-                                 -1.0 if normal_elev < -90 else 1.0])
-            u0 = np.cross(world_up, n_unit)            # default screen right
-            if np.linalg.norm(u0) < 1e-6:
-                u0 = np.cross(np.array([0.0, 1.0, 0.0]), n_unit)
-            u0 /= np.linalg.norm(u0)
-            v0 = np.cross(n_unit, u0)                  # default screen up
-
-            # Roll that rotates default up (v0) to desired_up around n_unit
-            roll = math.degrees(math.atan2(
-                -float(np.dot(desired_up, u0)),
-                float(np.dot(desired_up, v0))))
-
-            # matplotlib azim = atan2(North, East), not compass bearing
-            view_azim = math.degrees(math.atan2(normal_plot[1], normal_plot[0]))
-            self._ax.view_init(elev=normal_elev, azim=view_azim, roll=roll)
-
-            # Centre view along camera direction
-            center = np.array([cx, cy, cz]) + n_unit * CAMERA_PYRAMID_LEN * 0.5
+            # Centre view along camera look direction (body +Z = down)
+            center = np.array([cx, cy, cz]) - n_vec * CAMERA_PYRAMID_LEN * 0.5
             view_range = CAMERA_PYRAMID_LEN * 0.7
             self._ax.set_xlim(center[0] - view_range, center[0] + view_range)
             self._ax.set_ylim(center[1] - view_range, center[1] + view_range)
             self._ax.set_zlim(center[2] - view_range, center[2] + view_range)
+
+            # Build the full projection matrix directly from body axes,
+            # bypassing matplotlib's elev/azim/roll decomposition entirely.
+            ax = self._ax
+            box_aspect = ax._roll_to_vertical(ax._box_aspect)
+            worldM = proj3d.world_transformation(
+                *ax.get_xlim3d(), *ax.get_ylim3d(), *ax.get_zlim3d(),
+                pb_aspect=box_aspect)
+            R = 0.5 * box_aspect
+            eye = R + ax._dist * n_vec
+
+            Mr = np.eye(4)
+            Mt = np.eye(4)
+            Mr[:3, :3] = [u_vec, v_vec, n_vec]
+            Mt[:3, -1] = -eye
+            viewM = Mr @ Mt
+
+            projM = proj3d.ortho_transformation(-ax._dist, ax._dist)
+            ax.M = projM @ viewM @ worldM
 
         self._canvas.draw_idle()
 
@@ -960,7 +959,10 @@ class TelemetryView(QWidget):
 class NavigationBar(QWidget):
     """Transport controls: step back, play / pause, step forward, slider."""
 
-    def __init__(self, controller: FrameController, frames: list[FramePose]):
+    switch_requested = pyqtSignal()
+
+    def __init__(self, controller: FrameController, frames: list[FramePose],
+                 show_switch: bool = False):
         super().__init__()
         self._ctrl = controller
         self._frames = frames
@@ -990,6 +992,13 @@ class NavigationBar(QWidget):
         row1.addSpacing(20)
         row1.addWidget(self._lbl)
         row1.addStretch()
+
+        if show_switch:
+            self._btn_switch = QPushButton("Switch\u2026")
+            self._btn_switch.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._btn_switch.clicked.connect(self.switch_requested.emit)
+            row1.addWidget(self._btn_switch)
+
         main.addLayout(row1)
 
         # Row 2: progress slider
@@ -1035,6 +1044,26 @@ class NavigationBar(QWidget):
             return
         self._ctrl.step(1)
 
+    def reload(self, controller: FrameController, frames: list[FramePose]):
+        """Replace the underlying controller and frame data for a new session."""
+        if self._playing:
+            self.toggle_play()
+        self._ctrl.frame_changed.disconnect(self._on_frame_changed)
+        self._slider.valueChanged.disconnect(self._ctrl.set_frame)
+        self._btn_prev.clicked.disconnect()
+        self._btn_next.clicked.disconnect()
+
+        self._ctrl = controller
+        self._frames = frames
+        self._slider.setRange(0, controller.total - 1)
+        self._slider.setValue(0)
+
+        self._btn_prev.clicked.connect(lambda: controller.step(-1))
+        self._btn_next.clicked.connect(lambda: controller.step(1))
+        self._slider.valueChanged.connect(controller.set_frame)
+        controller.frame_changed.connect(self._on_frame_changed)
+        self._update_label(0)
+
 
 # ===========================================================================
 # Main window
@@ -1053,10 +1082,12 @@ class FlightDebugger(QWidget):
     def __init__(self, frames: list[FramePose], log_lines: list[str],
                  frame_to_lines: dict[int, list[int]],
                  video: VideoReader, log_path: Path,
-                 video_path: Path | None = None):
+                 video_path: Path | None = None,
+                 pairs: list[tuple[Path, list[Path]]] | None = None):
         super().__init__()
         self.setWindowTitle("Flight Debugger")
         self.showMaximized()
+        self._pairs = pairs
 
         self._ctrl = FrameController(len(frames))
 
@@ -1068,7 +1099,8 @@ class FlightDebugger(QWidget):
         target_xy = parse_target_xy(log_lines)
         self._telem_view = TelemetryView(frames, pos, vel, acc, mag, target_xy)
 
-        self._nav = NavigationBar(self._ctrl, frames)
+        self._nav = NavigationBar(self._ctrl, frames,
+                                  show_switch=bool(pairs))
 
         # ---- layout: splitters ----
         vid_title = f"Video — {video_path.name}" if video_path else "Video"
@@ -1106,18 +1138,21 @@ class FlightDebugger(QWidget):
         outer.addWidget(self._main_split, 1)
         outer.addWidget(self._nav, 0)
 
+        if self._pairs:
+            self._nav.switch_requested.connect(self._on_switch_session)
+
         # ---- connect views to controller ----
         self._ctrl.frame_changed.connect(self._log_view.update_frame)
         self._ctrl.frame_changed.connect(self._video_view.update_frame)
         self._ctrl.frame_changed.connect(self._telem_view.update_frame)
 
-        # ---- keyboard shortcuts ----
+        # ---- keyboard shortcuts (use methods so they track self._ctrl) ----
         self._sc_left = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
-        self._sc_left.activated.connect(lambda: self._ctrl.step(-1))
+        self._sc_left.activated.connect(self._step_back)
         self._sc_right = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
-        self._sc_right.activated.connect(lambda: self._ctrl.step(1))
+        self._sc_right.activated.connect(self._step_forward)
         self._sc_space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
-        self._sc_space.activated.connect(self._nav.toggle_play)
+        self._sc_space.activated.connect(self._toggle_play)
 
         # ---- initial render ----
         self._log_view.update_frame(0)
@@ -1128,6 +1163,226 @@ class FlightDebugger(QWidget):
         self._settings.setValue("top_split_sizes", self._top_split.sizes())
         self._settings.setValue("main_split_sizes", self._main_split.sizes())
 
+    def _step_back(self):
+        self._ctrl.step(-1)
+
+    def _step_forward(self):
+        self._ctrl.step(1)
+
+    def _toggle_play(self):
+        self._nav.toggle_play()
+
+    def _on_switch_session(self):
+        if self._nav._playing:
+            self._nav.toggle_play()
+        dlg = SessionPicker(self._pairs, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        result = dlg.selected_pair()
+        if result is None:
+            return
+        self._load_session(*result)
+
+    def _load_session(self, log_path: Path, vid_files: list[Path]):
+        """Load a new log + video pair into all views."""
+        frames = parse_telemetry_log(log_path)
+        if not frames:
+            return
+        log_lines, frame_to_lines = parse_log_lines(log_path)
+        new_video = VideoReader(vid_files or None)
+
+        # Tear down old state
+        self._video_view._reader.close()
+        # Disconnect only the three view slots; leave nav's connection
+        # intact so that nav.reload() can disconnect it properly.
+        self._ctrl.frame_changed.disconnect(self._log_view.update_frame)
+        self._ctrl.frame_changed.disconnect(self._video_view.update_frame)
+        self._ctrl.frame_changed.disconnect(self._telem_view.update_frame)
+
+        # New controller and views
+        self._ctrl = FrameController(len(frames))
+        self._log_view = LogView(log_lines, frame_to_lines, frames)
+        self._video_view = VideoView(new_video)
+        pos, vel, acc, mag = precompute_telemetry(frames)
+        target_xy = parse_target_xy(log_lines)
+        self._telem_view = TelemetryView(frames, pos, vel, acc, mag, target_xy)
+
+        # Replace group boxes in splitters (preserve sizes)
+        top_sizes = self._top_split.sizes()
+        main_sizes = self._main_split.sizes()
+
+        vid_title = f"Video \u2014 {vid_files[0].name}" if vid_files else "Video"
+        for idx, new_box in [
+            (0, _titled(vid_title, self._video_view)),
+            (1, _titled("Telemetry 3D", self._telem_view)),
+        ]:
+            old = self._top_split.widget(idx)
+            self._top_split.replaceWidget(idx, new_box)
+            old.deleteLater()
+
+        old_log_box = self._main_split.widget(1)
+        self._main_split.replaceWidget(
+            1, _titled(f"Log \u2014 {log_path.name}", self._log_view))
+        old_log_box.deleteLater()
+
+        self._top_split.setSizes(top_sizes)
+        self._main_split.setSizes(main_sizes)
+
+        # Reconnect controller -> views
+        self._ctrl.frame_changed.connect(self._log_view.update_frame)
+        self._ctrl.frame_changed.connect(self._video_view.update_frame)
+        self._ctrl.frame_changed.connect(self._telem_view.update_frame)
+
+        # Reload navigation bar
+        self._nav.reload(self._ctrl, frames)
+
+        # Initial render
+        self._log_view.update_frame(0)
+        self._video_view.update_frame(0)
+        self._telem_view.update_frame(0)
+
+
+# ===========================================================================
+# Directory scanning & session matching
+# ===========================================================================
+
+_LOG_TS_RE = re.compile(r"BDD_(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})")
+_VID_TS_RE = re.compile(r"(\d{8}-\d{6})")
+_VID_PREFIX_RE = re.compile(r"^(.+?)_?\d{8}-\d{6}")
+_MAX_PAIR_GAP_S = 5.0
+
+
+def _extract_log_timestamp(path: Path) -> datetime | None:
+    """Extract timestamp from log filename like BDD_2026_04_11_13_11_33_02_00_.log."""
+    m = _LOG_TS_RE.search(path.stem)
+    if m:
+        return datetime(*(int(m.group(i)) for i in range(1, 7)))
+    return None
+
+
+def _extract_video_timestamp(path: Path) -> datetime | None:
+    """Extract timestamp from video filename like debug_20260411-131133_00000.mkv."""
+    m = _VID_TS_RE.search(path.stem)
+    if m:
+        s = m.group(1)
+        return datetime.strptime(s, "%Y%m%d-%H%M%S")
+    return None
+
+
+def discover_pairs(directory: Path) -> list[tuple[Path, list[Path]]]:
+    """Scan *directory* for .log + video pairs, matched by filename timestamp.
+
+    Returns a list of ``(log_path, [video_files])`` sorted by log timestamp.
+    Prefers ``debug_`` videos when both ``debug_`` and ``RAW_`` exist.
+    """
+    logs = sorted(
+        (p for p in directory.iterdir()
+         if p.suffix == ".log" and _extract_log_timestamp(p) is not None),
+        key=lambda p: _extract_log_timestamp(p),
+    )
+    videos = sorted(
+        p for p in directory.iterdir()
+        if p.suffix in (".mkv", ".mp4")
+    )
+
+    # Group video files by (prefix, timestamp_key).
+    # prefix = "debug", "RAW", "clip", etc.  ts_key = "YYYYMMDD-HHMMSS".
+    vid_groups: dict[str, dict[str, list[Path]]] = {}   # ts_key → prefix → files
+    for v in videos:
+        ts_m = _VID_TS_RE.search(v.stem)
+        pref_m = _VID_PREFIX_RE.match(v.stem)
+        if not ts_m:
+            continue
+        ts_key = ts_m.group(1)
+        prefix = pref_m.group(1) if pref_m else ""
+        vid_groups.setdefault(ts_key, {}).setdefault(prefix, []).append(v)
+
+    # For each timestamp pick the best prefix (prefer "debug").
+    best_videos: dict[str, list[Path]] = {}
+    for ts_key, by_prefix in vid_groups.items():
+        for pref in ("debug", "RAW"):
+            if pref in by_prefix:
+                best_videos[ts_key] = sorted(by_prefix[pref])
+                break
+        else:
+            best_videos[ts_key] = sorted(next(iter(by_prefix.values())))
+
+    vid_entries = sorted(
+        ((datetime.strptime(k, "%Y%m%d-%H%M%S"), k) for k in best_videos),
+        key=lambda x: x[0],
+    )
+
+    # Match each log to the closest video group where video_time >= log_time.
+    used: set[str] = set()
+    pairs: list[tuple[Path, list[Path]]] = []
+    for log_path in logs:
+        log_ts = _extract_log_timestamp(log_path)
+        best_key: str | None = None
+        best_diff = float("inf")
+        for vid_ts, ts_key in vid_entries:
+            diff = (vid_ts - log_ts).total_seconds()
+            if 0 <= diff <= _MAX_PAIR_GAP_S and diff < best_diff and ts_key not in used:
+                best_diff = diff
+                best_key = ts_key
+        if best_key is not None:
+            used.add(best_key)
+            pairs.append((log_path, best_videos[best_key]))
+        else:
+            pairs.append((log_path, []))
+
+    return pairs
+
+
+class SessionPicker(QDialog):
+    """Dialog for choosing a log + video pair from a scanned directory."""
+
+    def __init__(self, pairs: list[tuple[Path, list[Path]]], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select recording session")
+        self.setMinimumSize(700, 400)
+        self._pairs = pairs
+
+        layout = QVBoxLayout(self)
+        self._list = QListWidget()
+        self._list.setFont(QFont("Monospace", 10))
+
+        for log_path, vid_files in pairs:
+            log_ts = _extract_log_timestamp(log_path)
+            ts_str = log_ts.strftime("%Y-%m-%d %H:%M:%S") if log_ts else "?"
+            log_mb = log_path.stat().st_size / (1024 * 1024)
+            if vid_files:
+                base = vid_files[0].stem.rsplit("_", 1)[0]
+                n = len(vid_files)
+                vid_mb = sum(f.stat().st_size for f in vid_files) / (1024 * 1024)
+                vid_info = f"{base}  ({n} clip{'s' if n != 1 else ''}, {vid_mb:.1f} MB)"
+            else:
+                vid_info = "(no video)"
+            self._list.addItem(
+                f"{ts_str}   {log_path.name} ({log_mb:.1f} MB)"
+                f"  \u2192  {vid_info}"
+            )
+
+        self._list.setCurrentRow(len(pairs) - 1)   # pre-select last (most recent)
+        self._list.itemDoubleClicked.connect(self.accept)
+        layout.addWidget(self._list)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        ok_btn = QPushButton("Open")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def selected_pair(self) -> tuple[Path, list[Path]] | None:
+        row = self._list.currentRow()
+        if 0 <= row < len(self._pairs):
+            return self._pairs[row]
+        return None
+
 
 # ===========================================================================
 # Entry point
@@ -1136,15 +1391,47 @@ class FlightDebugger(QWidget):
 def main():
     parser = argparse.ArgumentParser(
         description="Multi-view synchronized flight debugger")
-    parser.add_argument("log_file", type=Path,
+    parser.add_argument("log_file", nargs="?", type=Path, default=None,
                         help="Path to BDD .log file")
     parser.add_argument("--video", type=Path, default=None,
                         help="Video file or directory of MP4s")
+    parser.add_argument("--dir", type=Path, default=None,
+                        help="Directory with log + video files; "
+                             "auto-discovers pairs and shows a picker")
     parser.add_argument("--video-offset", type=int, default=0,
                         help="Video frame offset: video_idx = frame_idx + offset")
     parser.add_argument("--allow-no-video", type=bool, default=False,
                         help="Do not error if video can't be loaded")
     args = parser.parse_args()
+
+    # --dir mode: scan directory, show picker, then fall through to common path
+    video_source: Path | list[Path] | None = args.video
+    video_display_path: Path | None = args.video
+    pairs = None
+
+    if args.dir:
+        if not args.dir.is_dir():
+            print(f"ERROR: {args.dir} is not a directory")
+            sys.exit(1)
+        pairs = discover_pairs(args.dir)
+        if not pairs:
+            print(f"ERROR: no log files found in {args.dir}")
+            sys.exit(1)
+        # Let user pick a session
+        app = QApplication(sys.argv)
+        dlg = SessionPicker(pairs)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            sys.exit(0)
+        result = dlg.selected_pair()
+        if result is None:
+            sys.exit(0)
+        args.log_file, vid_files = result
+        video_source = vid_files or None
+        video_display_path = vid_files[0] if vid_files else None
+    else:
+        if args.log_file is None:
+            parser.error("log_file is required (or use --dir)")
+        app = QApplication(sys.argv)
 
     print(f"Loading log: {args.log_file}")
     frames = parse_telemetry_log(args.log_file)
@@ -1155,7 +1442,7 @@ def main():
         print("ERROR: no telemetry frames found in log file.")
         sys.exit(1)
 
-    video = VideoReader(args.video)
+    video = VideoReader(video_source)
     if video.available:
         print(f"  {video.total} video frames")
         if video.has_time_sync:
@@ -1163,15 +1450,14 @@ def main():
         else:
             print("  WARNING: could not detect video start time; using frame offset")
     else:
-        if args.allow_no_video:
-            print("  (no video)")
-        else:
+        if not args.dir and not args.allow_no_video:
             print(f"Can't load video from {args.video}")
             sys.exit(-1)
+        print("  (no video)")
 
-    app = QApplication(sys.argv)
     win = FlightDebugger(frames, log_lines, frame_to_lines,
-                         video, args.log_file, args.video)
+                         video, args.log_file, video_display_path,
+                         pairs=pairs)
     ret = app.exec()
     video.close()
     sys.exit(ret)
