@@ -32,7 +32,7 @@ class CommandRegulator:
         Pk, Dk = self.Pk, self.Dk
 
         # Note: looks like introducing D leads to crazy command output, too big
-        return command * Pk #+ (command - prev_command) * (Dk / dt_ms)
+        return command * Pk + (command - prev_command) * (Dk / dt_ms)
 
 
 def test_CommandRegulator():
