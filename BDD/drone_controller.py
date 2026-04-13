@@ -150,7 +150,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     THRUST_MIN      = control_config.pop('thrust_min', 0.5)
     THRUST_TAKEOFF  = control_config.pop('thrust_takeoff', 0.5)
     THRUST_DYNAMIC  = control_config.pop('thrust_dynamic', False)
-    THRUST_PROPORTIONAL_TO_TARGET_SIZE = control_config.pop('THRUST_PROPORTIONAL_TO_TARGET_SIZE', False)
+    THRUST_PROPORTIONAL_TO_TARGET_SIZE = control_config.pop('thrust_proportional_to_target_size', False)
 
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
