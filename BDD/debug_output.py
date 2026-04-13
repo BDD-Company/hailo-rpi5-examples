@@ -180,10 +180,9 @@ def draw_detection(frame, detection : Detection, color, line_thickness = 1):
     #         line_width = line_thickness
     #     )
 
-def draw_move_goal(frame, target_pos : XY, color, line_thickness = 1):
+def draw_move_goal(frame, target_pos : XY, color, line_thickness = 1, aim_point : XY = XY(0.5, 0.5)):
     frame_size = XY(frame.shape[1], frame.shape[0])
-    # since target is a diff from a frame center (0.5, 0.5) in a 0..1 frame
-    target_pos_on_frame = (XY(0.5, 0.5) - target_pos).multiplied_by_XY(frame_size)
+    target_pos_on_frame = (aim_point - target_pos).multiplied_by_XY(frame_size)
 
     frame_rect = Rect(XY(0, 0), frame_size)
     if frame_rect.is_point_inside(target_pos_on_frame):
@@ -197,10 +196,9 @@ def draw_move_goal(frame, target_pos : XY, color, line_thickness = 1):
         )
 
 
-def draw_predicted_pos(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1):
+def draw_predicted_pos(frame, target_pos : XY, from_pos : XY, color, line_thickness = 1, aim_point : XY = XY(0.5, 0.5)):
     frame_size = XY(frame.shape[1], frame.shape[0])
-    # since target is a diff from a frame center (0.5, 0.5) in a 0..1 frame
-    target_pos_on_frame = (XY(0.5, 0.5) - target_pos).multiplied_by_XY(frame_size)
+    target_pos_on_frame = (aim_point - target_pos).multiplied_by_XY(frame_size)
     from_pos_on_frame = from_pos.multiplied_by_XY(frame_size) if from_pos else None
 
     frame_rect = Rect(XY(0, 0), frame_size)
@@ -383,10 +381,10 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         draw_detection(frame, selected, SELECTED_OBJECT_COLOR, 2)
 
     if predicted_pos is not None and selected is not None:
-        draw_predicted_pos(frame, predicted_pos, selected.bbox.center, TARGET_COLOR, 1)
+        draw_predicted_pos(frame, predicted_pos, selected.bbox.center, TARGET_COLOR, 1, aim_point=aim_point)
 
     if move_goal is not None:
-        draw_move_goal(frame, move_goal, TARGET_COLOR, 1)
+        draw_move_goal(frame, move_goal, TARGET_COLOR, 1, aim_point=aim_point)
 
     if move_command is not None:
         # move command in degrees here, but we don't care
