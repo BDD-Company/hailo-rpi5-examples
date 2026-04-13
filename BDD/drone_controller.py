@@ -88,6 +88,7 @@ def compute_inertia_correction(telemetry_dict, target_relative_pos, gain, min_sp
     v_frd_y = vel['y_m_s']  # right
     v_frd_z = vel['z_m_s']  # down
 
+    # NOTE: not sure if should include z into full speed computation?
     speed = math.sqrt(v_frd_x ** 2 + v_frd_y ** 2 + v_frd_z ** 2)
     horiz_speed = math.sqrt(v_frd_x ** 2 + v_frd_y ** 2)
     if horiz_speed < min_speed_ms: # or speed < min_speed_ms ?
@@ -542,7 +543,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         clamp(-INERTIA_CORRECTION_LIMITS.x, inertia_correction.x, INERTIA_CORRECTION_LIMITS.x),
                         clamp(-INERTIA_CORRECTION_LIMITS.y, inertia_correction.y, INERTIA_CORRECTION_LIMITS.y)
                     )
-                    extra += f'inertia correction gain: {INERTIA_CORRECTION_GAIN} val: {333333333333333333}'
+                    extra += f'inertia correction gain: {INERTIA_CORRECTION_GAIN:.2f} val: {inertia_correction}'
                     target_relative_pos = target_relative_pos + inertia_correction
                     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 

@@ -330,7 +330,6 @@ def main():
 
         'inertia_correction_gain' : 0.1, # 0.5, 1.0, etc
         'inertia_correction_limits': XY(1, 1),
-        'inertia_correction_lookahead_frames' : 2,
 
         'safe_takeoff_period_ns': 300_000_000,
         'delay_takeof_until_n_detection_frames' : 3,
