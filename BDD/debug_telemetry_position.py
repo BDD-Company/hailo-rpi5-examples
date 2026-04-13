@@ -9,11 +9,15 @@ from pathlib import Path
 
 from telemetry_position import Pose, get_pose
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 LOG_PATH = Path(__file__).resolve().parent.parent.parent / "_BACKUPS/2026-04-06/_DEBUG_09/BDD_2026_04_06_13_56_14_02_00_.log"
 
 TELEMETRY_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s.*?"
-    r"frame=#(\d+)\s+telemetry:\s+(.+)$"
+    r"frame=#(\d+)\s+(?:!+\s+)?telemetry:\s+(.+)$"
 )
 
 
@@ -33,9 +37,14 @@ def parse_telemetry_log(path: Path) -> list[FramePose]:
                 continue
             ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f")
             frame_id = int(m.group(2))
-            telemetry_dict = eval(m.group(3))  # noqa: S307 — trusted log data
-            pose = get_pose(telemetry_dict)
-            results.append(FramePose(timestamp=ts, frame_id=frame_id, pose=pose))
+            try:
+                telemetry_dict = eval(m.group(3))  # noqa: S307 — trusted log data
+                pose = get_pose(telemetry_dict)
+                results.append(FramePose(timestamp=ts, frame_id=frame_id, pose=pose))
+            except SyntaxError as e:
+                logger.error('Partially broken log?', exc_info=True)
+                break
+
     return results
 
 
