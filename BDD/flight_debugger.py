@@ -1088,6 +1088,7 @@ class FlightDebugger(QWidget):
         self.setWindowTitle("Flight Debugger")
         self.showMaximized()
         self._pairs = pairs
+        self._current_log_path = log_path
 
         self._ctrl = FrameController(len(frames))
 
@@ -1175,12 +1176,14 @@ class FlightDebugger(QWidget):
     def _on_switch_session(self):
         if self._nav._playing:
             self._nav.toggle_play()
-        dlg = SessionPicker(self._pairs, parent=self)
+        dlg = SessionPicker(self._pairs, current_log=self._current_log_path,
+                            parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         result = dlg.selected_pair()
         if result is None:
             return
+        self._current_log_path = result[0]
         self._load_session(*result)
 
     def _load_session(self, log_path: Path, vid_files: list[Path]):
@@ -1341,7 +1344,8 @@ def discover_pairs(directory: Path) -> list[tuple[Path, list[Path]]]:
 class SessionPicker(QDialog):
     """Dialog for choosing a log + video pair from a scanned directory."""
 
-    def __init__(self, pairs: list[tuple[Path, list[Path]]], parent=None):
+    def __init__(self, pairs: list[tuple[Path, list[Path]]],
+                 current_log: Path | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select recording session")
         self.setMinimumSize(700, 400)
@@ -1367,7 +1371,13 @@ class SessionPicker(QDialog):
                 f"  \u2192  {vid_info}"
             )
 
-        self._list.setCurrentRow(len(pairs) - 1)   # pre-select last (most recent)
+        default_row = len(pairs) - 1
+        if current_log is not None:
+            for i, (lp, _) in enumerate(pairs):
+                if lp == current_log:
+                    default_row = i
+                    break
+        self._list.setCurrentRow(default_row)
         self._list.itemDoubleClicked.connect(self.accept)
         layout.addWidget(self._list)
 
@@ -1381,6 +1391,7 @@ class SessionPicker(QDialog):
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
+
 
     def selected_pair(self) -> tuple[Path, list[Path]] | None:
         row = self._list.currentRow()

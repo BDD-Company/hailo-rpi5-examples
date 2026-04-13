@@ -13,8 +13,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-LOG_PATH = Path(__file__).resolve().parent.parent.parent / "_BACKUPS/2026-04-06/_DEBUG_09/BDD_2026_04_06_13_56_14_02_00_.log"
-
 TELEMETRY_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s.*?"
     r"frame=#(\d+)\s+(?:!+\s+)?telemetry:\s+(.+)$"
@@ -49,6 +47,7 @@ def parse_telemetry_log(path: Path) -> list[FramePose]:
 
 
 def main() -> None:
+    LOG_PATH = Path(__file__).resolve().parent.parent.parent / "_BACKUPS/2026-04-06/_DEBUG_09/BDD_2026_04_06_13_56_14_02_00_.log"
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else LOG_PATH
     frames = parse_telemetry_log(path)
     print(f"Parsed {len(frames)} frames from {path.name}\n")
