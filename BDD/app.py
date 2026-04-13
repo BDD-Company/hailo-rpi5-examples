@@ -284,26 +284,26 @@ def main():
         record_videos=True)
 
     control_config = {
-        'confidence_min': 0.3,
+        'confidence_min': 0.4,
         'confidence_move': 0.3,
 
-        'thrust_takeoff' : 0.4,
-        'thrust_min': 0.6,
-        'thrust_max': 0.6,
+        'thrust_takeoff' : 0.5,
+        'thrust_min': 0.5,
+        'thrust_max': 0.5,
         'thrust_dynamic': False,
-        'thrust_proportional_to_target_size' : True,
+        'thrust_proportional_to_target_size' : False,
 
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'estimation_lookahead_frames': 2,
-        'estimation_lookahead_dynamic': True,
-        'estimation_lookahead_dynamic_frames_near':   2,
-        'estimation_lookahead_dynamic_frames_medium': 3,
-        'estimation_lookahead_dynamic_frames_far':    3, # can't be too big -- estimation will be too FAAR away.
+        'estimation_lookahead_dynamic': False,
+        'estimation_lookahead_dynamic_frames_near':   1,
+        'estimation_lookahead_dynamic_frames_medium': 2,
+        'estimation_lookahead_dynamic_frames_far':    4, # can't be too big -- estimation will be too FAAR away.
 
-        'pd_coeff_p': 4, #12.5
-        'pd_coeff_d': 0,
+        'pd_coeff_p': 3,
+        'pd_coeff_d': 0, #-1, # -1
         'pd_coeff_p_safe_min': 0.6,
         'pd_coeff_p_min' : 0.5,
         'pd_coeff_p_max' : 10,
@@ -326,15 +326,21 @@ def main():
         'pd_coeff_p_dynamic_stage_3_ratio': 1,
 
         'frame_angular_size_deg' : XY(107, 85),
-        'target_size_m' : XY(1.8, 1.8),
 
-        'inertia_correction_gain' : 0.1, # 0.5, 1.0, etc
+        # 'target_size_m' : XY(0.2, 0.2),             # baloon
+        'target_size_m' : XY(1.8, 1.8),             # shahed small
+        # 'target_size_m' : XY(3.5, 2.5),             # shahed large
+        # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
+
+        'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
         'inertia_correction_limits': XY(1, 1),
+        'inertia_correction_min_speed_ms': 5,
 
         'safe_takeoff_period_ns': 300_000_000,
         'delay_takeof_until_n_detection_frames' : 3,
 
         'aim_point': XY(0.5, 0.5),
+        'aim_point_max_offset': XY(0.5, 0.6),
 
         'DEBUG': DEBUG
     }

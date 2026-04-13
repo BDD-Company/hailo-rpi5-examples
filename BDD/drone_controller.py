@@ -555,11 +555,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     logger.warning('takeoff low thrust mode: %s', thrust)
                 else:
                     if THRUST_DYNAMIC:
-                        if distance_to_center < 0.2:
+                        if distance_to_center < 0.1:
                             thrust= THRUST_MAX
                             mode += " GREEN "
                             # pd_coeff_p /= 3
-                        elif distance_to_center < 0.4:
+                        elif distance_to_center < 0.2:
                             thrust= THRUST_MIN + (THRUST_MAX - THRUST_MIN) / 2
                             mode += " YELLOW "
                             # pd_coeff_p /= 1.5
@@ -571,15 +571,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     if THRUST_PROPORTIONAL_TO_TARGET_SIZE:
                         if estimated_distance_m < 7:
                             thrust *= 1.1
-                            pd_coeff_p *= 1
+                            pd_coeff_p *= 1.1
 
                             if estimated_distance_m < 5:
                                 thrust *= 1.1
-                                pd_coeff_p *= 1.2
+                                pd_coeff_p *= 1.1
 
                             if estimated_distance_m < 3:
                                 thrust *= 1.1
-                                # pd_coeff_p *= 1.2
+                                pd_coeff_p *= 1.1
                                 pass
 
                             extra += f' WE ARE SOOOO CLOSE, BOOSTING thrust to: {thrust}, p to: {pd_coeff_p} '

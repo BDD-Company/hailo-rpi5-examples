@@ -126,7 +126,7 @@ class XY:
         return (to(self.x), to(self.y))
 
     def __str__(self):
-        return f"XY({self.x:.2f}, {self.y:.2f})"
+        return f"XY({self.x:.3f}, {self.y:.3f})"
 
 
 @dataclass(init=True, slots=True, order=True, repr=False)
