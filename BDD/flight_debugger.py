@@ -1247,6 +1247,7 @@ class FlightDebugger(QWidget):
 # ===========================================================================
 
 _LOG_TS_RE = re.compile(r"BDD_(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})")
+_LOG_TS_RE2 = re.compile(r"BDD_(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})")
 _VID_TS_RE = re.compile(r"(\d{8}-\d{6})")
 _VID_PREFIX_RE = re.compile(r"^(.+?)_?\d{8}-\d{6}")
 _MAX_PAIR_GAP_S = 5.0
@@ -1255,8 +1256,12 @@ _MAX_PAIR_GAP_S = 5.0
 def _extract_log_timestamp(path: Path) -> datetime | None:
     """Extract timestamp from log filename like BDD_2026_04_11_13_11_33_02_00_.log."""
     m = _LOG_TS_RE.search(path.stem)
+    if not m:
+        m = _LOG_TS_RE2.search(path.stem)
+
     if m:
         return datetime(*(int(m.group(i)) for i in range(1, 7)))
+
     return None
 
 
