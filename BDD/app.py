@@ -328,8 +328,8 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
         'target_size_m' : XY(1.8, 1.8),
 
-        'inertia_correction_gain' : 0,
-        'inertia_correction_gain_limits': XY(.2, .2),
+        'inertia_correction_gain' : 0.1, # 0.5, 1.0, etc
+        'inertia_correction_limits': XY(1, 1),
         'inertia_correction_lookahead_frames' : 2,
 
         'safe_takeoff_period_ns': 300_000_000,

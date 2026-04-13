@@ -56,67 +56,77 @@ def clamp(min_val, val, max_val):
     return typeof_val(max(min_val, min(max_val, val)))
 
 
-def compute_inertia_correction(telemetry_dict, frame_dt_ns, lookahead_frames, fov_deg, gain):
+def compute_inertia_correction(telemetry_dict, target_relative_pos, gain, min_speed_ms=0.3):
     """
-    Feedforward correction for drone velocity and angular rates.
+    Inertia correction computed entirely in FRD reference frame.
 
-    Camera looks UP (zenith), mounted on belly.
-    Image top  = body FORWARD (+X)  — positive pitch_deg_s tilts nose down, moves fwd.
-    Image right = body RIGHT  (+Y)  — positive roll_deg_s rolls right.
-    target_relative_pos: x>0 = target LEFT of centre, y>0 = target above centre (fwd).
+    Compares actual body velocity (FRD, from telemetry) against the desired
+    velocity direction (derived from target position in camera frame).
+    Returns correction in camera frame to ADD to target_relative_pos.
 
-    Returns XY correction to ADD to target_relative_pos (normalized image coords).
+    Camera frame: x>0 = target LEFT of centre, y>0 = target above centre (fwd).
+    FRD frame:    x = forward, y = right, z = down.
+
+    Frame conversions (consistent with move_to_target_zenith_async mapping:
+      roll_deg_s = -angle.x, pitch_deg_s = angle.y):
+        camera -> FRD:  frd = XY( cam.y, -cam.x)
+        FRD -> camera:  cam = XY(-frd.y,  frd.x)
     """
-    odometry = telemetry_dict.get('odometry') or None
-    attitude = telemetry_dict.get('attitude_euler') or None
-
-    if gain == 0 or frame_dt_ns <= 0 or odometry is None or attitude is None:
+    if gain == 0 or target_relative_pos is None:
         return XY(0.0, 0.0)
 
-    vel_ned = odometry.get('velocity_body', None)
-    angular_vel = odometry.get('angular_velocity_body', None)
-    yaw_deg = attitude.get('yaw_deg', 0)
-    altitude = max(0.5, -1 * odometry.get('position_body', {}).get('z_m', 0))
+    odometry = telemetry_dict.get('odometry') or None
+    if odometry is None:
+        return XY(0.0, 0.0)
 
-    fov_x_rad = math.radians(fov_deg.x)
-    fov_y_rad = math.radians(fov_deg.y)
-    lookahead_s = (frame_dt_ns / 1_000_000_000) * lookahead_frames
+    vel = odometry.get('velocity_body', None)
+    if vel is None:
+        return XY(0.0, 0.0)
 
-    linear_x, linear_y = 0.0, 0.0
-    angular_x, angular_y = 0.0, 0.0
+    # velocity_body is in FRD frame
+    v_frd_x = vel['x_m_s']  # forward
+    v_frd_y = vel['y_m_s']  # right
+    v_frd_z = vel['z_m_s']  # down
 
-    # Linear velocity: NED → body FRD, then to camera-frame drift rate.
-    if vel_ned:
-        v_n = vel_ned['x_m_s']
-        v_e = vel_ned['y_m_s']
-        yaw_rad = math.radians(yaw_deg)
-        cos_y = math.cos(yaw_rad)
-        sin_y = math.sin(yaw_rad)
+    speed = math.sqrt(v_frd_x ** 2 + v_frd_y ** 2 + v_frd_z ** 2)
+    horiz_speed = math.sqrt(v_frd_x ** 2 + v_frd_y ** 2)
+    if horiz_speed < min_speed_ms: # or speed < min_speed_ms ?
+        return XY(0.0, 0.0)
 
-        v_fwd   =  v_n * cos_y + v_e * sin_y   # body-X  (forward)
-        v_right = -v_n * sin_y + v_e * cos_y    # body-Y  (right)
+    # Convert target_relative_pos from camera frame to FRD
+    target_frd_x = target_relative_pos.y    # forward = camera up
+    target_frd_y = -target_relative_pos.x   # right   = negative camera left
 
-        # Moving right   → target drifts left  (+ camera X).  Provides damping.
-        linear_x =  v_right / altitude / fov_x_rad * lookahead_s
-        # Moving forward → target drifts toward centre (− camera Y).
-        # Sign is negative: forward velocity reduces the visual error.
-        linear_y = -v_fwd   / altitude / fov_y_rad * lookahead_s
+    # Build 3D ray direction from 2D angular offsets on the unit sphere.
+    # Camera optical axis = -Z in FRD (looking up from belly).
+    # target_frd_x, target_frd_y are angular offsets; Z completes the unit sphere.
+    horiz_sq = target_frd_x ** 2 + target_frd_y ** 2
+    if horiz_sq < 1e-12:
+        return XY(0.0, 0.0)
+    if horiz_sq >= 1.0:
+        # Target at extreme edge — clamp to horizontal ray
+        scale = 1.0 / math.sqrt(horiz_sq)
+        ray_x = target_frd_x * scale
+        ray_y = target_frd_y * scale
+        ray_z = 0.0
+    else:
+        ray_x = target_frd_x
+        ray_y = target_frd_y
+        ray_z = -math.sqrt(1.0 - horiz_sq)  # upward = -Z in FRD
 
-    # Angular velocity: predict camera-aim shift over lookahead window.
-    # For an up-looking camera, tilting shifts the optical axis away from
-    # zenith, causing near-zenith targets to appear further from centre
-    # (positive feedback in image-plane coords).  The correction counteracts
-    # this for roll, and provides additional damping for pitch.
-    if False and angular_vel:
-        # Roll right → optical axis shifts right → zenith target appears left (+X).
-        angular_x =  angular_vel['roll_rad_s']  / fov_x_rad * lookahead_s
-        # Pitch fwd (positive pitch_rad_s = nose down) → optical axis shifts fwd
-        # → zenith target appears backward (−Y in image).
-        angular_y = -angular_vel['pitch_rad_s'] / fov_y_rad * lookahead_s
+    # Desired speed in FRD (3D): ray direction * actual 3D speed
+    desired_frd_x = ray_x * speed
+    desired_frd_y = ray_y * speed
+    desired_frd_z = ray_z * speed
 
+    # Correction in FRD (3D) = desired - actual, then take only x,y for roll/pitch
+    correction_frd_x = (desired_frd_x - v_frd_x) * gain
+    correction_frd_y = (desired_frd_y - v_frd_y) * gain
+
+    # Convert correction from FRD back to camera frame
     return XY(
-        (linear_x + angular_x) * gain,
-        (linear_y + angular_y) * gain,
+        -correction_frd_y,  # cam.x = -frd.y
+        correction_frd_x,   # cam.y =  frd.x
     )
 
 
@@ -194,9 +204,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
 
     INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
-    INERTIA_CORRECTION_GAIN_LIMITS : XY = control_config.pop('inertia_correction_gain_limits', XY(1, 1))
+    INERTIA_CORRECTION_LIMITS : XY = control_config.pop('inertia_correction_limits', XY(1, 1))
+    INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
 
-    INERTIA_CORRECTION_LOOKAHEAD_FRAMES = control_config.pop('inertia_correction_lookahead_frames', 2)
+    # kept for backwards compat with existing configs
+    control_config.pop('inertia_correction_lookahead_frames', None)
 
     ESTIMATION_LOOKAHEAD_FRAMES         = control_config.pop('estimation_lookahead_frames', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC        = control_config.pop('estimation_lookahead_dynamic', False)
@@ -518,22 +530,22 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 seen_target = True
 
                 target_relative_pos_uncorrected = target_relative_pos
-                # Inertia correction: feedforward from actual velocity/angular rates
+                # Inertia correction: feedforward from actual velocity in FRD frame
                 if INERTIA_CORRECTION_GAIN != 0 and target_relative_pos is not None:
-                    frame_dt_ns = current_frame_timestamp_ns - prev_frame_timestamp_ns
                     inertia_correction = compute_inertia_correction(
-                        telemetry_dict, frame_dt_ns,
-                        INERTIA_CORRECTION_LOOKAHEAD_FRAMES,
-                        FRAME_ANGLUAR_SIZE_DEG, INERTIA_CORRECTION_GAIN
+                        telemetry_dict,
+                        target_relative_pos,
+                        INERTIA_CORRECTION_GAIN,
+                        INERTIA_CORRECTION_MIN_SPEED_MS
                     )
 
                     logger.info("inertia correction before clamping: %s", inertia_correction)
                     # clamping to the limits
                     inertia_correction = XY(
-                        clamp(-INERTIA_CORRECTION_GAIN_LIMITS.x, inertia_correction.x, INERTIA_CORRECTION_GAIN_LIMITS.x),
-                        clamp(-INERTIA_CORRECTION_GAIN_LIMITS.y, inertia_correction.y, INERTIA_CORRECTION_GAIN_LIMITS.y)
+                        clamp(-INERTIA_CORRECTION_LIMITS.x, inertia_correction.x, INERTIA_CORRECTION_LIMITS.x),
+                        clamp(-INERTIA_CORRECTION_LIMITS.y, inertia_correction.y, INERTIA_CORRECTION_LIMITS.y)
                     )
-                    extra += f'inertia correction gain: {INERTIA_CORRECTION_GAIN} val: {inertia_correction}'
+                    extra += f'inertia correction gain: {INERTIA_CORRECTION_GAIN} val: {333333333333333333}'
                     target_relative_pos = target_relative_pos + inertia_correction
                     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 
@@ -610,6 +622,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     logger.warning("Delaying takeoff for %s frames (now have %s)", DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES, target_estimator.history_size())
                     pass
                 else:
+                    # NOTE: perfroming conversion from camera referene frame to done's FRD
                     await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
                     moving = True
 
@@ -624,6 +637,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 if seen_target:
                     prev_angle_to_target *= FADE_COEFF
+                    # NOTE: perfroming conversion from camera referene frame to done's FRD
                     await drone.move_to_target_zenith_async(roll_degree=-prev_angle_to_target.x, pitch_degree=prev_angle_to_target.y, thrust=thrust)
                     # Just t visualize the point we are moving to
                     target_relative_pos = prev_angle_to_target.divided_by_XY(FRAME_ANGLUAR_SIZE_DEG)
