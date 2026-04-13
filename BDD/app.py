@@ -171,6 +171,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             bbox = Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
             confidence = confidence,
             track_id = track_id,
+            # class_id = detection.class_id,
         ))
 
     # if len(detections) != 0:
