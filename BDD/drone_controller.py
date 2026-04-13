@@ -207,9 +207,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     INERTIA_CORRECTION_LIMITS : XY = control_config.pop('inertia_correction_limits', XY(1, 1))
     INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
 
-    # kept for backwards compat with existing configs
-    control_config.pop('inertia_correction_lookahead_frames', None)
-
     ESTIMATION_LOOKAHEAD_FRAMES         = control_config.pop('estimation_lookahead_frames', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC        = control_config.pop('estimation_lookahead_dynamic', False)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
