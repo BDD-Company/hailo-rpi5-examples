@@ -547,7 +547,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     target_relative_pos = target_relative_pos + inertia_correction
                     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 
-                distance_to_center = target_relative_pos.distance_to(AIM_POINT)
+                # Note target_relative_pos is already an offset from AIM_POINT
+                distance_to_center = target_relative_pos.distance_to(XY(0, 0))
                 thrust = THRUST_MIN
                 if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
                     thrust = THRUST_TAKEOFF
