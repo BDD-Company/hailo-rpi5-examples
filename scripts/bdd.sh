@@ -4,6 +4,9 @@ cd ./hailo-rpi5-examples/
 . ./setup_env.sh
 
 readonly start_time=$(date +%Y%m%d-%H%M%S)
+# make sure that log dir exists
+mkdir -p ./_DEBUG/ ||:
+
 set -ex
 
 (
@@ -16,17 +19,17 @@ set -ex
 
 #    export G_MESSAGES_DEBUG=all
 #    export GST_TRACERS="latency;stats"
-#    export GST_DEBUG="7"
-#    export GST_DEBUG_FILE=_DEBUG/gstreamer_${start_time}.log
-#    export GST_DEBUG_NO_COLOR=1
+#    export GST_DEBUG="GST_TRACER:7"
     export DISPLAY=:0
-#    export HAILO_MODEL="/home/bdd/models/2026-03-13_shahed_v7_1280.hef"
-    export HAILO_MODEL="/home/bdd/models/2026-03-13_shahed_v7_1280.hef"
+    #export HAILO_MODEL="/home/bdd/models/2026-04-07_11n_ball_v2.hef"
+    export HAILO_MODEL="/home/bdd/models/ball_11n_640_v1.hef" # detects SUN
+    #export HAILO_MODEL="/home/bdd/models/2026-04-13_11n_sh_v3.hef" # detects SUN
+
 
     python \
         ./BDD/app.py \
+        --hef-path "${HAILO_MODEL}" \
         -i rpi \
-        --hef-path="${HAILO_MODEL}" \
-        -r 30 \
         "$@"
+
 ) 2>&1 | tee "./_DEBUG/BDD_${start_time}.log"
