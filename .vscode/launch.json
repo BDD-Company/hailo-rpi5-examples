@@ -4,6 +4,18 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        {
+            "name": "debug_drone_controller.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "BDD/debug_drone_controller.py",
+            "console": "integratedTerminal",
+            "args": [
+                "/media/enmk/Pet Projects/BDD/_BACKUPS/2026-04-13/_DEBUG_13/BDD_20260413-151446.log",
+                "--video",
+                "/media/enmk/Pet Projects/BDD/_BACKUPS/2026-04-13/_DEBUG_13/RAW_20260413-151446_00000.mkv"
+            ]
+        },
         // {
         //     "name": "pytest test_DetectionsAggregator.py",
         //     "type": "debugpy",
@@ -155,7 +167,7 @@
             "id": "drone_ip_address_reuse",
             "type": "command",
             "command": "extension.commandvariable.remember",
-            "args" : {
+            "args": {
                 "key": "drone_ip_address",
             }
         }
