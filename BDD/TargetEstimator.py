@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 
+import math
 from collections import deque
 
 from helpers import XY, Rect
+from telemetry_position import PositionNED
+
+
+def _exp_fast(x: float) -> float:
+    """math.exp with clamping to avoid overflow on large negative values."""
+    if x < -50.0:
+        return 0.0
+    return math.exp(x)
 
 
 class TargetEstimator:
-    def __init__(self, max_target_positions : int = 10, max_target_position_age_nanoseconds : int = 500):
+    def __init__(self, max_target_positions : int = 10, max_target_position_age_nanoseconds : int = 500_000_000):
         assert(max_target_positions > 1)
         assert(max_target_position_age_nanoseconds > 1)
 
@@ -91,6 +100,140 @@ class TargetEstimator:
         return newest_pos + (target_velocity * delta_t_nanoseconds)
 
 
+class TargetEstimator3D:
+    """Track target position in the NED world frame (3-D).
+
+    Stores absolute NED positions computed from detection + distance + telemetry.
+    Because positions are in a fixed world frame, drone movement is implicitly
+    accounted for - successive positions directly reveal target velocity.
+    """
+
+    def __init__(self, max_positions: int = 10, max_age_ns: int = 500_000_000):
+        assert max_positions > 1
+        assert max_age_ns > 1
+        self.max_positions = int(max_positions)
+        self.max_age_ns = int(max_age_ns)
+        self._positions: deque[tuple[int, PositionNED]] = deque(maxlen=self.max_positions)
+
+    def history_size(self) -> int:
+        return len(self._positions)
+
+    def clear_history(self) -> None:
+        self._positions.clear()
+
+    def _forget_old(self, ref_ts_ns: int) -> None:
+        cutoff = int(ref_ts_ns) - self.max_age_ns
+        while self._positions and self._positions[0][0] < cutoff:
+            self._positions.popleft()
+
+    def add(self, pos: PositionNED, timestamp_ns: int) -> None:
+        self._positions.append((int(timestamp_ns), pos))
+
+    # Minimum samples for the weighted least-squares fit.
+    # Below this threshold, fall back to simple 2-point linear estimate.
+    _MIN_POINTS_FOR_WLS = 3
+
+    # Exponential half-life for sample weighting (in nanoseconds).
+    # Samples older than this get half the weight of the newest sample.
+    # ~150 ms ≈ 4-5 frames at 30 fps.
+    _WEIGHT_HALFLIFE_NS = 150_000_000
+
+    def _estimate_velocity_linear(self) -> tuple[float, float, float]:
+        """Simple 2-point velocity: (vN, vE, vD) in m/ns."""
+        ts0, p0 = self._positions[-2]
+        ts1, p1 = self._positions[-1]
+        dt = ts1 - ts0
+        if dt <= 0:
+            return (0.0, 0.0, 0.0)
+        return (
+            (p1.north_m - p0.north_m) / dt,
+            (p1.east_m - p0.east_m) / dt,
+            (p1.down_m - p0.down_m) / dt,
+        )
+
+    def _estimate_velocity_wls(self) -> tuple[float, float, float]:
+        """Weighted least-squares velocity over all stored samples.
+
+        Fits pos = offset + velocity * t for each NED axis independently,
+        with exponential weights that favour recent samples.
+        Returns (vN, vE, vD) in m/ns.
+        """
+        ts_ref = self._positions[-1][0]  # newest timestamp as reference
+        ln2 = 0.6931471805599453  # math.log(2)
+        decay = ln2 / self._WEIGHT_HALFLIFE_NS
+
+        # Accumulate WLS sums in a single pass.
+        sw = 0.0   # Σ w_i
+        swt = 0.0  # Σ w_i * t_i
+        swtt = 0.0 # Σ w_i * t_i²
+        sw_n = 0.0; sw_e = 0.0; sw_d = 0.0       # Σ w_i * val_i
+        swt_n = 0.0; swt_e = 0.0; swt_d = 0.0    # Σ w_i * t_i * val_i
+
+        for ts, p in self._positions:
+            age = ts_ref - ts  # >= 0
+            w = _exp_fast(-decay * age)
+            t = ts - ts_ref    # <= 0 for past samples, 0 for newest
+
+            sw += w
+            wt = w * t
+            swt += wt
+            swtt += wt * t
+            sw_n += w * p.north_m;  swt_n += wt * p.north_m
+            sw_e += w * p.east_m;   swt_e += wt * p.east_m
+            sw_d += w * p.down_m;   swt_d += wt * p.down_m
+
+        denom = sw * swtt - swt * swt
+        if abs(denom) < 1e-30:
+            return self._estimate_velocity_linear()
+
+        # WLS slope = (Σw · Σwt·v  -  Σwt · Σw·v) / denom
+        vn = (sw * swt_n - swt * sw_n) / denom
+        ve = (sw * swt_e - swt * sw_e) / denom
+        vd = (sw * swt_d - swt * sw_d) / denom
+        return (vn, ve, vd)
+
+    def _estimate_velocity(self) -> tuple[float, float, float]:
+        """Return (vN, vE, vD) in m/ns, choosing best available method."""
+        if len(self._positions) < 2:
+            return (0.0, 0.0, 0.0)
+        if len(self._positions) < self._MIN_POINTS_FOR_WLS:
+            return self._estimate_velocity_linear()
+        return self._estimate_velocity_wls()
+
+    def estimate(self, at_timestamp_ns: int, fallback: PositionNED | None = None) -> PositionNED | None:
+        """Estimate target NED position at *at_timestamp_ns*.
+
+        With >=3 points: weighted least-squares fit filters noise and
+        uses all stored history. With 2 points: simple linear extrapolation.
+        """
+        if not self._positions:
+            return fallback
+
+        at_timestamp_ns = int(at_timestamp_ns)
+        self._forget_old(at_timestamp_ns)
+        if not self._positions:
+            return fallback
+
+        ts, newest = self._positions[-1]
+        if len(self._positions) == 1:
+            return newest
+
+        vn, ve, vd = self._estimate_velocity()
+        dt = at_timestamp_ns - ts
+        return PositionNED(
+            north_m=newest.north_m + vn * dt,
+            east_m=newest.east_m + ve * dt,
+            down_m=newest.down_m + vd * dt,
+        )
+
+    @property
+    def latest(self) -> PositionNED | None:
+        """Most recent stored position, or None."""
+        if self._positions:
+            return self._positions[-1][1]
+        return None
+
+
 def test():
     t = TargetEstimator()
     t.add_target_pos(XY(1, 2), 1)
@@ -110,7 +253,7 @@ def test():
     print(estimation)
 
     t = TargetEstimator()
-    bbox=Rect(x=0.489, y=0.211, w=0.181, h=0.019),
+    bbox=Rect.from_xywh(x=0.489, y=0.211, w=0.181, h=0.019),
 
 def test2():
     t = TargetEstimator()

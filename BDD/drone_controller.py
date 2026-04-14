@@ -9,16 +9,23 @@ from helpers import XY
 
 from drone import DroneMover
 from CommandRegulator import CommandRegulator
-from TargetEstimator import TargetEstimator
+from TargetEstimator import TargetEstimator, TargetEstimator3D
 from estimate_distance import estimate_distance_class, DistanceClass
+from telemetry_position import (
+    # get_position_ned,
+    # get_orientation_quaternion,
+    project_camera_to_ned,
+    get_pose,
+    project_ned_to_camera
+)
 # from drone_killswitch import kill_on_rc_switch_on_channel
 from helpers import Detection, Detections, MoveCommand, STOP
-
 
 from helpers import (
     debug_collect_call_info,
     LoggerWithPrefix
 )
+
 import logging
 logger = logging.getLogger(__name__)
 global_logger = logger
@@ -204,10 +211,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
     FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
 
-    INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
-    INERTIA_CORRECTION_LIMITS : XY = control_config.pop('inertia_correction_limits', XY(1, 1))
-    INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
+    # INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
+    # INERTIA_CORRECTION_LIMITS : XY = control_config.pop('inertia_correction_limits', XY(1, 1))
+    # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
 
+    ESTIMATION_USE_3D                   = control_config.pop('estimation_use_3d', False)
     ESTIMATION_LOOKAHEAD_FRAMES         = control_config.pop('estimation_lookahead_frames', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC        = control_config.pop('estimation_lookahead_dynamic', False)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
@@ -279,6 +287,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     # NOTE: HUGE age to avoid purging prev positions, since it doesn't work as expected RN
     target_estimator = TargetEstimator(max_target_position_age_nanoseconds=500_000_000_000)
+    target_estimator_3d = TargetEstimator3D(max_age_ns=500_000_000_000)
 
     def update_timestamps():
         nonlocal prev_frame_timestamp_ns
@@ -415,7 +424,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             skipped_detetions = 0
             frame_capture_timestampt_ns = detections_obj.meta.capture_timestamp_ns or None
 
-            telemetry_dict = drone.get_telemetry_dict_cached()
+            telemetry_dict : dict = drone.get_telemetry_dict_cached()
             logger.debug("telemetry: %s", telemetry_dict)
             debug_info = telemetry_dict
 
@@ -451,12 +460,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 delay_between_detections_ns = update_timestamps_on_detection()
                 estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
                 estimated_distance_class, estimated_distance_m = estimated_distance
-                # logger.debug("!!! Detection: %s", detection)
 
-                # drone_attitude = telemetry_dict.get('attitude_euler', 0)
-                # drone_pitch = drone_attitude['pitch_deg']
-                # drone_roll = drone_attitude['roll_deg']
-                # logger.debug("drone attitude: %s", drone_attitude)
+                drone_pose = get_pose(telemetry_dict)
+
+
                 mode = 'follow'
 
                 # distance_to_center = detection.bbox.center.distance_to(center)
@@ -473,79 +480,106 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     current_frame_timestamp_ns #frame_capture_timestampt_ns if frame_capture_timestampt_ns else current_frame_timestamp_ns
                 )
 
-                if target_estimator.history_size() >= 2:
-                    # estimate target based on previous positions
-                    mode += '* '
+                number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_FRAMES
+                if ESTIMATION_LOOKAHEAD_DYNAMIC and estimated_distance is not None:
+                    if estimated_distance_class == DistanceClass.FAR:
+                        number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR
+                    elif estimated_distance_class == DistanceClass.MEDIUM:
+                        number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM
+                    elif estimated_distance_class == DistanceClass.NEAR:
+                        number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
 
-                    number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_FRAMES
-                    if ESTIMATION_LOOKAHEAD_DYNAMIC and estimated_distance is not None:
-                        if estimated_distance_class == DistanceClass.FAR:
-                            number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR
-                        elif estimated_distance_class == DistanceClass.MEDIUM:
-                            number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM
-                        elif estimated_distance_class == DistanceClass.NEAR:
-                            number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
+                estimate_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
+                estimate_at_ns = current_frame_timestamp_ns + estimate_delta_ns
+                estimate_mode = ''
+                target_relative_pos_old = target_relative_pos
 
-                    estimation_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
-                    target_relative_pos_old = target_relative_pos
-                    target_relative_pos = target_estimator.estimate_target_pos(current_frame_timestamp_ns + estimation_delta_ns, target_relative_pos)
-                    logger.debug("!!! estimated new target pos %s (was %s), for +%sms (%d frames)",
+                if ESTIMATION_USE_3D:
+                    # --- 3-D world-frame position estimation ---
+                    if estimated_distance_m is not None and drone_pose:
+                        try:
+                            # _quat = get_orientation_quaternion(telemetry_dict)
+                            # _drone_pos = get_position_ned(telemetry_dict)
+                            target_pos_ned = project_camera_to_ned(
+                                detection.bbox.center.x,
+                                detection.bbox.center.y,
+                                AIM_POINT.x,
+                                AIM_POINT.y,
+                                FRAME_ANGLUAR_SIZE_DEG.x,
+                                FRAME_ANGLUAR_SIZE_DEG.y,
+                                estimated_distance_m,
+                                drone_pose.quaternion,
+                                drone_pose.position,
+                            )
+                            target_estimator_3d.add(target_pos_ned, current_frame_timestamp_ns)
+                            logger.debug("!!! drone pos NED: N=%.2f E=%.2f D=%.2f\n\ttarget NED: N=%.2f E=%.2f D=%.2f (distance=%.1fm)",
+                                        drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
+                                        target_pos_ned.north_m, target_pos_ned.east_m, target_pos_ned.down_m,
+                                        estimated_distance_m)
+
+                            estimated_pos = target_estimator_3d.estimate(
+                                estimate_at_ns,
+                                None
+                            )
+                            if estimated_pos is None:
+                                logger.warning('3D estimation fallback to: %s, target_estimator_3d has %s items',
+                                    target_pos_ned, target_estimator_3d.history_size())
+                                target_relative_pos = target_relative_pos_old
+                            else:
+                                # third one is distane, which we don't need
+                                estimated_x, estimated_y, _ = project_ned_to_camera(
+                                    estimated_pos,
+                                    AIM_POINT.x,
+                                    AIM_POINT.y,
+                                    FRAME_ANGLUAR_SIZE_DEG.x,
+                                    FRAME_ANGLUAR_SIZE_DEG.y,
+                                    drone_pose.quaternion,
+                                    drone_pose.position
+                                )
+                                target_relative_pos = XY(estimated_x, estimated_y)
+
+                            estimate_mode = '3D'
+                        except Exception:
+                            logger.debug("3D estimation failed", exc_info=True)
+
+                # NOTE: ??? maybe use as fallback if 3d estimation is not available
+                else:
+                    if target_estimator.history_size() >= 2:
+                        # estimate target based on previous positions
+                        estimate_mode = '2D'
+                        target_relative_pos = target_estimator.estimate_target_pos(estimate_at_ns, target_relative_pos)
+
+                if estimate_mode:
+                    mode += '*' + estimate_mode
+
+                    logger.debug("!!! %s estimated new target pos %s (was %s), for +%sms (%d frames)",
+                            estimate_mode,
                             target_relative_pos,
                             target_relative_pos_old,
-                            estimation_delta_ns / 1000_000,
+                            estimate_delta_ns / 1000_000,
                             number_of_frames_to_estimate_pos)
-
-                odometry = telemetry_dict.get('odometry', {}) or {}
-                flight_altitude = -1 * odometry.get('position_body', {}).get("z_m", 0)
-
-                # max_angle_divisor = 4
-                # # # Adjusting how much drone can pitch or roll based on distance to target
-                # if flight_altitude > 4: # detection.bbox.width > 0.3 or detection.bbox.height > 0.3:
-                #     # Drone is close
-                #     max_angle_divisor = 1
-                #     mode += " FLIGHT  "
-                # elif flight_altitude > 3: #detection.bbox.width > 0.15 or detection.bbox.height > 0.15:
-                #     # Drone is mid-range
-                #     max_angle_divisor = 2
-                #     mode += " SPEEDUP "
-                # else:
-                #     # Drone is far
-                #     max_angle_divisor = 4
-                #     mode += " TAKEOFF "
-
-                # if True: # move sideways more
-                #     roll_pitch_adjust = XY(
-                #         0.75, # roll
-                #         1.5   # pitch
-                #     )
-                #     angle_to_target = angle_to_target.multiplied_by_XY(roll_pitch_adjust)
-                #     logger.debug("angle to target adjusted: %s", angle_to_target)
-
-
-                # # logger.debug('!!!! max_angle_divisor: %s', max_angle_divisor)
-                # logger.debug("angle to target adjusted for mode: %s", angle_to_target)
 
                 seen_target = True
 
                 target_relative_pos_uncorrected = target_relative_pos
                 # Inertia correction: feedforward from actual velocity in FRD frame
-                if INERTIA_CORRECTION_GAIN != 0 and target_relative_pos is not None:
-                    inertia_correction = compute_inertia_correction(
-                        telemetry_dict,
-                        target_relative_pos,
-                        INERTIA_CORRECTION_GAIN,
-                        INERTIA_CORRECTION_MIN_SPEED_MS
-                    )
+                # if INERTIA_CORRECTION_GAIN != 0 and target_relative_pos is not None:
+                #     inertia_correction = compute_inertia_correction(
+                #         telemetry_dict,
+                #         target_relative_pos,
+                #         INERTIA_CORRECTION_GAIN,
+                #         INERTIA_CORRECTION_MIN_SPEED_MS
+                #     )
 
-                    logger.info("inertia correction before clamping: %s", inertia_correction)
-                    # clamping to the limits
-                    inertia_correction = XY(
-                        clamp(-INERTIA_CORRECTION_LIMITS.x, inertia_correction.x, INERTIA_CORRECTION_LIMITS.x),
-                        clamp(-INERTIA_CORRECTION_LIMITS.y, inertia_correction.y, INERTIA_CORRECTION_LIMITS.y)
-                    )
-                    extra += f'inertia correction gain: {INERTIA_CORRECTION_GAIN:.2f} val: {inertia_correction}'
-                    target_relative_pos = target_relative_pos + inertia_correction
-                    logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
+                #     logger.info("inertia correction before clamping: %s", inertia_correction)
+                #     # clamping to the limits
+                #     inertia_correction = XY(
+                #         clamp(-INERTIA_CORRECTION_LIMITS.x, inertia_correction.x, INERTIA_CORRECTION_LIMITS.x),
+                #         clamp(-INERTIA_CORRECTION_LIMITS.y, inertia_correction.y, INERTIA_CORRECTION_LIMITS.y)
+                #     )
+                #     extra += f'inertia correction gain: {INERTIA_CORRECTION_GAIN:.2f} val: {inertia_correction}'
+                #     target_relative_pos = target_relative_pos + inertia_correction
+                #     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 
                 # Note target_relative_pos is already an offset from AIM_POINT
                 distance_to_center = target_relative_pos.distance_to(XY(0, 0))
@@ -633,6 +667,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES and target_estimator.history_size() > 0:
                     logger.warning("!!! CLEARING HISTORY")
                     target_estimator.clear_history()
+                    target_estimator_3d.clear_history()
 
                 if seen_target:
                     prev_angle_to_target *= FADE_COEFF
@@ -676,6 +711,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     'selected' : detection,
                     'telemetry': debug_info,
                     'selected_detection_projected_pos' : target_relative_pos_uncorrected,
+                    # 'target_pos_ned' : target_estimator_3d.latest,
+                    # 'target_pos_ned_estimated' : target_estimator_3d.estimate(current_frame_timestamp_ns),
                     # 'inertia_accumuated' : target_relative_pos,
                     'move_goal' : target_relative_pos
                 }

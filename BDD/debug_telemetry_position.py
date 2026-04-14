@@ -36,7 +36,7 @@ def parse_telemetry_log(path: Path) -> list[FramePose]:
             ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f")
             frame_id = int(m.group(2))
             try:
-                telemetry_dict = eval(m.group(3))  # noqa: S307 — trusted log data
+                telemetry_dict = eval(m.group(3))  # noqa: S307 -- trusted log data
                 pose = get_pose(telemetry_dict)
                 results.append(FramePose(timestamp=ts, frame_id=frame_id, pose=pose))
             except SyntaxError as e:

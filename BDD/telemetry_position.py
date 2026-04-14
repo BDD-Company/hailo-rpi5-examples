@@ -157,7 +157,7 @@ def get_pose(telemetry: dict) -> Pose:
     )
 
 
-def project_detection_to_ned(
+def project_camera_to_ned(
     detection_center_x: float,
     detection_center_y: float,
     aim_point_x: float,
@@ -229,7 +229,85 @@ def project_detection_to_ned(
     )
 
 
+def rotate_ned_to_frd(q: Quaternion, north: float, east: float, down: float) -> tuple[float, float, float]:
+    """Rotate a vector from world frame (NED) to body frame (FRD) using quaternion.
+
+    This is the inverse of rotate_frd_to_ned: uses the conjugate quaternion.
+    """
+    qc = Quaternion(w=q.w, x=-q.x, y=-q.y, z=-q.z)
+    return rotate_frd_to_ned(qc, north, east, down)
+
+
+def project_ned_to_camera(
+    target_pos: PositionNED,
+    aim_point_x: float,
+    aim_point_y: float,
+    fov_h_deg: float,
+    fov_v_deg: float,
+    quaternion: Quaternion,
+    drone_pos: PositionNED,
+) -> tuple[float, float, float]:
+    """Project an absolute NED position back into normalised camera coordinates.
+
+    This is the exact inverse of project_camera_to_ned.
+
+    Parameters
+    ----------
+    target_pos : PositionNED
+        Target position in the NED world frame.
+    aim_point_x, aim_point_y : float
+        Reference point in normalised image coordinates (usually 0.5, 0.5).
+    fov_h_deg, fov_v_deg : float
+        Camera horizontal / vertical field-of-view in degrees.
+    quaternion : Quaternion
+        Body-to-NED orientation quaternion from telemetry.
+    drone_pos : PositionNED
+        Drone position in NED frame from telemetry.
+
+    Returns
+    -------
+    (detection_center_x, detection_center_y, distance_m)
+        detection_center_x/y in normalised image coordinates (0-1, origin top-left).
+        distance_m is the straight-line distance from camera to target.
+    """
+    # Offset in NED
+    dn = target_pos.north_m - drone_pos.north_m
+    de = target_pos.east_m - drone_pos.east_m
+    dd = target_pos.down_m - drone_pos.down_m
+
+    # Rotate NED offset to FRD body frame
+    frd_x, frd_y, frd_z = rotate_ned_to_frd(quaternion, dn, de, dd)
+
+    # Distance is the length of the offset vector
+    distance_m = math.sqrt(frd_x * frd_x + frd_y * frd_y + frd_z * frd_z)
+
+    # Recover unnormalised ray by scaling so that z component = -1
+    # (forward transform used ray_z = -1 before normalisation)
+    scale = -1.0 / frd_z
+    ray_x = frd_x * scale
+    ray_y = frd_y * scale
+
+    # Angular half-extents at unit distance along optical axis
+    half_h = math.tan(math.radians(fov_h_deg / 2.0))
+    half_v = math.tan(math.radians(fov_v_deg / 2.0))
+
+    # Invert the camera-to-ray mapping:
+    #   ray_x = -ty * 2 * half_v  =>  ty = -ray_x / (2 * half_v)
+    #   ray_y = -tx * 2 * half_h  =>  tx = -ray_y / (2 * half_h)
+    ty = -ray_x / (2.0 * half_v)
+    tx = -ray_y / (2.0 * half_h)
+
+    # tx = aim_point_x - detection_center_x  =>  detection_center_x = aim_point_x - tx
+    detection_center_x = aim_point_x - tx
+    detection_center_y = aim_point_y - ty
+
+    return detection_center_x, detection_center_y, distance_m
+
+
 if __name__ == "__main__":
+    import itertools
+    import helpers
+
     example = {
         "attitude_euler": {
             "pitch_deg": 4.369004726409912,
@@ -312,3 +390,46 @@ if __name__ == "__main__":
 
     euler_from_q = pose.quaternion.to_euler()
     print(f"  Quaternion->Euler: roll={euler_from_q.roll_deg:.2f}°  pitch={euler_from_q.pitch_deg:.2f}°  yaw={euler_from_q.yaw_deg:.2f}°")
+
+    # --- Roundtrip test: project_camera_to_ned <==> project_ned_to_camera ---
+    print("\n--- Roundtrip test ---")
+    detection_positions = (0.001, 0.01, 0.1, 0.3, 0.4, 0.5, 0.6, 0.7, 0.9, 0.99, 0.999)
+    test_cases = [helpers.XY(x, y) for x, y in itertools.product(detection_positions, detection_positions)]
+    aims = [helpers.XY(x, y) for x, y in itertools.product((0.3, 0.4, 0.5, 0.6, 0.7), (0.3, 0.4, 0.5, 0.6, 0.7))]
+    fovs = [helpers.XY(h * 1.5, h) for h in (30, 60, 90)]
+    dist = [10, 20, 40, 80, 160, 320]
+
+    all_pass = True
+    test_cases_executed = 0
+    test_cases_failed = 0
+    for aim, fov, dist in itertools.product(aims, fovs, dist):
+        fov_h, fov_v = fov.x, fov.y
+        for det in test_cases:
+            test_cases_executed += 1
+            ned = project_camera_to_ned(
+                det.x, det.y, aim.x, aim.y, fov_h, fov_v, dist,
+                pose.quaternion, pose.position,
+            )
+            rx, ry, rd = project_ned_to_camera(
+                ned, aim.x, aim.y, fov_h, fov_v,
+                pose.quaternion, pose.position,
+            )
+            err_x = abs(rx - det.x)
+            err_y = abs(ry - det.y)
+            err_d = abs(rd - dist)
+
+            ok = err_x < 1e-9 and err_y < 1e-9 and err_d < dist * 0.001
+            if not ok:
+                test_cases_failed += 1
+                all_pass = False
+                print('!!! FAILED aim:{aim}, fov:{fov}:')
+                print(f"\tin=({det.x:.1f},{det.y:.1f}, d={dist:.1f}) -> out=({rx:.6f},{ry:.6f},d={rd:.6f})"
+                    f"\n\terr=({err_x:.2e},{err_y:.2e},{err_d:.2e})")
+
+            if test_cases_failed > 10:
+                break
+
+        if test_cases_failed > 10:
+            break
+
+    print(f"  Overall: {'ALL PASSED' if all_pass else 'SOME FAILED'} of {test_cases_executed} tests")

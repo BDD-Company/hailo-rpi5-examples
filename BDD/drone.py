@@ -404,7 +404,7 @@ class DroneMover():
                 elapsed = now - upside_down_since
                 if elapsed >= self.upside_down_hold_s:
                     logger.warning(
-                        "Upside-down for %.2fs — stabilizing to level attitude", elapsed)
+                        "Upside-down for %.2fs - stabilizing to level attitude", elapsed)
                     await self.drone.offboard.set_attitude(
                         Attitude(0.0, 0.0, 0.0, 0.0))
                     upside_down_since = None
