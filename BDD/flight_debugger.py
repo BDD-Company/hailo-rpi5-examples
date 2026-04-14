@@ -1246,7 +1246,8 @@ class FlightDebugger(QWidget):
         self._video_view = VideoView(new_video)
         pos, vel, acc, mag = precompute_telemetry(frames)
         target_xy = parse_target_xy(log_lines)
-        self._telem_view = TelemetryView(frames, pos, vel, acc, mag, target_xy)
+        target_distance = parse_target_distance(log_lines)
+        self._telem_view = TelemetryView(frames, pos, vel, acc, mag, target_xy, target_distance)
 
         # Replace group boxes in splitters (preserve sizes)
         top_sizes = self._top_split.sizes()
