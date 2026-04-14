@@ -25,6 +25,7 @@ from datetime import datetime
 
 import cv2
 import numpy as np
+import ast
 
 from helpers import XY, Rect, Detection, Detections, FrameMetadata, dotdict, STOP
 from OverwriteQueue import OverwriteQueue
@@ -438,6 +439,12 @@ def main():
         default=None,
         help="Path to video file(s) or directory with video files",
     )
+    parser.add_argument(
+        "--params",
+        type=lambda x: dict(ast.literal_eval(x)),
+        default=None,
+        help="Extra parameters of config to overwrite",
+    )
     args = parser.parse_args()
 
     # Resolve log and video paths
@@ -501,13 +508,17 @@ def main():
 
     config_dict['DEBUG'] = True
     config_dict.update({
-            'estimation_use_3d' : True,
+            'estimation_3d' : True,
+            'estimation_3d_method' : 'numpy',
             'estimation_lookahead_frames': 5,
             'estimation_lookahead_dynamic': True,
             'estimation_lookahead_dynamic_frames_near': 2,
             'estimation_lookahead_dynamic_frames_medium': 4,
             'estimation_lookahead_dynamic_frames_far': 8,
     })
+
+    if args.params:
+        config_dict.update(args.params)
 
     #
     # =========================================================================
