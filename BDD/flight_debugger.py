@@ -49,6 +49,9 @@ from matplotlib.lines import Line2D
 from debug_telemetry_position import FramePose, parse_telemetry_log
 from telemetry_position import Quaternion, rotate_frd_to_ned
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ===========================================================================
 # Highlight style — edit these to customize log line highlighting
@@ -72,6 +75,7 @@ class HighlightStyle:
 
 FRAME_RE = re.compile(r"frame=#(\d+)")
 TARGET_RE = re.compile(r"frame=#(\d+).*?!!! target : XY\(([^,]+),\s*([^)]+)\)")
+ESTIMATED_DISTANCE_RE = re.compile(r"frame=#(\d+).*?estimated distance:\s*\([^,@]+[,@]\s*([\.\d]+)m?\)")
 
 
 # Drone body geometry (FRD frame) — arms at 45° for X-shaped quad
@@ -101,6 +105,7 @@ PROP_CENTRES_FRD = BODY_VERTS_FRD[:4]
 
 VECTOR_SCALE = {"vel": 1, "acc": 1, "mag": 8.0}
 TARGET_COLOR = (0.0, 0.75, 0.75)  # cyan/teal
+TARGET_COLOR_TRACE = (0.0, 0.5, 0.5)
 PLAYBACK_INTERVAL_MS = 50
 
 # Camera FOV pyramid — camera points along body -Z (up from drone back).
@@ -162,6 +167,18 @@ def parse_target_xy(lines: list[str]) -> dict[int, tuple[float, float]]:
             x, y = float(m.group(2)), float(m.group(3))
             targets[fid] = (x, y)
     return targets
+
+
+def parse_target_distance(lines: list[str]) -> dict[int, float]:
+    """Extract target distance per frame from log lines containing 'estimated distance:'."""
+    distances: dict[int, float] = {}
+    for line in lines:
+        m = ESTIMATED_DISTANCE_RE.search(line)
+        if m:
+            fid = int(m.group(1))
+            distance_meters = float(m.group(2))
+            distances[fid] = distance_meters
+    return distances
 
 
 class VideoReader:
@@ -571,7 +588,8 @@ class TelemetryView(QWidget):
     """Matplotlib-based 3-D visualisation of the drone state."""
 
     def __init__(self, frames: list[FramePose], pos, vel, acc, mag,
-                 target_xy: dict[int, tuple[float, float]]):
+                 target_xy: dict[int, tuple[float, float]],
+                 target_distance : dict[int, float]):
         super().__init__()
         self._frames = frames
         self._pos = pos
@@ -579,6 +597,7 @@ class TelemetryView(QWidget):
         self._acc = acc
         self._mag = mag
         self._target_xy = target_xy
+        self._target_distance = target_distance
 
         lo = QVBoxLayout(self)
         lo.setContentsMargins(0, 0, 0, 0)
@@ -658,6 +677,7 @@ class TelemetryView(QWidget):
         self._quiv_front = None
         self._quiv_target = None
         self._cam_polys = None
+        self._target_trail = {}  # idx -> Line3D artist (small ball)
 
         # Axis limits
         pad = 3.0
@@ -873,13 +893,29 @@ class TelemetryView(QWidget):
         target = self._target_xy.get(fp.frame_id)
         if target is not None:
             tx, ty = target
+            distance_m = self._target_distance.get(fp.frame_id, L)
+
             target_frd = np.array([[-ty * 2 * hv, -tx * 2 * hh, -L]])
+            norm = np.linalg.norm(target_frd)
+            if norm > 0 and distance_m is not None:
+                target_frd = target_frd / norm * distance_m
             target_ned = _quat_rotate_array(p.quaternion, target_frd)
             t = _ned_array_to_plot(target_ned)[0]
             self._quiv_target = self._ax.quiver(
                 cx, cy, cz, t[0], t[1], t[2],
                 color=TARGET_COLOR, arrow_length_ratio=0.05, lw=4.0)
             self._quiv_target.set_visible(self._show_target)
+
+            # Target trail ball at t
+            if idx not in self._target_trail:
+                ball, = self._ax.plot(
+                    [cx + t[0]], [cy + t[1]], [cz + t[2]],
+                    "o", color=TARGET_COLOR_TRACE, ms=3, alpha=0.6, zorder=3)
+                self._target_trail[idx] = ball
+
+        # Hide target trail balls from future frames, show past ones
+        for trail_idx, ball in self._target_trail.items():
+            ball.set_visible(self._show_target and trail_idx <= idx)
 
         # Body normal orientation (normal_plot is in plot coords: East, North, Up)
         n_horiz = math.hypot(normal_plot[0], normal_plot[1])
@@ -1098,7 +1134,9 @@ class FlightDebugger(QWidget):
 
         pos, vel, acc, mag = precompute_telemetry(frames)
         target_xy = parse_target_xy(log_lines)
-        self._telem_view = TelemetryView(frames, pos, vel, acc, mag, target_xy)
+        target_distance = parse_target_distance(log_lines)
+
+        self._telem_view = TelemetryView(frames, pos, vel, acc, mag, target_xy, target_distance)
 
         self._nav = NavigationBar(self._ctrl, frames,
                                   show_switch=bool(pairs))
@@ -1427,11 +1465,11 @@ def main():
 
     if args.dir:
         if not args.dir.is_dir():
-            print(f"ERROR: {args.dir} is not a directory")
+            logger.error(f"{args.dir} is not a directory")
             sys.exit(1)
         pairs = discover_pairs(args.dir)
         if not pairs:
-            print(f"ERROR: no log files found in {args.dir}")
+            logger.error(f"no log files found in {args.dir}")
             sys.exit(1)
         # Let user pick a session
         app = QApplication(sys.argv)
@@ -1449,27 +1487,27 @@ def main():
             parser.error("log_file is required (or use --dir)")
         app = QApplication(sys.argv)
 
-    print(f"Loading log: {args.log_file}")
+    logger.info(f"Loading log: {args.log_file}")
     frames = parse_telemetry_log(args.log_file)
     log_lines, frame_to_lines = parse_log_lines(args.log_file)
-    print(f"  {len(frames)} telemetry frames, {len(log_lines)} log lines")
+    logger.info(f"  {len(frames)} telemetry frames, {len(log_lines)} log lines")
 
     if not frames:
-        print("ERROR: no telemetry frames found in log file.")
+        logger.error("no telemetry frames found in log file.")
         sys.exit(1)
 
     video = VideoReader(video_source)
     if video.available:
-        print(f"  {video.total} video frames")
+        logger.info(f"  {video.total} video frames")
         if video.has_time_sync:
-            print(f"  video start: {video._video_start} (auto-detected from filename)")
+            logger.info(f"  video start: {video._video_start} (auto-detected from filename)")
         else:
-            print("  WARNING: could not detect video start time; using frame offset")
+            logger.warning("could not detect video start time; using frame offset")
     else:
         if not args.dir and not args.allow_no_video:
-            print(f"Can't load video from {args.video}")
+            logger.error(f"Can't load video from {args.video}")
             sys.exit(-1)
-        print("  (no video)")
+        logger.info("  (no video)")
 
     win = FlightDebugger(frames, log_lines, frame_to_lines,
                          video, args.log_file, video_display_path,
