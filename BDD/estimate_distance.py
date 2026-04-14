@@ -52,18 +52,18 @@ class DistanceClass(Enum):
 def estimate_distance_class(
     target_size_m: XY,
     frame_angular_size_deg: XY,
-    target_frame_size : XY,
-    distance_classes : list[float] = None
-) -> tuple[DistanceClass, float] | None:
-    distance_classes = distance_classes if distance_classes and len(distance_classes) == 2 else [5, 10]
-
+    target_frame_size : XY
+    # , distance_classes : list[float] = None
+) -> tuple[DistanceClass, float] | tuple[None, None]:
+    # distance_classes = distance_classes if distance_classes and len(distance_classes) == 2 else [5, 10]
+    max_size = max(target_size_m.x, target_size_m.y)
     dx, dy, d = estimate_distance(target_size_m, frame_angular_size_deg, target_frame_size)
     if d is None:
-        return None
+        return None, None
 
-    if d < distance_classes[0]:
+    if d < max_size * 5:
         return DistanceClass.NEAR, d
-    if d < distance_classes[1]:
+    if d < max_size * 20:
         return DistanceClass.MEDIUM, d
     else:
         return DistanceClass.FAR, d
