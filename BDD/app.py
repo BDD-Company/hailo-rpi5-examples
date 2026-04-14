@@ -297,6 +297,7 @@ def main():
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
+        'estimation_use_3d': True,
         'estimation_lookahead_frames': 2,
         'estimation_lookahead_dynamic': False,
         'estimation_lookahead_dynamic_frames_near':   1,
