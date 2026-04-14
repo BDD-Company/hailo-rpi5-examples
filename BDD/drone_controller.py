@@ -9,7 +9,7 @@ from helpers import XY
 
 from drone import DroneMover
 from CommandRegulator import CommandRegulator
-from TargetEstimator import TargetEstimator, TargetEstimator3D
+from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
 from estimate_distance import estimate_distance_class, DistanceClass
 from telemetry_position import (
     # get_position_ned,
@@ -215,7 +215,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     # INERTIA_CORRECTION_LIMITS : XY = control_config.pop('inertia_correction_limits', XY(1, 1))
     # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
 
-    ESTIMATION_USE_3D                   = control_config.pop('estimation_use_3d', False)
+    ESTIMATION_3D                   = control_config.pop('estimation_3d', False)
+    ESTIMATION_3D_METHOD                 = VelocityMethod(control_config.pop('estimation_3d_method', 'numpy')) # OR any VelocityMethod 'wls'
     ESTIMATION_LOOKAHEAD_FRAMES         = control_config.pop('estimation_lookahead_frames', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC        = control_config.pop('estimation_lookahead_dynamic', False)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
@@ -494,7 +495,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 estimate_mode = ''
                 target_relative_pos_old = target_relative_pos
 
-                if ESTIMATION_USE_3D:
+                if ESTIMATION_3D:
                     # --- 3-D world-frame position estimation ---
                     if estimated_distance_m is not None and drone_pose:
                         try:
@@ -519,7 +520,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                             estimated_pos = target_estimator_3d.estimate(
                                 estimate_at_ns,
-                                None
+                                None,
+                                method=ESTIMATION_3D_METHOD
                             )
                             if estimated_pos is None:
                                 logger.warning('3D estimation fallback to: %s, target_estimator_3d has %s items',
@@ -539,7 +541,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                 target_relative_pos = XY(estimated_x, estimated_y)
                             target_relative_pos = AIM_POINT - target_relative_pos
 
-                            estimate_mode = '3D'
+                            estimate_mode = f'3D={ESTIMATION_3D_METHOD}'
                         except Exception:
                             logger.debug("3D estimation failed", exc_info=True)
 

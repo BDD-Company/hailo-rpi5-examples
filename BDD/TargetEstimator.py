@@ -2,9 +2,20 @@
 
 import math
 from collections import deque
+from enum import Enum
+
+import numpy as np
 
 from helpers import XY, Rect
 from telemetry_position import PositionNED
+
+
+class VelocityMethod(Enum):
+    """Velocity estimation strategy for TargetEstimator3D."""
+    LINEAR = "linear"           # simple 2-point (last two samples)
+    WLS = "wls"                 # weighted least-squares (existing)
+    NUMPY_REGRESSION = "numpy"  # numpy linear regression over all samples
+    CLUSTER = "cluster"         # average first-N vs last-M cluster endpoints
 
 
 def _exp_fast(x: float) -> float:
@@ -192,15 +203,89 @@ class TargetEstimator3D:
         vd = (sw * swt_d - swt * sw_d) / denom
         return (vn, ve, vd)
 
-    def _estimate_velocity(self) -> tuple[float, float, float]:
-        """Return (vN, vE, vD) in m/ns, choosing best available method."""
+    def _estimate_velocity_numpy(self) -> tuple[float, float, float]:
+        """Numpy least-squares linear regression over all stored samples.
+
+        Fits pos = a + b*t for each NED axis using np.linalg.lstsq.
+        Returns (vN, vE, vD) in m/ns.
+        """
+        n = len(self._positions)
+        ts = np.empty(n)
+        north = np.empty(n)
+        east = np.empty(n)
+        down = np.empty(n)
+
+        ts_ref = self._positions[-1][0]
+        for i, (t, p) in enumerate(self._positions):
+            ts[i] = t - ts_ref
+            north[i] = p.north_m
+            east[i] = p.east_m
+            down[i] = p.down_m
+
+        # Design matrix [ones, t] for intercept + slope
+        A = np.column_stack([np.ones(n), ts])
+        # lstsq returns (solution, residuals, rank, sv); solution is [intercept, slope]
+        vn = np.linalg.lstsq(A, north, rcond=None)[0][1]
+        ve = np.linalg.lstsq(A, east, rcond=None)[0][1]
+        vd = np.linalg.lstsq(A, down, rcond=None)[0][1]
+        return (float(vn), float(ve), float(vd))
+
+    # Fraction of buffer used for each cluster in the cluster-averaging method.
+    _CLUSTER_FRACTION = 1 / 3
+
+    def _estimate_velocity_cluster(self) -> tuple[float, float, float]:
+        """Cluster-averaging velocity: average first-N and last-M positions.
+
+        Splits the buffer into a "beginning" cluster (first N samples) and
+        an "end" cluster (last M samples), averages each, then computes
+        velocity from the two averaged points and their mean timestamps.
+        This smooths out high-frequency noise and reveals the long-term trend.
+        Returns (vN, vE, vD) in m/ns.
+        """
+        total = len(self._positions)
+        k = max(1, int(total * self._CLUSTER_FRACTION))
+
+        # Average the first-k samples (beginning cluster)
+        t0 = 0.0; n0 = 0.0; e0 = 0.0; d0 = 0.0
+        for i in range(k):
+            ts, p = self._positions[i]
+            t0 += ts; n0 += p.north_m; e0 += p.east_m; d0 += p.down_m
+        t0 /= k; n0 /= k; e0 /= k; d0 /= k
+
+        # Average the last-k samples (end cluster)
+        t1 = 0.0; n1 = 0.0; e1 = 0.0; d1 = 0.0
+        for i in range(total - k, total):
+            ts, p = self._positions[i]
+            t1 += ts; n1 += p.north_m; e1 += p.east_m; d1 += p.down_m
+        t1 /= k; n1 /= k; e1 /= k; d1 /= k
+
+        dt = t1 - t0
+        if abs(dt) < 1e-6:
+            return self._estimate_velocity_linear()
+
+        return ((n1 - n0) / dt, (e1 - e0) / dt, (d1 - d0) / dt)
+
+    def _estimate_velocity(self, method: VelocityMethod = VelocityMethod.WLS) -> tuple[float, float, float]:
+        """Return (vN, vE, vD) in m/ns using the chosen method.
+
+        Falls back to simpler methods when there aren't enough samples.
+        """
         if len(self._positions) < 2:
             return (0.0, 0.0, 0.0)
         if len(self._positions) < self._MIN_POINTS_FOR_WLS:
             return self._estimate_velocity_linear()
-        return self._estimate_velocity_wls()
 
-    def estimate(self, at_timestamp_ns: int, fallback: PositionNED | None = None) -> PositionNED | None:
+        if method == VelocityMethod.LINEAR:
+            return self._estimate_velocity_linear()
+        elif method == VelocityMethod.NUMPY_REGRESSION:
+            return self._estimate_velocity_numpy()
+        elif method == VelocityMethod.CLUSTER:
+            return self._estimate_velocity_cluster()
+        else:
+            return self._estimate_velocity_wls()
+
+    def estimate(self, at_timestamp_ns: int, fallback: PositionNED | None = None,
+                 method: VelocityMethod = VelocityMethod.WLS) -> PositionNED | None:
         """Estimate target NED position at *at_timestamp_ns*.
 
         With >=3 points: weighted least-squares fit filters noise and
@@ -218,7 +303,7 @@ class TargetEstimator3D:
         if len(self._positions) == 1:
             return newest
 
-        vn, ve, vd = self._estimate_velocity()
+        vn, ve, vd = self._estimate_velocity(method)
         dt = at_timestamp_ns - ts
         return PositionNED(
             north_m=newest.north_m + vn * dt,
