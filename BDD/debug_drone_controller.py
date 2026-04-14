@@ -30,7 +30,7 @@ from helpers import XY, Rect, Detection, Detections, FrameMetadata, dotdict, STO
 from OverwriteQueue import OverwriteQueue
 from flight_debugger import VideoReader, parse_log_lines
 from debug_output import debug_output_thread
-from opencv_show_image_sink import OpenCVShowImageSink
+from interfaces import FrameSinkInterface
 
 import time as real_time_module
 
@@ -268,8 +268,9 @@ class MockDroneMover:
 class ReplayQueue:
     """Queue-like object that yields pre-built Detections one at a time.
 
-    Compatible with OverwriteQueue.get(timeout) interface used by
-    drone_controller.
+    get() blocks until advance() is called (from the display sink on
+    keypress), giving frame-by-frame stepping.  The first frame is
+    auto-advanced so the pipeline can start without user interaction.
     """
 
     def __init__(self, items: list):
@@ -277,12 +278,23 @@ class ReplayQueue:
         self._index = 0
         self._lock = threading.Lock()
         self._on_frame_callback = None
+        self._advance_event = threading.Event()
+        self._stopped = False
+        # Auto-advance so the first frame is processed immediately
+        self._advance_event.set()
 
     def set_on_frame_callback(self, callback):
         """Called with (frame_id, item_index) before returning each item."""
         self._on_frame_callback = callback
 
     def get(self, timeout=None):
+        # Block until the display sink signals "advance"
+        self._advance_event.wait()
+        self._advance_event.clear()
+
+        if self._stopped:
+            return STOP
+
         with self._lock:
             if self._index >= len(self._items):
                 return STOP
@@ -292,12 +304,61 @@ class ReplayQueue:
                 self._on_frame_callback(item.frame_id, self._index - 1)
             return item
 
+    def advance(self):
+        """Unblock get() so the next frame is returned."""
+        self._advance_event.set()
+
+    def stop(self):
+        """Signal the queue to return STOP and unblock any waiting get()."""
+        self._stopped = True
+        self._advance_event.set()
+
     def put(self, item):
         pass
 
     def qsize(self):
         with self._lock:
             return len(self._items) - self._index
+
+
+# ───────────────────────────────────────────────────────────────────────
+# InteractiveDisplaySink — step-through display controlled by keypress
+# ───────────────────────────────────────────────────────────────────────
+
+# Key codes returned by cv2.waitKeyEx on Linux
+_KEY_RIGHT = 65363
+_KEY_LEFT  = 65361
+
+class InteractiveDisplaySink:
+    """Frame sink that blocks on each frame until the user presses a key.
+
+    Right arrow  — advance one frame
+    ESC / q      — stop replay
+    """
+
+    def __init__(self, replay_queue: ReplayQueue, window_title: str = ""):
+        self._replay_queue = replay_queue
+        self._window_title = window_title or "Debug Drone Controller Replay"
+        self._window_name = "debug_replay"
+
+    def start(self, frame_size):
+        cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+        cv2.setWindowTitle(self._window_name, self._window_title)
+        cv2.resizeWindow(self._window_name, frame_size[0], frame_size[1])
+
+    def process_frame(self, frame):
+        cv2.imshow(self._window_name, frame)
+        while True:
+            key = cv2.waitKeyEx(0)  # block indefinitely
+            if key == _KEY_RIGHT or key == ord("d"):
+                self._replay_queue.advance()
+                return
+            if key == 27 or key == ord("q"):  # ESC or q
+                self._replay_queue.stop()
+                return
+
+    def stop(self):
+        cv2.destroyWindow(self._window_name)
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -414,8 +475,11 @@ def main():
             'target_lost_fade_per_frame': 0.99,
             'target_estimator_clear_history_after_target_lost_frames': 3,
             'estimation_use_3d': False,
-            'estimation_lookahead_frames': 2,
+            'estimation_lookahead_frames': 5,
             'estimation_lookahead_dynamic': False,
+            'estimation_lookahead_dynamic_frames_near': 3,
+            'estimation_lookahead_dynamic_frames_medium': 10,
+            'estimation_lookahead_dynamic_frames_far': 20,
             'pd_coeff_p': 3,
             'pd_coeff_d': 0,
             'pd_coeff_p_safe_min': 0.6,
@@ -423,7 +487,7 @@ def main():
             'pd_coeff_p_max': 10,
             'pd_coeff_p_dynamic': False,
             'frame_angular_size_deg': XY(107, 85),
-            'target_size_m': XY(1.8, 1.8),
+            'target_size_m': XY(1.7, 2),
             'safe_takeoff_period_ns': 300_000_000,
             'delay_takeof_until_n_detection_frames': 3,
             'aim_point': XY(0.5, 0.5),
@@ -436,7 +500,14 @@ def main():
     #
 
     config_dict['DEBUG'] = True
-    config_dict['estimation_use_3d'] = True
+    config_dict.update({
+            'estimation_use_3d' : True,
+            'estimation_lookahead_frames': 5,
+            'estimation_lookahead_dynamic': True,
+            'estimation_lookahead_dynamic_frames_near': 2,
+            'estimation_lookahead_dynamic_frames_medium': 4,
+            'estimation_lookahead_dynamic_frames_far': 8,
+    })
 
     #
     # =========================================================================
@@ -510,7 +581,7 @@ def main():
     # ── Set up output display ──────────────────────────────────────────
     output_queue = OverwriteQueue(maxsize=200)
 
-    sink = OpenCVShowImageSink(window_title=f"Debug Drone Controller Replay of {log_file} and {video_path}")
+    sink = InteractiveDisplaySink(replay_queue, window_title=f"Debug Controller {log_file}  {video_path}")
 
     output_thread = threading.Thread(
         target=debug_output_thread,
