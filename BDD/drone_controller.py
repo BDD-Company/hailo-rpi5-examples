@@ -287,7 +287,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     # NOTE: HUGE age to avoid purging prev positions, since it doesn't work as expected RN
     target_estimator = TargetEstimator(max_target_position_age_nanoseconds=500_000_000_000)
-    target_estimator_3d = TargetEstimator3D(max_age_ns=500_000_000_000)
+    target_estimator_3d = TargetEstimator3D(max_positions=60, max_age_ns=500_000_000_000)
 
     def update_timestamps():
         nonlocal prev_frame_timestamp_ns
@@ -458,8 +458,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             if detection.confidence >= CONFIDENCE_MIN:
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
-                estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
-                estimated_distance_class, estimated_distance_m = estimated_distance
+                estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
 
                 drone_pose = get_pose(telemetry_dict)
 
@@ -480,16 +479,17 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     current_frame_timestamp_ns #frame_capture_timestampt_ns if frame_capture_timestampt_ns else current_frame_timestamp_ns
                 )
 
-                number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_FRAMES
-                if ESTIMATION_LOOKAHEAD_DYNAMIC and estimated_distance is not None:
+                estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_FRAMES
+                if ESTIMATION_LOOKAHEAD_DYNAMIC:
+                    distance = estimated_distance_m if estimated_distance_m else 1
                     if estimated_distance_class == DistanceClass.FAR:
-                        number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR
+                        estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR + int(math.sqrt(distance))
                     elif estimated_distance_class == DistanceClass.MEDIUM:
-                        number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM
+                        estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM + int(math.sqrt(distance))
                     elif estimated_distance_class == DistanceClass.NEAR:
-                        number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
+                        estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
 
-                estimate_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
+                estimate_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * estimate_lookeahead_frames
                 estimate_at_ns = current_frame_timestamp_ns + estimate_delta_ns
                 estimate_mode = ''
                 target_relative_pos_old = target_relative_pos
@@ -507,15 +507,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                 AIM_POINT.y,
                                 FRAME_ANGLUAR_SIZE_DEG.x,
                                 FRAME_ANGLUAR_SIZE_DEG.y,
-                                estimated_distance_m,
+                                estimated_distance_m * 2,
                                 drone_pose.quaternion,
                                 drone_pose.position,
                             )
                             target_estimator_3d.add(target_pos_ned, current_frame_timestamp_ns)
                             logger.debug("!!! drone pos NED: N=%.2f E=%.2f D=%.2f\n\ttarget NED: N=%.2f E=%.2f D=%.2f (distance=%.1fm)",
-                                        drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
-                                        target_pos_ned.north_m, target_pos_ned.east_m, target_pos_ned.down_m,
-                                        estimated_distance_m)
+                                    drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
+                                    target_pos_ned.north_m, target_pos_ned.east_m, target_pos_ned.down_m,
+                                    estimated_distance_m)
 
                             estimated_pos = target_estimator_3d.estimate(
                                 estimate_at_ns,
@@ -537,6 +537,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                     drone_pose.position
                                 )
                                 target_relative_pos = XY(estimated_x, estimated_y)
+                            target_relative_pos = AIM_POINT - target_relative_pos
 
                             estimate_mode = '3D'
                         except Exception:
@@ -550,14 +551,14 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         target_relative_pos = target_estimator.estimate_target_pos(estimate_at_ns, target_relative_pos)
 
                 if estimate_mode:
-                    mode += '*' + estimate_mode
+                    mode += f' *{estimate_mode}:{estimate_lookeahead_frames}f '
 
                     logger.debug("!!! %s estimated new target pos %s (was %s), for +%sms (%d frames)",
                             estimate_mode,
                             target_relative_pos,
                             target_relative_pos_old,
                             estimate_delta_ns / 1000_000,
-                            number_of_frames_to_estimate_pos)
+                            estimate_lookeahead_frames)
 
                 seen_target = True
 
@@ -632,7 +633,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 logger.debug("angle to target: %s", angle_to_target)
 
-                mode += f'size: {target_size:.3}, estimated distance: {estimated_distance}, p: {pd_coeff_p * 1.0 : .3} '
+                mode += f'size: {target_size:.3}, estimated distance: ({estimated_distance_class} @ {estimated_distance_m:.1f}m), p: {pd_coeff_p * 1.0 : .3} '
 
                 # while still taking off, avoid dangerous moves
                 # if flight_time_ns < SAFE_TAKEOFF_PERIOD_NS:
