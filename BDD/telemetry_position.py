@@ -4,14 +4,14 @@ import math
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Vector3:
     x: float
     y: float
     z: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PositionNED:
     north_m: float
     east_m: float
@@ -22,21 +22,21 @@ class PositionNED:
         return -self.down_m
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VelocityNED:
     north_m_s: float
     east_m_s: float
     down_m_s: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EulerAngles:
     pitch_deg: float
     roll_deg: float
     yaw_deg: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Quaternion:
     w: float
     x: float
@@ -66,21 +66,21 @@ class Quaternion:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AccelerationFRD:
     forward_m_s2: float
     right_m_s2: float
     down_m_s2: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MagneticFieldFRD:
     forward_gauss: float
     right_gauss: float
     down_gauss: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Pose:
     position: PositionNED
     orientation: EulerAngles
@@ -154,6 +154,78 @@ def get_pose(telemetry: dict) -> Pose:
         timestamp_us=telemetry["odometry"]["time_usec"],
         acceleration=get_acceleration_frd(telemetry),
         magnetic_field=get_magnetic_field_frd(telemetry),
+    )
+
+
+def project_detection_to_ned(
+    detection_center_x: float,
+    detection_center_y: float,
+    aim_point_x: float,
+    aim_point_y: float,
+    fov_h_deg: float,
+    fov_v_deg: float,
+    distance_m: float,
+    quaternion: Quaternion,
+    drone_pos: PositionNED,
+) -> PositionNED:
+    """Project a 2D detection + distance estimate into an absolute NED position.
+
+    Camera is mounted pointing up (-Z in FRD body frame).
+    Frame bottom = drone front, frame left = drone left.
+
+    Parameters
+    ----------
+    detection_center_x, detection_center_y : float
+        Detection centre in normalised image coordinates (0-1, origin top-left).
+    aim_point_x, aim_point_y : float
+        Reference point in normalised image coordinates (usually 0.5, 0.5).
+    fov_h_deg, fov_v_deg : float
+        Camera horizontal / vertical field-of-view in degrees.
+    distance_m : float
+        Estimated distance from camera to target (metres).
+    quaternion : Quaternion
+        Body-to-NED orientation quaternion from telemetry.
+    drone_pos : PositionNED
+        Drone position in NED frame from telemetry.
+
+    Returns
+    -------
+    PositionNED
+        Estimated absolute target position in the NED world frame.
+    """
+    # Target offset in normalised camera frame (same convention as drone_controller):
+    #   tx > 0  ⟹  target is LEFT  of aim point
+    #   ty > 0  ⟹  target is ABOVE aim point (toward frame top = body rear)
+    tx = aim_point_x - detection_center_x
+    ty = aim_point_y - detection_center_y
+
+    # Angular half-extents at unit distance along optical axis
+    half_h = math.tan(math.radians(fov_h_deg / 2.0))
+    half_v = math.tan(math.radians(fov_v_deg / 2.0))
+
+    # 3-D ray in FRD body frame (camera optical axis = -Z_body = up).
+    # Matches flight_debugger.py projection:
+    #   frd_x (forward) = -ty * 2 * half_v   (frame top = rear ⟹ negate)
+    #   frd_y (right)   = -tx * 2 * half_h   (frame left = body left ⟹ negate)
+    #   frd_z (down)    = -1                  (optical axis points up)
+    ray_x = -ty * 2.0 * half_v
+    ray_y = -tx * 2.0 * half_h
+    ray_z = -1.0
+
+    # Normalise and scale by estimated distance
+    ray_len = math.sqrt(ray_x * ray_x + ray_y * ray_y + ray_z * ray_z)
+    scale = distance_m / ray_len
+    offset_frd_x = ray_x * scale
+    offset_frd_y = ray_y * scale
+    offset_frd_z = ray_z * scale
+
+    # Rotate offset from FRD body frame to NED world frame
+    dn, de, dd = rotate_frd_to_ned(quaternion, offset_frd_x, offset_frd_y, offset_frd_z)
+
+    return PositionNED(
+        north_m=drone_pos.north_m + dn,
+        east_m=drone_pos.east_m + de,
+        down_m=drone_pos.down_m + dd,
     )
 
 
