@@ -44,9 +44,9 @@ class OverwriteQueue(Generic[T]):
             deadline = time.monotonic() + timeout
             while not self._d:
                 remaining = deadline - time.monotonic()
-                if remaining <= 0 or not self._cv.wait(remaining):
+                if remaining <= 0:
                     raise queue.Empty
-
+                self._cv.wait(remaining)
             return self._d.popleft()
 
     def get_nowait(self) -> T:
