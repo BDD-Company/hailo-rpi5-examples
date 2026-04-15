@@ -508,7 +508,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                 AIM_POINT.y,
                                 FRAME_ANGLUAR_SIZE_DEG.x,
                                 FRAME_ANGLUAR_SIZE_DEG.y,
-                                estimated_distance_m * 2,
+                                estimated_distance_m,
                                 drone_pose.quaternion,
                                 drone_pose.position,
                             )
