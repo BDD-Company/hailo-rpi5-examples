@@ -119,7 +119,7 @@ class TargetEstimator3D:
     accounted for - successive positions directly reveal target velocity.
     """
 
-    def __init__(self, max_positions: int = 10, max_age_ns: int = 500_000_000):
+    def __init__(self, max_positions: int = 20, max_age_ns: int = 500_000_000):
         assert max_positions > 1
         assert max_age_ns > 1
         self.max_positions = int(max_positions)

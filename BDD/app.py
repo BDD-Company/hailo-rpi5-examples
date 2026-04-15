@@ -297,7 +297,8 @@ def main():
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
-        'estimation_use_3d': True,
+        'estimation_3d': True,
+        'estimation_3d_mode': 'wls',
         'estimation_lookahead_frames': 2,
         'estimation_lookahead_dynamic': False,
         'estimation_lookahead_dynamic_frames_near':   1,
@@ -339,7 +340,7 @@ def main():
         'inertia_correction_min_speed_ms': 5,
 
         'safe_takeoff_period_ns': 300_000_000,
-        'delay_takeof_until_n_detection_frames' : 3,
+        'delay_takeof_until_n_detection_frames' : 20,
 
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
