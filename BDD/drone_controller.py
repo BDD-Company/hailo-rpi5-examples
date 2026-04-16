@@ -230,6 +230,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     ESTIMATION_3D_METHOD = VelocityMethod(estimation_3d_method) # OR any VelocityMethod 'wls'
     ESTIMATION_LOOKAHEAD_FRAMES         = control_config.pop('estimation_lookahead_frames', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC        = control_config.pop('estimation_lookahead_dynamic', False)
+    ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT   = control_config.pop('estimation_lookahead_dynamic_sqrt', True)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
@@ -515,12 +516,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_FRAMES
                 if ESTIMATION_LOOKAHEAD_DYNAMIC:
                     distance = estimated_distance_m if estimated_distance_m else 1
-                    if estimated_distance_class == DistanceClass.FAR:
-                        estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR + int(math.sqrt(distance))
-                    elif estimated_distance_class == DistanceClass.MEDIUM:
-                        estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM + int(math.sqrt(distance))
-                    elif estimated_distance_class == DistanceClass.NEAR:
-                        estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
+                    if ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT:
+                        estimate_lookeahead_frames = int(math.sqrt(distance))
+                    else:
+                        if estimated_distance_class == DistanceClass.FAR:
+                            estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR + int(math.sqrt(distance))
+                        elif estimated_distance_class == DistanceClass.MEDIUM:
+                            estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM + int(math.sqrt(distance))
+                        elif estimated_distance_class == DistanceClass.NEAR:
+                            estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
 
                 estimate_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * estimate_lookeahead_frames
                 estimate_at_ns = current_frame_timestamp_ns + estimate_delta_ns

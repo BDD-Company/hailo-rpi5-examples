@@ -301,7 +301,8 @@ def main():
         'estimation_3d_mode': 'wls',
         'follow_target_position_ned': False,
         'estimation_lookahead_frames': 2,
-        'estimation_lookahead_dynamic': False,
+        'estimation_lookahead_dynamic': True,
+        'estimation_lookahead_dynamic_sqrt': True,
         'estimation_lookahead_dynamic_frames_near':   1,
         'estimation_lookahead_dynamic_frames_medium': 2,
         'estimation_lookahead_dynamic_frames_far':    4, # can't be too big -- estimation will be too FAAR away.
