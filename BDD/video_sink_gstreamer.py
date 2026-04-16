@@ -315,6 +315,46 @@ class RecorderSink(interfaces.FrameSinkInterface):
     #     filename = datetime.datetime.now().strftime(self.filename_pattern) % (self.filename_base, fragment_id)
     #     return str(self.out_dir / filename)
 
+# ------------------------ Class 3: Display Sink ------------------------------
+class DisplaySink(interfaces.FrameSinkInterface):
+    """
+    Display annotated frames on screen using GStreamer autovideosink.
+    Pipeline: appsrc -> videoconvert -> autovideosink
+    """
+    def __init__(self, fps_hint: float = 30.0, window_title: str = 'BDD'):
+        self.fps = float(fps_hint) if fps_hint and fps_hint > 0 else 30.0
+        self.window_title = window_title
+        self.w, self.h = 0, 0
+        self._pipeline = None
+        self._appsrc = None
+        self._pusher = _FrameQueuePusher(lambda: self._appsrc, drop_if_error=True, overwriting_queue=True, queue_size=4)
+    def start(self, frame_size):
+        self.w, self.h = map(int, frame_size)
+        launch = (
+            f'appsrc name=disp_src is-live=true block=false format=time do-timestamp=true '
+            f'caps=video/x-raw,format=RGB,width={self.w},height={self.h} '
+            f'! videoconvert '
+            f'! autovideosink sync=false title="{self.window_title}"'
+        )
+        self._pipeline = Gst.parse_launch(launch)
+        self._appsrc = self._pipeline.get_by_name("disp_src")
+        self._pipeline.set_state(Gst.State.PLAYING)
+        self._pusher.start()
+        logger.info(f"[DisplaySink] Showing video via autovideosink ({self.w}x{self.h})")
+    def process_frame(self, frame: np.ndarray):
+        self._pusher.submit(frame)
+    def stop(self):
+        self._pusher.stop()
+        if self._pipeline:
+            try:
+                if self._appsrc is not None:
+                    self._appsrc.emit("end-of-stream")
+                else:
+                    self._pipeline.send_event(Gst.Event.new_eos())
+            except Exception:
+                logger.exception("[DisplaySink] Error sending EOS")
+            self._pipeline.set_state(Gst.State.NULL)
+
 
 # ----------------------------- Example usage ---------------------------------
 if __name__ == "__main__":

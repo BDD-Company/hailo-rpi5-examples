@@ -38,8 +38,20 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     MIN_CONFIDENCE       = control_config.pop('confidence_min', 0.1)
     FADE_COEFF           = control_config.pop('target_lost_fade_per_frame', 0.5)
     FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
-    # fraction of the full-FOV angle to send per frame; reduce to slow down camera rotation
-    MOVE_SCALE             = control_config.pop('move_scale', 0.3)
+    # P-gain at centre (small error) — keeps oscillation away
+    MOVE_SCALE_MIN         = control_config.pop('move_scale', 0.3)
+    # P-gain at large error — enables fast catch-up; equals MOVE_SCALE_MIN if not set
+    MOVE_SCALE_MAX         = control_config.pop('move_scale_max', MOVE_SCALE_MIN)
+    # normalised error distance at which MOVE_SCALE_MAX is fully reached (linear ramp)
+    MOVE_SCALE_RAMP_DIST   = control_config.pop('move_scale_ramp_dist', 0.3)
+    # D-gain: multiplier for error derivative (e[n] - e[n-1]); dampens oscillation
+    # positive value reduces command when approaching target, resists overshoot
+    D_COEFF                = control_config.pop('d_coeff', 0.0)
+    # sign of each axis: set -1 to flip that axis direction
+    # x: +1 = pan right when target is right; y: +1 = tilt down when target is below
+    AXIS_SIGNS             = control_config.pop('axis_signs', XY(1.0, 1.0))
+    # normalised distance from center [0..0.5] below which we stop sending move commands
+    DEAD_ZONE              = control_config.pop('dead_zone_normalized', 0.02)
 
     for _key in list(control_config):
         control_config.pop(_key)
@@ -85,6 +97,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     platform = debug_collect_call_info(platform, history_max_size=3)
 
     skipped_detetions = 0
+    prev_target_relative_pos = None 
     prev_angle_to_target = XY(0, 0)
 
     while True:
@@ -133,15 +146,51 @@ async def platform_controlling_thread_async(platform_connection_string, platform
                 # positive x → target is to the right  → pan right
                 # positive y → target is below center  → tilt down
                 target_relative_pos = detection.bbox.center - center
-                logger.debug("target offset: %s  angle: %s", target_relative_pos, angle_to_target)
-                platform.move_relative(angle_to_target.x, angle_to_target.y)
-                debug_info["mode"] = f"follow  size={detection.bbox.area():.3f}"
-                debug_info["target_relative_pos"] = {'x': round(target_relative_pos.x, 3), 'y': round(target_relative_pos.y, 3)} if target_relative_pos is not None else None
-                debug_info["angle_to_target"] = {'x': round(angle_to_target.x, 3), 'y': round(angle_to_target.y, 3)}
+                # D-term: derivative of error (change since last frame)
+                # reduces command when approaching target, resists overshoot.
+                # Clamped so D-contribution never exceeds the P-contribution
+                # (prevents D from dominating and causing reverse oscillation near zero).
+                d_error = (target_relative_pos - prev_target_relative_pos
+                           if prev_target_relative_pos is not None else XY())
+                prev_target_relative_pos = target_relative_pos.clone()
+                d_contrib_x = d_error.x * D_COEFF
+                d_contrib_y = d_error.y * D_COEFF
+                # clamp: |D| ≤ |P| so D can damp but not reverse the direction
+                if target_relative_pos.x != 0:
+                    d_contrib_x = max(-abs(target_relative_pos.x), min(abs(target_relative_pos.x), d_contrib_x))
+                if target_relative_pos.y != 0:
+                    d_contrib_y = max(-abs(target_relative_pos.y), min(abs(target_relative_pos.y), d_contrib_y))
+                pd_error = XY(target_relative_pos.x + d_contrib_x,
+                              target_relative_pos.y + d_contrib_y)
+                # dynamic P-gain: scale linearly from MOVE_SCALE_MIN (near centre)
+                # to MOVE_SCALE_MAX (when error >= MOVE_SCALE_RAMP_DIST)
+                error_dist = max(abs(target_relative_pos.x), abs(target_relative_pos.y))
+                t = min(error_dist / MOVE_SCALE_RAMP_DIST, 1.0) if MOVE_SCALE_RAMP_DIST > 0 else 1.0
+                move_scale = MOVE_SCALE_MIN + (MOVE_SCALE_MAX - MOVE_SCALE_MIN) * t
+                # convert PD-corrected offset → degrees
+                angle_to_target = pd_error.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG) * move_scale
+                prev_angle_to_target = angle_to_target
+
+                in_dead_zone = (abs(target_relative_pos.x) < DEAD_ZONE and
+                                abs(target_relative_pos.y) < DEAD_ZONE)
+                if not in_dead_zone:
+                    # PD-controller: each frame move by PD-corrected angular error.
+                    # move_relative does:  new_pos = current_pos() + delta * speed_adjustments
+                    delta = angle_to_target.multiplied_by_XY(AXIS_SIGNS)
+                    logger.debug("target offset: %s  d_err: %s  angle: %s  delta: %s  scale: %.3f",
+                                 target_relative_pos, d_error, angle_to_target, delta, move_scale)
+                    platform.move_relative(delta.x, delta.y)
+                    debug_info["mode"] = f"follow  size={detection.bbox.area():.3f}"
+                else:
+                    logger.debug("target offset: %s  IN DEAD ZONE (< %.3f), not moving",
+                                 target_relative_pos, DEAD_ZONE)
+                    debug_info["mode"] = f"follow(locked)  size={detection.bbox.area():.3f}"
             else:
+                prev_target_relative_pos = None  # reset D-term when target lost
                 if seen_target:
                     prev_angle_to_target *= FADE_COEFF
-                    platform.move_relative(prev_angle_to_target.x, prev_angle_to_target.y)
+                    delta = prev_angle_to_target.multiplied_by_XY(AXIS_SIGNS)
+                    platform.move_relative(delta.x, delta.y)
                     target_relative_pos = prev_angle_to_target.divided_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                     debug_info["mode"] = "hover"
                 else:

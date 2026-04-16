@@ -353,6 +353,12 @@ def main():
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
 
+        'move_scale':           0.15,  # P-gain at centre  (small error  → no oscillation)
+        'move_scale_max':       1.80,  # P-gain at distance (large error  → fast catch-up)
+        'move_scale_ramp_dist': 0.30,  # normalised error at which max gain is fully reached
+        'd_coeff':              0.8,   # D-gain: gentle damping, must not dominate P near zero
+        'dead_zone_normalized': 0.01,  # stop sending commands when within 3% of frame centre
+
         'DEBUG': DEBUG
     }
 
