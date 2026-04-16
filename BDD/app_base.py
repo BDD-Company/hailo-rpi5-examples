@@ -369,7 +369,8 @@ class GStreamerApp:
             display_process.start()
 
         if self.source_type == RPI_NAME_I:
-            picam_thread = threading.Thread(target=picamera_thread, args=(self.pipeline, self.video_width, self.video_height, self.video_format))
+            camera_num = getattr(self.options_menu, 'rpi_camera_num', 0)
+            picam_thread = threading.Thread(target=picamera_thread, args=(self.pipeline, self.video_width, self.video_height, self.video_format), kwargs=dict(camera_num=camera_num))
             self.threads.append(picam_thread)
             picam_thread.start()
 
@@ -410,16 +411,19 @@ class GStreamerApp:
                 sys.exit(0)
 
 
-def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 30, picamera_controls_initial = None, picamera_controls_per_frame_callback = None):
+def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 30, picamera_controls_initial = None, picamera_controls_per_frame_callback = None, camera_num = 0):
     appsrc = pipeline.get_by_name("app_source")
     appsrc.set_property("is-live", True)
     appsrc.set_property("format", Gst.Format.TIME)
     logger.debug("appsrc properties: %s", appsrc)
     # Initialize Picamera2
 
-    camera_model = Picamera2.global_camera_info()[0]['Model']
+    camera_infos = Picamera2.global_camera_info()
+    cam_index = max(0, min(camera_num, len(camera_infos) - 1))
+    camera_model = camera_infos[cam_index]['Model']
+    logger.info("Picamera2 opening camera_num=%d (index=%d), model=%s", camera_num, cam_index, camera_model)
 
-    with Picamera2(tuning=f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}_noir.json") as picam2:
+    with Picamera2(camera_num=cam_index, tuning=f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}_noir.json") as picam2:
         if picamera_config is None:
             # Default configuration
             main = {'size': (1280, 720), 'format': 'RGB888'}

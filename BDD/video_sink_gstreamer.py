@@ -232,7 +232,7 @@ class RecorderSink(interfaces.FrameSinkInterface):
         self._pipeline = None
         self._appsrc = None
         self._splitmux = None
-        self._pusher = _FrameQueuePusher(lambda: self._appsrc, drop_if_error=False, overwriting_queue=True)
+        self._pusher = _FrameQueuePusher(lambda: self._appsrc, drop_if_error=False, overwriting_queue=True, queue_size=8)
 
     # public API
     def start(self, frame_size):
@@ -245,10 +245,13 @@ class RecorderSink(interfaces.FrameSinkInterface):
             appsrc
                 name=rec_src
                 is-live=true
-                block=true
+                block=false
                 format=time
                 do-timestamp=true
                 caps=video/x-raw,format=RGB,width={self.w},height={self.h}
+            ! queue
+                max-size-buffers=16
+                leaky=downstream
             ! videoconvert
             ! x264enc
                 tune=zerolatency
@@ -258,6 +261,8 @@ class RecorderSink(interfaces.FrameSinkInterface):
                 key-int-max={self.keyint}
             ! h264parse
                 config-interval=1
+            ! queue
+                max-size-buffers=120
             ! splitmuxsink
                 name=smx
                 muxer-factory=matroskamux
@@ -287,10 +292,22 @@ class RecorderSink(interfaces.FrameSinkInterface):
         self._pusher.stop()
         if self._pipeline:
             try:
-                self._pipeline.send_event(Gst.Event.new_eos())
+                # Send EOS through appsrc so splitmuxsink can finalize current segment
+                if self._appsrc is not None:
+                    self._appsrc.emit("end-of-stream")
+                # Wait up to 10 seconds for EOS to propagate through the pipeline
+                bus = self._pipeline.get_bus()
+                if bus is not None:
+                    msg = bus.timed_pop_filtered(10 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+                    if msg is None:
+                        logger.warning("[RecorderSink] EOS timeout — forcing NULL state")
+                    elif msg.type == Gst.MessageType.ERROR:
+                        err, _ = msg.parse_error()
+                        logger.warning("[RecorderSink] Error during EOS wait: %s", err)
             except Exception:
-                pass
-            self._pipeline.set_state(Gst.State.NULL)
+                logger.exception("[RecorderSink] Exception during stop")
+            finally:
+                self._pipeline.set_state(Gst.State.NULL)
 
     # internals
     # def _on_format_location(self, splitmux, fragment_id: int):

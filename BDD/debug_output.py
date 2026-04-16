@@ -180,6 +180,41 @@ def draw_detection(frame, detection : Detection, color, line_thickness = 1):
     #         line_width = line_thickness
     #     )
 
+def draw_scope_crosshair(frame, center, r: int, color, line_thickness: int = 1):
+    r = int(r)
+    cx, cy = int(center[0]), int(center[1])
+
+    # outer circle
+    cv2.circle(frame, (cx, cy), r, color, line_thickness)
+    # small center circle
+    cv2.circle(frame, (cx, cy), max(1, r // 8), color, line_thickness)
+
+    gap = r // 6  # gap around center
+
+    # horizontal arms
+    cv2.line(frame, (cx - r, cy), (cx - gap, cy), color, line_thickness)
+    cv2.line(frame, (cx + gap, cy), (cx + r, cy), color, line_thickness)
+
+    # major ticks on horizontal arms
+    tick_h_maj = r // 5
+    tick_h_min = r // 8
+    for sign in (-1, 1):
+        arm_len = r - gap
+        maj_x = cx + sign * (gap + arm_len * 2 // 3)
+        min_x = cx + sign * (gap + arm_len // 3)
+        cv2.line(frame, (maj_x, cy - tick_h_maj), (maj_x, cy + tick_h_maj), color, line_thickness)
+        cv2.line(frame, (min_x, cy - tick_h_min), (min_x, cy + tick_h_min), color, line_thickness)
+
+    # vertical arms (short up, long down)
+    cv2.line(frame, (cx, cy - gap), (cx, cy - r), color, line_thickness)
+    cv2.line(frame, (cx, cy + gap), (cx, cy + r), color, line_thickness)
+
+    # tick on lower arm
+    tick_w = r // 5
+    tick_y = cy + gap + (r - gap) * 2 // 3
+    cv2.line(frame, (cx - tick_w, tick_y), (cx + tick_w, tick_y), color, line_thickness)
+
+
 def draw_move_goal(frame, target_pos : XY, color, line_thickness = 1, aim_point : XY = XY(0.5, 0.5)):
     frame_size = XY(frame.shape[1], frame.shape[0])
     target_pos_on_frame = (aim_point - target_pos).multiplied_by_XY(frame_size)
@@ -314,20 +349,11 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         def time_val(val):
             return time_dict.get(val, 0)
 
-        odo_dict = debug_info.get("odometry", {}) or {}
         add_line('frame', debug_info)
         lines.append(f'time: start {time_val("start")}ms, takeoff {time_val("takeoff")}ms, captured {time_val("captured at")}, delay: {time_val("detection delay")}ms' )
         add_line('state ', debug_info)
-        add_line('position_body', odo_dict)
-        add_line('velocity_body ', odo_dict)
-        add_line('angular_velocity_body', odo_dict)
-        add_line('attitude_euler        ', debug_info)
-
-        imu_dict = debug_info.get('imu', {}) or {}
-        add_line('acceleration_frd    ', imu_dict)
-        add_line('angular_velocity_frd', imu_dict)
-        add_line('magnetic_field_frd', imu_dict)
-
+        add_line('target_relative_pos', debug_info)
+        add_line('angle_to_target', debug_info)
         add_line('mode', debug_info)
         add_line('action', debug_info)
         if 'extra' in debug_info.keys():
@@ -391,14 +417,8 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
         move_command_end = frame_center + move_command.adjust_attitude# * 3
         cv2.arrowedLine(frame, frame_center.to_tuple(to = int), move_command_end.to_tuple(to = int), MOVE_COMMAND_COLOR, 2, cv2.LINE_AA)
 
-    cv2.drawMarker(
-        frame,
-        frame_center.to_tuple(int),
-        CROSSHAIR_COLOR,
-        cv2.MARKER_TILTED_CROSS,
-        30,
-        1
-    )
+    crosshair_radius = int(max(30, min(frame_size.x, frame_size.y) // 12))
+    draw_scope_crosshair(frame, frame_center.to_tuple(int), crosshair_radius, CROSSHAIR_COLOR, 1)
 
     return frame
 
@@ -421,6 +441,24 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
             try:
                 if detection_dict is None:
                     detection_dict = frame_queue.get()
+
+                if detection_dict is None:
+                    break  # sentinel — stop thread
+
+                # drain queue, keep only the freshest frame
+                while True:
+                    try:
+                        newer = frame_queue.get_nowait()
+                        if newer is None:
+                            detection_dict = None
+                            break
+                        detection_dict = newer
+                    except:
+                        break
+
+                if detection_dict is None:
+                    break  # sentinel found while draining
+
                 annotated_frame = annotate_frame_with_detection_info(detection_dict)
 
                 if annotated_frame is not None:

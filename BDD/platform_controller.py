@@ -107,6 +107,22 @@ async def platform_controlling_thread_async(platform_connection_string, platform
 
     platform.move_to(PLATFORM_INITIAL_POS)
 
+    # Wait until platform reaches 0,0 (up to 15 seconds)
+    _wait_timeout_s = 15
+    _wait_start = time.time()
+    _stale_pos = PLATFORM_INITIAL_POS
+    while time.time() - _wait_start < _wait_timeout_s:
+        try:
+            _stale_pos = platform.current_pos()
+            if _stale_pos.distance_to(XY(0, 0)) <= 5:
+                break
+        except Exception:
+            pass
+        time.sleep(0.15)
+    else:
+        logger.warning("Platform did not reach 0,0 in %ss", _wait_timeout_s)
+    logger.info("platform reset to 0,0 — stale_pos=%s config=%s", _stale_pos, platform_config)
+
     logger.info("platform started %s", platform_config)
 
     if signal_event_when_ready:
@@ -340,6 +356,9 @@ async def platform_controlling_thread_async(platform_connection_string, platform
 
                 angle_to_target  = target_relative_pos_pd.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                 prev_angle_to_target = angle_to_target
+
+                debug_info['target_relative_pos'] = target_relative_pos
+                debug_info['angle_to_target'] = angle_to_target
 
                 logger.debug("angle to target: %s", angle_to_target)
 

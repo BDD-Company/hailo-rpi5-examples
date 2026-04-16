@@ -214,7 +214,12 @@ class App(GStreamerDetectionApp):
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000_000_000
         return f'''
-            videoconvert \
+            queue name=raw_input_isolator \
+                leaky=downstream \
+                max-size-buffers=4 \
+                max-size-bytes=0 \
+                max-size-time=0 \
+            ! videoconvert \
             ! x264enc \
                 key-int-max=30 \
                 bframes=0 \
@@ -225,7 +230,6 @@ class App(GStreamerDetectionApp):
                 leaky=downstream \
                 max-size-buffers=300 \
                 max-size-bytes=0 \
-                max-size-time=10000000000 \
             ! splitmuxsink \
                 muxer-factory=matroskamux \
                 muxer-properties="properties,streamable=true" \
@@ -265,7 +269,7 @@ def main():
         logger.error('')
 
     detections_queue = OverwriteQueue(maxsize=20)
-    output_queue = OverwriteQueue(maxsize=200)
+    output_queue = OverwriteQueue(maxsize=4)
 
     start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -275,11 +279,13 @@ def main():
 
     arg_parser = get_default_parser()
     arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
+    arg_parser.add_argument('--display', action='store_true', default=False, help='Show debug video on screen')
+    arg_parser.add_argument('--rpi-camera-num', type=int, default=0, help='Picamera2 camera index (default: 0)')
     app = App(
         app_callback,
         user_data,
         parser=arg_parser,
-        video_output_chunk_length_s=10,
+        video_output_chunk_length_s=5,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
         record_videos=True)
@@ -294,7 +300,7 @@ def main():
         'thrust_dynamic': False,
         'thrust_proportional_to_target_size' : False,
 
-        'target_lost_fade_per_frame': 0.99,
+        'target_lost_fade_per_frame': 0.3,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'estimation_3d': True,
@@ -330,7 +336,7 @@ def main():
         'pd_coeff_p_dynamic_stage_2_ratio': 1,
         'pd_coeff_p_dynamic_stage_3_ratio': 1,
 
-        'frame_angular_size_deg' : XY(107, 85),
+        'frame_angular_size_deg' : XY(46, 31),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
         # 'target_size_m' : XY(1.8, 1.8),             # shahed small
@@ -360,8 +366,9 @@ def main():
                 '/dev/ttyUSB0',
                 dict(
                     speed_adjustments=XY(1, -1),
-                    # speed=0, #
-                    # acceleration=0
+                    speed=100,
+                    acceleration=100,
+                    minimal_move=XY(0.1, 0.1),
                     ),
                 detections_queue),
             kwargs = dict(
@@ -391,15 +398,16 @@ def main():
         )
     action_thread.start()
 
-    sink = MultiSink([
-        # RtspStreamerSink(30, 8554),
+    debug_sinks = [
         RecorderSink(30,
             "./_DEBUG",
-            segment_seconds=10,
+            segment_seconds=5,
             filename_base=f"debug_{start_time_str}",
         ),
-        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
-    ])
+    ]
+    if app.options_menu.display:
+        debug_sinks.append(OpenCVShowImageSink(window_title='DEBUG IMAGE'))
+    sink = MultiSink(debug_sinks)
 
     output_thread = threading.Thread(
         target = debug_output_thread,
@@ -433,7 +441,14 @@ def main():
     #             )
     #         )
 
-    app.run(event)
+    try:
+        app.run(event)
+    except SystemExit:
+        pass
+    finally:
+        output_queue.put(None)  # sentinel — stop debug_output_thread
+        output_thread.join(timeout=15)
+
     print("Done !!!")
     detections_queue.put(STOP)
     action_thread.join()
