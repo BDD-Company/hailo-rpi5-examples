@@ -370,7 +370,14 @@ class GStreamerApp:
 
         if self.source_type == RPI_NAME_I:
             camera_num = getattr(self.options_menu, 'rpi_camera_num', 0)
-            picam_thread = threading.Thread(target=picamera_thread, args=(self.pipeline, self.video_width, self.video_height, self.video_format), kwargs=dict(camera_num=camera_num))
+            picam_thread = threading.Thread(
+                target=picamera_thread,
+                args=(self.pipeline, self.video_width, self.video_height, self.video_format),
+                kwargs={
+                    "target_fps": self.frame_rate,
+                    "camera_num": camera_num,
+                },
+            )
             self.threads.append(picam_thread)
             picam_thread.start()
 
