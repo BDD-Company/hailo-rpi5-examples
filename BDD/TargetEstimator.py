@@ -8,6 +8,7 @@ import numpy as np
 
 from helpers import XY, Rect
 from telemetry_position import PositionNED
+from interfaces import TargetEstimatorInterface
 
 
 class VelocityMethod(Enum):
@@ -25,22 +26,33 @@ def _exp_fast(x: float) -> float:
     return math.exp(x)
 
 
-class TargetEstimator:
-    def __init__(self, max_target_positions : int = 10, max_target_position_age_nanoseconds : int = 500_000_000):
-        assert(max_target_positions > 1)
-        assert(max_target_position_age_nanoseconds > 1)
+class TargetEstimator(TargetEstimatorInterface):
+    def __init__(self, max_positions : int = 10, max_age_ns : int = 500_000_000):
+        assert(max_positions > 1)
+        assert(max_age_ns > 1)
 
-        self.max_target_positions = int(max_target_positions)
-        self.max_target_position_age_nanoseconds = int(max_target_position_age_nanoseconds)
+        self.max_target_positions = int(max_positions)
+        self.max_target_position_age_nanoseconds = int(max_age_ns)
         self.target_positions : deque[tuple[int, XY]] = deque(maxlen=self.max_target_positions)
 
 
     def history_size(self):
         return len(self.target_positions)
 
+    def max_history_size(self):
+        return self.max_target_positions
 
     def clear_history(self):
         return self.target_positions.clear()
+
+    def name(self):
+        return "2D"
+
+    def describe_prev_estimation(self):
+        return self.name() + " linear"
+
+    def max_age_ns(self) -> int:
+        return self.max_target_position_age_nanoseconds
 
 
     def _forget_old_positions(self, reference_timestamp_nanoseconds : int):
@@ -111,7 +123,7 @@ class TargetEstimator:
         return newest_pos + (target_velocity * delta_t_nanoseconds)
 
 
-class TargetEstimator3D:
+class TargetEstimator3D(TargetEstimatorInterface):
     """Track target position in the NED world frame (3-D).
 
     Stores absolute NED positions computed from detection + distance + telemetry.
@@ -123,22 +135,39 @@ class TargetEstimator3D:
         assert max_positions > 1
         assert max_age_ns > 1
         self.max_positions = int(max_positions)
-        self.max_age_ns = int(max_age_ns)
+        self._max_age_ns = int(max_age_ns)
         self._positions: deque[tuple[int, PositionNED]] = deque(maxlen=self.max_positions)
+        self._last_method = None
 
     def history_size(self) -> int:
         return len(self._positions)
 
+    def max_history_size(self):
+        return self.max_positions
+
     def clear_history(self) -> None:
         self._positions.clear()
 
+    def name(self):
+        return "3D"
+
+    def max_age_ns(self) -> int:
+        return self._max_age_ns
+
+
+    def describe_prev_estimation(self):
+        return f"{self.name()} {str(self._last_method)}"
+
+
     def _forget_old(self, ref_ts_ns: int) -> None:
-        cutoff = int(ref_ts_ns) - self.max_age_ns
+        cutoff = int(ref_ts_ns) - self._max_age_ns
         while self._positions and self._positions[0][0] < cutoff:
             self._positions.popleft()
 
+
     def add(self, pos: PositionNED, timestamp_ns: int) -> None:
         self._positions.append((int(timestamp_ns), pos))
+
 
     # Minimum samples for the weighted least-squares fit.
     # Below this threshold, fall back to simple 2-point linear estimate.
@@ -305,6 +334,7 @@ class TargetEstimator3D:
 
         vn, ve, vd = self._estimate_velocity(method)
         dt = at_timestamp_ns - ts
+        self._last_method = method
         return PositionNED(
             north_m=newest.north_m + vn * dt,
             east_m=newest.east_m + ve * dt,

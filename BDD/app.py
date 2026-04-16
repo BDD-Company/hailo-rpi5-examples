@@ -299,6 +299,7 @@ def main():
 
         'estimation_3d': True,
         'estimation_3d_mode': 'wls',
+        'follow_target_position_ned': False,
         'estimation_lookahead_frames': 2,
         'estimation_lookahead_dynamic': False,
         'estimation_lookahead_dynamic_frames_near':   1,
@@ -331,9 +332,9 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m' : XY(1.8, 1.8),             # shahed small
+        # 'target_size_m' : XY(1.8, 1.8),             # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
-        # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
+        'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
         'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
         'inertia_correction_limits': XY(1, 1),
