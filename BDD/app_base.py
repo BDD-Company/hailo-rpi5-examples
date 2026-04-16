@@ -26,7 +26,6 @@ from pipelines import (
     SOURCE_PIPELINE,
     INFERENCE_PIPELINE,
     INFERENCE_PIPELINE_WRAPPER,
-    TRACKER_PIPELINE,
     USER_CALLBACK_PIPELINE,
     DISPLAY_PIPELINE
 )
@@ -418,7 +417,17 @@ class GStreamerApp:
                 sys.exit(0)
 
 
-def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 30, picamera_controls_initial = None, picamera_controls_per_frame_callback = None, camera_num = 0):
+def picamera_thread(
+    pipeline,
+    video_width,
+    video_height,
+    video_format,
+    picamera_config=None,
+    target_fps=30,
+    picamera_controls_initial=None,
+    picamera_controls_per_frame_callback=None,
+    camera_num=0,
+):
     appsrc = pipeline.get_by_name("app_source")
     appsrc.set_property("is-live", True)
     appsrc.set_property("format", Gst.Format.TIME)
@@ -655,23 +664,9 @@ class GStreamerDetectionApp(GStreamerApp):
             post_function_name=self.post_function_name,
             batch_size=self.batch_size,
             config_json=self.labels_json,
-            additional_params=self.thresholds_str)
+            additional_params=self.thresholds_str
+        )
         detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
-
-        tracker_pipeline = ''
-        if False:
-            tracker_pipeline = TRACKER_PIPELINE(
-                class_id=1,
-                keep_past_metadata='false',
-                qos='false',
-                # attempt to remove outdated detections
-                keep_tracked_frames=0,
-                keep_lost_frames=0, # Lost tracks dropped immediately, no shadow frames =0
-                keep_new_frames=1, # Unconfirmed new tracks discarded faster with =1
-                iou_thr=0.6,
-                kalman_dist_thr=0.6
-            )
-            tracker_pipeline = f'{tracker_pipeline} ! '
 
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
         if self.source_type == 'rpi':
@@ -684,7 +679,6 @@ class GStreamerDetectionApp(GStreamerApp):
         pipeline_string = (
             f'{source_pipeline} ! '
             f'{detection_pipeline_wrapper} ! '
-            f'{tracker_pipeline} '
             f'{user_callback_pipeline} ! '
             f'{display_pipeline}'
         )
