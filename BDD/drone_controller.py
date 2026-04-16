@@ -287,7 +287,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     current_frame_timestamp_ns = time.monotonic_ns()
 
     # NOTE: HUGE age to avoid purging prev positions, since it doesn't work as expected RN
-    target_estimator = TargetEstimator(max_target_position_age_nanoseconds=500_000_000_000)
+    target_estimator = TargetEstimator(
+        max_target_positions=max(DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES + 5, 20),
+        max_target_position_age_nanoseconds=500_000_000_000,
+    )
     target_estimator_3d = TargetEstimator3D(max_positions=60, max_age_ns=500_000_000_000)
 
     def update_timestamps():

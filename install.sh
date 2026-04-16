@@ -5,6 +5,7 @@ set -euox pipefail
 # 0. Parse flags
 # —————————————————————————————
 NO_INSTALLATION=false
+WITHOUT_HAILO=false
 PYHAILORT_PATH=""
 PYTAPPAS_PATH=""
 DOWNLOAD_ALL="default"  # Default to false unless --all is specified
@@ -12,6 +13,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--no-installation)
       NO_INSTALLATION=true
+      shift
+      ;;
+    --without-hailo)
+      WITHOUT_HAILO=true
       shift
       ;;
     -h|--pyhailort)
@@ -145,76 +150,96 @@ check_system_pkg() {
 }
 
 ###——— SYSTEM PKG CHECKS —————————————————————————————————————————————
-echo
-echo "📋 Checking required system packages…"
-check_system_pkg hailort
-
-echo
-echo "📋 Checking for HailoRT system version"
-HRT_VER=$(detect_system_pkg_version hailort)
-echo "📋 Checking for hailo-tappas vs hailo-tappas-core…"
-HT1=$(detect_system_pkg_version hailo-tappas)
-echo $HT1
-HT2=$(detect_system_pkg_version hailo-tappas-core)
-echo $HT2
-HTC_VER="none"
-
-if [[ -n "$HT2" ]]; then
-  echo "✅ hailo-tappas-core version: $HT2"
-  TAPPAS_PIP_PKG="hailo-tappas-core-python-binding"
-  HTC_VER="$HT2"
-elif [[ -n "$HT1" ]]; then
-  echo "✅ hailo-tappas version: $HT1"
-  HTC_VER="$HT1"
-  TAPPAS_PIP_PKG="hailo-tappas"
+if [[ "$WITHOUT_HAILO" == true ]]; then
+  echo "⚠️  Skipping Hailo system package checks (--without-hailo)."
+  HRT_VER="none"
+  HTC_VER="none"
 else
-  echo "❌ Neither hailo-tappas nor hailo-tappas-core is installed."
-  exit 1
+  echo
+  echo "📋 Checking required system packages…"
+  check_system_pkg hailort
+
+  echo
+  echo "📋 Checking for HailoRT system version"
+  HRT_VER=$(detect_system_pkg_version hailort)
+  echo "📋 Checking for hailo-tappas vs hailo-tappas-core…"
+  HT1=$(detect_system_pkg_version hailo-tappas)
+  echo $HT1
+  HT2=$(detect_system_pkg_version hailo-tappas-core)
+  echo $HT2
+  HTC_VER="none"
+
+  if [[ -n "$HT2" ]]; then
+    echo "✅ hailo-tappas-core version: $HT2"
+    TAPPAS_PIP_PKG="hailo-tappas-core-python-binding"
+    HTC_VER="$HT2"
+  elif [[ -n "$HT1" ]]; then
+    echo "✅ hailo-tappas version: $HT1"
+    HTC_VER="$HT1"
+    TAPPAS_PIP_PKG="hailo-tappas"
+  else
+    echo "❌ Neither hailo-tappas nor hailo-tappas-core is installed."
+    exit 1
+  fi
 fi
 
 
 ###——— PIP PKG CHECKS —————————————————————————————————————————————————
-echo
-echo "📋 Checking host-Python pip packages…"
 INSTALL_PYHAILORT=false
 INSTALL_TAPPAS_CORE=false
 
-# hailort
-host_py=$(detect_pip_pkg_version hailort)
-if [[ -z "$host_py" ]]; then
-  echo "⚠️  pip 'hailort' missing; will install in venv."
-  INSTALL_PYHAILORT=true
+if [[ "$WITHOUT_HAILO" == true ]]; then
+  echo "⚠️  Skipping Hailo pip package checks (--without-hailo)."
 else
-  echo "✅ pip 'hailort' version: $host_py"
+  echo
+  echo "📋 Checking host-Python pip packages…"
+
+  # hailort
+  host_py=$(detect_pip_pkg_version hailort)
+  if [[ -z "$host_py" ]]; then
+    echo "⚠️  pip 'hailort' missing; will install in venv."
+    INSTALL_PYHAILORT=true
+  else
+    echo "✅ pip 'hailort' version: $host_py"
+  fi
+
+  # tappas binding pkg (RPi vs x86)
+  host_tc=$(detect_pip_pkg_version "$TAPPAS_PIP_PKG")
+  if [[ -z "$host_tc" ]]; then
+    echo "⚠️  pip '$TAPPAS_PIP_PKG' missing; will install in venv."
+    INSTALL_TAPPAS_CORE=true
+  else
+    echo "✅ pip '$TAPPAS_PIP_PKG' version: $host_tc"
+  fi
+
+  if [[ "$NO_INSTALLATION" == true ]]; then
+    echo "⚠️  Skipping installation due to --no-installation flag."
+    INSTALL_PYHAILORT=false
+    INSTALL_TAPPAS_CORE=false
+  else
+    echo "📦 Will install missing pip packages in virtualenv."
+  fi
+
+  if [[ -n "$PYHAILORT_PATH" ]]; then
+    echo "📦 Using custom hailort path: $PYHAILORT_PATH"
+    INSTALL_PYHAILORT=true
+  fi
+  if [[ -n "$PYTAPPAS_PATH" ]]; then
+    echo "📦 Using custom tappas path: $PYTAPPAS_PATH"
+    INSTALL_TAPPAS_CORE=true
+  fi
 fi
 
-# tappas binding pkg (RPi vs x86)
-host_tc=$(detect_pip_pkg_version "$TAPPAS_PIP_PKG")
-if [[ -z "$host_tc" ]]; then
-  echo "⚠️  pip '$TAPPAS_PIP_PKG' missing; will install in venv."
-  INSTALL_TAPPAS_CORE=true
-else
-  echo "✅ pip '$TAPPAS_PIP_PKG' version: $host_tc"
-fi
-
-if [[ "$NO_INSTALLATION" == true ]]; then
-  echo "⚠️  Skipping installation due to --no-installation flag."
-  INSTALL_PYHAILORT=false
-  INSTALL_TAPPAS_CORE=false
-else
-  echo "📦 Will install missing pip packages in virtualenv."
-fi
-
-if [[ -n "$PYHAILORT_PATH" ]]; then
-  echo "📦 Using custom hailort path: $PYHAILORT_PATH"
-  INSTALL_PYHAILORT=true
-fi
-if [[ -n "$PYTAPPAS_PATH" ]]; then
-  echo "📦 Using custom tappas path: $PYTAPPAS_PATH"
-  INSTALL_TAPPAS_CORE=true
-fi
-
-sudo apt install python3-gi python3-gi-cairo
+sudo apt install -y \
+  python3-gi python3-gi-cairo \
+  gstreamer1.0-tools \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly \
+  gstreamer1.0-libav \
+  libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev
 
 
 ###——— VENV SETUP —————————————————————————————————————————————————————
@@ -222,11 +247,12 @@ arch=$(grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null && echo "rpi" 
 echo "$arch"
 
 echo
-if [[ -d "$VENV_NAME" ]]; then
+if [[ -f "$VENV_NAME/bin/activate" ]]; then
   echo "✅ Virtualenv '$VENV_NAME' exists. Activating…"
   source "$VENV_NAME/bin/activate"
 else
   echo "🔧 Creating virtualenv '$VENV_NAME'…"
+  rm -rf "$VENV_NAME"
   python3 -m venv --system-site-packages "$VENV_NAME"
   echo "✅ Created. Activating…"
   source "$VENV_NAME/bin/activate"
@@ -294,13 +320,18 @@ pip install "py>=1.8.0"
 
 
 pip install -r requirements.txt
-echo $"📦 Installing Hailo-Apps-Infra… $HAILO_INFRA_PATH"
-if [[ "$HAILO_INFRA_PATH" != "auto" ]]; then
-  echo "📦 Installing Hailo-Apps-Infra from $HAILO_INFRA_PATH…"
-  pip install -e "$HAILO_INFRA_PATH"
+
+if [[ "$WITHOUT_HAILO" == true ]]; then
+  echo "⚠️  Skipping Hailo-Apps-Infra installation (--without-hailo)."
 else
+  echo $"📦 Installing Hailo-Apps-Infra… $HAILO_INFRA_PATH"
+  if [[ "$HAILO_INFRA_PATH" != "auto" ]]; then
+    echo "📦 Installing Hailo-Apps-Infra from $HAILO_INFRA_PATH…"
+    pip install -e "$HAILO_INFRA_PATH"
+  else
     echo "📦 Installing hailo-apps-infra from Git ($hailo_apps_infra_branch_tag)…"
     pip install "git+${hailo_apps_infra_repo_url}@${hailo_apps_infra_branch_tag}#egg=hailo-apps"
+  fi
 fi
 
 
@@ -308,12 +339,16 @@ echo "📦 Installing shared runtime deps…"
 
 
 ###——— POST-INSTALL ———————————————————————————————————————————————————
-echo
-echo "⚙️  Running post-install…"
-hailo-post-install \
-    --dotenv "$ENV_PATH" \
-    --config "$CONFIG_PATH" \
-    --group "$DOWNLOAD_ALL"
+if [[ "$WITHOUT_HAILO" == true ]]; then
+  echo "⚠️  Skipping hailo-post-install (--without-hailo)."
+else
+  echo
+  echo "⚙️  Running post-install…"
+  hailo-post-install \
+      --dotenv "$ENV_PATH" \
+      --config "$CONFIG_PATH" \
+      --group "$DOWNLOAD_ALL"
+fi
 
 
 ###——— FINISHED —————————————————————————————————————————————————————

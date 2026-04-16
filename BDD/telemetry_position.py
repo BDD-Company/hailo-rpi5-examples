@@ -145,13 +145,16 @@ def rotate_frd_to_ned(q: Quaternion, fwd: float, right: float, down: float) -> t
     return north, east, down_out
 
 
-def get_pose(telemetry: dict) -> Pose:
+def get_pose(telemetry: dict) -> 'Pose | None':
+    odometry = telemetry.get("odometry")
+    if odometry is None:
+        return None
     return Pose(
         position=get_position_ned(telemetry),
         orientation=get_orientation_euler(telemetry),
         velocity=get_velocity_ned(telemetry),
         quaternion=get_orientation_quaternion(telemetry),
-        timestamp_us=telemetry["odometry"]["time_usec"],
+        timestamp_us=odometry["time_usec"],
         acceleration=get_acceleration_frd(telemetry),
         magnetic_field=get_magnetic_field_frd(telemetry),
     )
