@@ -490,12 +490,16 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
             detection = detections[0] if len(detections) > 0 else Detection()
             if detection.confidence >= CONFIDENCE_MIN:
+                seen_target = True
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
                 estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
 
-                drone_pose = get_pose(telemetry_dict)
+                estimated_distance_m = estimated_distance_m if estimated_distance_m else 1
+                # NOTE: At large distances estimation higly undershoots, formula corrects it to be good enough
+                estimated_distance_m *= (math.log(estimated_distance_m, 10) + 0.5)
 
+                drone_pose = get_pose(telemetry_dict)
 
                 mode = 'follow'
 
@@ -545,8 +549,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                 AIM_POINT.y,
                                 FRAME_ANGLUAR_SIZE_DEG.x,
                                 FRAME_ANGLUAR_SIZE_DEG.y,
-                                # at large distances estimation higly undershoots
-                                estimated_distance_m * int(DistanceClass.FAR.value),
+                                estimated_distance_m,
                                 drone_pose.quaternion,
                                 drone_pose.position,
                             )
@@ -567,8 +570,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                 target_relative_pos = target_relative_pos_old
                                 target_position_ned = target_position_prev_ned
                             else:
+                                target_position_prev_ned = target_position_ned
                                 target_position_ned = estimated_pos_ned
-                                target_position_prev_ned = estimated_pos_ned
                                 # third one is distane, which we don't need
                                 estimated_x, estimated_y, _ = project_ned_to_camera(
                                     estimated_pos_ned,
@@ -602,8 +605,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                             estimate_delta_ns / 1000_000,
                             estimate_lookeahead_frames)
 
-                seen_target = True
-
                 target_relative_pos_uncorrected = target_relative_pos
                 # Inertia correction: feedforward from actual velocity in FRD frame
                 # if INERTIA_CORRECTION_GAIN != 0 and target_relative_pos is not None:
@@ -624,7 +625,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 #     target_relative_pos = target_relative_pos + inertia_correction
                 #     logger.debug("inertia correction: %s, adjusted target: %s", inertia_correction, target_relative_pos)
 
-                # Note target_relative_pos is already an offset from AIM_POINT
+                # Note target_relative_pos is already offset from AIM_POINT
                 distance_to_center = target_relative_pos.distance_to(XY(0, 0))
                 thrust = THRUST_MIN
                 if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
