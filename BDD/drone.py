@@ -427,11 +427,12 @@ class DroneMover():
 
         if self.use_set_attitude:
             safe_roll, safe_pitch = self._clamp_tilt_for_lift(roll_degree, pitch_degree, thrust, current_telemetry)
+            yaw_deg = ((current_telemetry or {}).get('attitude_euler', {}) or {}).get('yaw_deg', 0)
             await drone_offboard.set_attitude(
                 Attitude(
                     roll_deg=safe_roll,
                     pitch_deg=safe_pitch,
-                    yaw_deg=0,
+                    yaw_deg=yaw_deg,
                     thrust_value=thrust,
                 )
             )

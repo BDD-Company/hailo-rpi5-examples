@@ -759,7 +759,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     else:
                         prev_angle_to_target *= FADE_COEFF
                         # NOTE: perfroming conversion from camera referene frame to done's FRD
-                        await drone.move_to_target_zenith_async(roll_degree=-prev_angle_to_target.x, pitch_degree=prev_angle_to_target.y, thrust=thrust)
+                        await drone.move_to_target_zenith_async(roll_degree=-prev_angle_to_target.x, pitch_degree=prev_angle_to_target.y, thrust=thrust, current_telemetry=telemetry_dict)
                         # Just t visualize the point we are moving to
                         target_relative_pos = prev_angle_to_target.divided_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                         # await drone.standstill()
