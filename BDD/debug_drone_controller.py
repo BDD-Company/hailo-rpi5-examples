@@ -248,16 +248,37 @@ class MockDroneMover:
     def get_telemetry_dict_cached(self) -> dotdict:
         return dotdict(self._current_telemetry)
 
-    async def move_to_target_zenith_async(self, roll_degree: float, pitch_degree: float, thrust: float = 0.0):
-        logger.debug("MockDroneMover.move_to_target_zenith_async(roll=%.2f, pitch=%.2f, thrust=%.3f)",
-                      roll_degree, pitch_degree, thrust)
+    def _resolve_current_telemetry(self, current_telemetry) -> dotdict:
+        if current_telemetry is None:
+            return self.get_telemetry_dict_cached()
+        return dotdict(current_telemetry)
 
-    async def move_to_target_ned(self, target_position_ned):
+    @staticmethod
+    def _yaw_deg_from_telemetry(current_telemetry) -> float:
+        return ((current_telemetry.get("attitude_euler", {}) or {}).get("yaw_deg", 0))
+
+    async def move_to_target_zenith_async(self, roll_degree: float, pitch_degree: float, thrust: float = 0.0, current_telemetry=None):
+        current_telemetry = self._resolve_current_telemetry(current_telemetry)
+        yaw_deg = self._yaw_deg_from_telemetry(current_telemetry)
         logger.debug(
-            "MockDroneMover.move_to_target_ned(north=%.2f, east=%.2f, down=%.2f)",
+            "MockDroneMover.move_to_target_zenith_async(roll=%.2f, pitch=%.2f, thrust=%.3f, yaw=%.2f, telemetry=%s)",
+            roll_degree,
+            pitch_degree,
+            thrust,
+            yaw_deg,
+            current_telemetry,
+        )
+
+    async def move_to_target_ned(self, target_position_ned, current_telemetry=None):
+        current_telemetry = self._resolve_current_telemetry(current_telemetry)
+        yaw_deg = self._yaw_deg_from_telemetry(current_telemetry)
+        logger.debug(
+            "MockDroneMover.move_to_target_ned(north=%.2f, east=%.2f, down=%.2f, yaw=%.2f, telemetry=%s)",
             target_position_ned.north_m,
             target_position_ned.east_m,
             target_position_ned.down_m,
+            yaw_deg,
+            current_telemetry,
         )
 
     async def standstill(self):
@@ -359,6 +380,9 @@ class InteractiveDisplaySink:
         cv2.imshow(self._window_name, frame)
         while True:
             key = cv2.waitKeyEx(0)  # block indefinitely
+            w,h = frame.shape[1], frame.shape[0]
+            color = (0, 0, 0)
+            cv2.rectangle(frame, (0,0), (w,h), color, thickness=-1)
             if key == _KEY_RIGHT or key == ord("d"):
                 self._replay_queue.advance()
                 return

@@ -289,8 +289,8 @@ def main():
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_min': 0.5,
-        'thrust_max': 0.5,
+        'thrust_min': 0.7,
+        'thrust_max': 0.9,
         'thrust_dynamic': False,
         'thrust_proportional_to_target_size' : False,
 
@@ -298,14 +298,15 @@ def main():
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'estimation_3d': True,
-        'estimation_3d_mode': 'wls',
-        'follow_target_position_ned': False,
+        'estimation_3d_mode': 'cluster',
+        'estimation_3d_use_initial_velocity' : True,
+
         'estimation_lookahead_frames': 2,
         'estimation_lookahead_dynamic': True,
         'estimation_lookahead_dynamic_sqrt': True,
         'estimation_lookahead_dynamic_frames_near':   1,
-        'estimation_lookahead_dynamic_frames_medium': 2,
-        'estimation_lookahead_dynamic_frames_far':    4, # can't be too big -- estimation will be too FAAR away.
+        'estimation_lookahead_dynamic_frames_medium': 1,
+        'estimation_lookahead_dynamic_frames_far':    1, # can't be too big -- estimation will be too FAAR away.
 
         'pd_coeff_p': 3,
         'pd_coeff_d': 0, #-1, # -1
@@ -333,22 +334,25 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        # 'target_size_m' : XY(1.8, 1.8),             # shahed small
+        'target_size_m' : XY(1.8, 1.8),             # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
-        'target_size_m' : XY(1_000_000, 1_000_000), # SUN
+        # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
         'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
         'inertia_correction_limits': XY(1, 1),
         'inertia_correction_min_speed_ms': 5,
 
         'safe_takeoff_period_ns': 300_000_000,
-        'delay_takeof_until_n_detection_frames' : 20,
+        'delay_takeof_until_n_detection_frames' : 30,
 
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
 
+        'follow_target_position_ned' : False,
+
         # params to go to the drone config ("drone_" prefix is stripped then)
         'drone_use_set_attitude': False,
+        'drone_min_lift_fraction': 0.1,
         'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
         'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
 

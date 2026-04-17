@@ -26,13 +26,12 @@ def estimate_distance(
         if size_m <= 0 or fov_deg <= 0 or not (0.0 < frac <= 1.0):
             return None
 
-        angular_size_rad = math.radians(fov_deg * frac)
-
-        # Prevent tan(0) or near-zero instability
-        if angular_size_rad <= 0:
+        half_fov_rad = math.radians(fov_deg / 2.0)
+        if half_fov_rad <= 0:
             return None
 
-        return size_m / (2.0 * math.tan(angular_size_rad / 2.0))
+        # Pinhole (rectilinear) projection: pixel position ∝ tan(angle)
+        return size_m / (2.0 * frac * math.tan(half_fov_rad))
 
     dx = one_axis(target_size_m.x, frame_angular_size_deg.x, target_frame_size.x)
     dy = one_axis(target_size_m.y, frame_angular_size_deg.y, target_frame_size.y)
