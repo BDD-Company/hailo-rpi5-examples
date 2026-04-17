@@ -4,7 +4,7 @@ import asyncio
 # import nest_asyncio
 import dataclasses
 from enum import Enum
-from math import nan
+from math import nan, cos, radians, acos, degrees, copysign
 import time
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate, OffboardError
@@ -69,9 +69,16 @@ class DroneMover():
         self.config = {} if config is None else config
         self.initial_pos = None
         self.initial_yaw = None
+        self.use_set_attitude = self.config.get('use_set_attitude', False)
         self.cruise_altitude = self.config.get('cruise_altitude', DEFAULT_TAKEOFF_ALTITUDE_M)
         self.upside_down_angle_deg = self.config.get('upside_down_angle_deg', UPSIDE_DOWN_ANGLE_DEG)
         self.upside_down_hold_s = self.config.get('upside_down_hold_s', UPSIDE_DOWN_HOLD_S)
+        self.min_lift_fraction = self.config.get('min_lift_fraction', 0.4)
+        # How much upward velocity (m/s) fully relaxes the min_lift constraint.
+        # At this velocity the effective min_lift becomes 0.
+        self.lift_velocity_headroom = self.config.get('lift_velocity_headroom_ms', 3.0)
+        # Same for net upward acceleration (m/s²), after subtracting gravity.
+        self.lift_accel_headroom = self.config.get('lift_accel_headroom_mss', 5.0)
         self.tasks : list[asyncio.Task] = []
         self.drone_connection_string = drone_connection_string
         self.aborted = False
@@ -146,7 +153,6 @@ class DroneMover():
                 logging.debug("seems armable")
             break
 
-
         async def arm():
             logging.info("arming")
 
@@ -181,12 +187,7 @@ class DroneMover():
 
         await asyncio.sleep(1) # TODO(vnemkov): maybe remove?
 
-        # Важно: перед включением Offboard нужно отправить хотя бы одну команду
-        # NED: Z вниз → 0 = текущая высота
-        #await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.01, 0.01, 0.01, 0.01))
-        # await drone.offboard.set_position_ned(PositionNedYaw(0.0, 0.0, 0.0, -0.01))
         await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
-        # await drone.offboard.set_attitude_rate(AttitudeRate(0.0, 0.0, 0.0, 0.02))
 
         logger.debug("Entering Offboard mode...")
         try:
@@ -302,30 +303,148 @@ class DroneMover():
         Safe to call without await from inside the asyncio loop."""
         return dotdict({aspect: self._telemetry_dict_cache.get(aspect) for aspect in self.telemetry_aspects})
 
+    async def move_to_target_ned(self, target_position_ned, current_telemetry = None):
+        if target_position_ned is None:
+            logger.warning("No NED target provided, ignoring command")
+            return
+
+        current_telemetry = current_telemetry or self.get_telemetry_dict_cached()
+        # it is not critical if we can't get yaw
+        yaw_deg = (current_telemetry.get('attitude_euler', {}) or {}).get('yaw_deg', 0)
+
+        drone_offboard = debug_collect_call_info(self.drone.offboard)
+
+        await drone_offboard.set_position_ned(
+            PositionNedYaw(
+                north_m = target_position_ned.north_m,
+                east_m = target_position_ned.east_m,
+                down_m = target_position_ned.down_m,
+                yaw_deg = yaw_deg
+            )
+        )
+
+        logger.info("!!! executing: %s ", drone_offboard.last_command())
 
 
-    async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0) -> None:
+    def _vertical_energy_bonus(self, current_telemetry) -> float:
+        """Return a [0, 1] factor representing how much the min_lift constraint
+        can be relaxed based on current upward velocity and acceleration.
+        Returns 0 when no telemetry is available or drone is descending."""
+        if not current_telemetry or not all(current_telemetry.keys()):
+            return 0.0
+
+        bonus = 0.0
+
+        # Vertical velocity from odometry (NED: down is positive, so upward = negative z)
+        try:
+            down_m_s = current_telemetry["odometry"]["velocity_body"]["z_m_s"]
+            up_velocity = max(0.0, -down_m_s)
+            if self.lift_velocity_headroom > 0:
+                bonus += up_velocity / self.lift_velocity_headroom
+        except (TypeError, KeyError):
+            pass
+
+        # Net vertical acceleration from IMU (body-frame FRD).
+        # Rotate to NED using the attitude quaternion, then subtract gravity.
+        try:
+            imu = current_telemetry["imu"]
+            q = current_telemetry["odometry"]["q"]
+            fwd = imu["acceleration_frd"]["forward_m_s2"]
+            rgt = imu["acceleration_frd"]["right_m_s2"]
+            dwn = imu["acceleration_frd"]["down_m_s2"]
+
+            # Quaternion rotation: body FRD -> NED
+            qw, qx, qy, qz = q["w"], q["x"], q["y"], q["z"]
+            # q * v  (v as pure quaternion)
+            tw = -qx * fwd - qy * rgt - qz * dwn
+            tx =  qw * fwd + qy * dwn - qz * rgt
+            ty =  qw * rgt + qz * fwd - qx * dwn
+            tz =  qw * dwn + qx * rgt - qy * fwd
+            # (q * v) * q_conjugate  -> down component
+            accel_down_ned = -tw * qz + tz * qw - tx * qy + ty * qx
+
+            # Subtract gravity (g ≈ 9.81 m/s² pointing down in NED)
+            net_accel_down = accel_down_ned - 9.81
+            net_accel_up = max(0.0, -net_accel_down)
+            if self.lift_accel_headroom > 0:
+                bonus += net_accel_up / self.lift_accel_headroom
+        except (TypeError, KeyError):
+            pass
+
+        return min(bonus, 1.0)
+
+    def _clamp_tilt_for_lift(self, roll_deg: float, pitch_deg: float, thrust: float, current_telemetry = None) -> tuple[float, float]:
+        """Scale down roll and pitch so that the vertical lift component
+        (thrust * cos(roll) * cos(pitch)) stays >= effective min_lift.
+        The effective min_lift is reduced when the drone has upward
+        velocity/acceleration (vertical energy bonus from telemetry)."""
+        if thrust <= 0:
+            return roll_deg, pitch_deg
+
+        bonus = self._vertical_energy_bonus(current_telemetry)
+        effective_min_lift = self.min_lift_fraction * (1.0 - bonus)
+
+        required_cos = effective_min_lift / thrust
+        if required_cos > 1.0:
+            # Thrust alone can't meet the lift minimum — zero out tilt
+            return 0.0, 0.0
+
+        current_cos = cos(radians(roll_deg)) * cos(radians(pitch_deg))
+        if current_cos >= required_cos:
+            return roll_deg, pitch_deg
+
+        # Scale both angles down proportionally until the constraint is met.
+        # max_angle = total allowed tilt if both axes shared equally
+        max_half_angle = degrees(acos(required_cos ** 0.5))
+
+        abs_roll = abs(roll_deg)
+        abs_pitch = abs(pitch_deg)
+        total = abs_roll + abs_pitch
+        if total == 0:
+            return 0.0, 0.0
+
+        # Distribute the budget proportionally to the requested angles
+        budget_roll = max_half_angle * 2 * (abs_roll / total)
+        budget_pitch = max_half_angle * 2 * (abs_pitch / total)
+        safe_roll = copysign(min(abs_roll, budget_roll), roll_deg)
+        safe_pitch = copysign(min(abs_pitch, budget_pitch), pitch_deg)
+
+        # Verify and tighten if the proportional split still violates
+        while cos(radians(safe_roll)) * cos(radians(safe_pitch)) < required_cos:
+            safe_roll *= 0.95
+            safe_pitch *= 0.95
+
+        logger.debug("Tilt clamped for lift: roll %.1f->%.1f, pitch %.1f->%.1f (thrust=%.2f, min_lift=%.2f, eff=%.2f) bonus=%.2f",
+                      roll_deg, safe_roll, pitch_deg, safe_pitch, thrust, self.min_lift_fraction, effective_min_lift, bonus)
+        return safe_roll, safe_pitch
+
+    async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0, current_telemetry = None) -> None:
         if self.upside_down_state:
             logger.warning("drone is UPSIDE-DOWN, ignoring command")
             return
 
-        # Keep commanded tilt within a safe envelope to avoid toppling.
-        def _clamp(angle: float) -> float:
-            return angle
-            # return max(-SAFE_TILT_DEG, min(SAFE_TILT_DEG, angle))
-
-        safe_roll = _clamp(roll_degree)
-        safe_pitch = _clamp(pitch_degree)
         drone_offboard = debug_collect_call_info(self.drone.offboard)
 
-        await drone_offboard.set_attitude_rate(
-            AttitudeRate(
-                roll_deg_s=safe_roll,
-                pitch_deg_s=safe_pitch,
-                yaw_deg_s=0,
-                thrust_value=thrust,
+        if self.use_set_attitude:
+            safe_roll, safe_pitch = self._clamp_tilt_for_lift(roll_degree, pitch_degree, thrust, current_telemetry)
+            yaw_deg = ((current_telemetry or {}).get('attitude_euler', {}) or {}).get('yaw_deg', 0)
+            await drone_offboard.set_attitude(
+                Attitude(
+                    roll_deg=safe_roll,
+                    pitch_deg=safe_pitch,
+                    yaw_deg=yaw_deg,
+                    thrust_value=thrust,
+                )
             )
-        )
+        else:
+            await drone_offboard.set_attitude_rate(
+                AttitudeRate(
+                    roll_deg_s=roll_degree,
+                    pitch_deg_s=pitch_degree,
+                    yaw_deg_s=0,
+                    thrust_value=thrust,
+                )
+            )
 
         logger.info("!!! executing: %s ", drone_offboard.last_command())
 

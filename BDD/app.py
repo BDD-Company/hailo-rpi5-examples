@@ -299,8 +299,10 @@ def main():
 
         'estimation_3d': True,
         'estimation_3d_mode': 'wls',
+        'follow_target_position_ned': False,
         'estimation_lookahead_frames': 2,
-        'estimation_lookahead_dynamic': False,
+        'estimation_lookahead_dynamic': True,
+        'estimation_lookahead_dynamic_sqrt': True,
         'estimation_lookahead_dynamic_frames_near':   1,
         'estimation_lookahead_dynamic_frames_medium': 2,
         'estimation_lookahead_dynamic_frames_far':    4, # can't be too big -- estimation will be too FAAR away.
@@ -331,9 +333,9 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m' : XY(1.8, 1.8),             # shahed small
+        # 'target_size_m' : XY(1.8, 1.8),             # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
-        # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
+        'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
         'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
         'inertia_correction_limits': XY(1, 1),
@@ -345,10 +347,19 @@ def main():
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
 
+        # params to go to the drone config ("drone_" prefix is stripped then)
+        'drone_use_set_attitude': False,
+        'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
+        'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+
         'DEBUG': DEBUG
     }
 
     logger.info("!!! Config: %s", control_config)
+    if DEBUG:
+        import math
+        nan = math.nan
+        control_config['debug_telemetry_dict'] = {'attitude_euler': {'pitch_deg': 1.1012928485870361, 'roll_deg': -2.5803990364074707, 'timestamp_us': 4597491000, 'yaw_deg': -139.22280883789062}, 'odometry': {'angular_velocity_body': {'pitch_rad_s': 0.005480111576616764, 'roll_rad_s': -0.004354139324277639, 'yaw_rad_s': 0.00451350212097168}, 'child_frame_id': '1 (BODY_NED)', 'frame_id': '1 (BODY_NED)', 'pose_covariance': {'covariance_matrix': (0.0006513984990306199, nan, nan, nan, nan, nan, 0.0006680359947495162, nan, nan, nan, nan, 0.0795387253165245, nan, nan, nan, 0.00014700590691063553, nan, nan, 0.0001532444730401039, nan, 0.0037478541489690542)}, 'position_body': {'x_m': 10155.28515625, 'y_m': 1922.0908203125, 'z_m': 0.21114209294319153}, 'q': {'timestamp_us': 0, 'w': -0.3483775854110718, 'x': -0.0011684682685881853, 'y': -0.024444160982966423, 'z': 0.9370348453521729}, 'time_usec': 4597481426, 'velocity_body': {'x_m_s': 0.014301709830760956, 'y_m_s': -0.007258167490363121, 'z_m_s': 0.04777885600924492}, 'velocity_covariance': {'covariance_matrix': (0.002916615456342697, nan, nan, nan, nan, nan, 0.0030234858859330416, nan, nan, nan, nan, 0.005942340008914471, nan, nan, nan, nan, nan, nan, nan, nan, nan)}}, 'landed_state': None, 'imu': {'acceleration_frd': {'down_m_s2': -10.367236137390137, 'forward_m_s2': -0.11148512363433838, 'right_m_s2': 0.5069471597671509}, 'angular_velocity_frd': {'down_rad_s': -0.0006937360158190131, 'forward_rad_s': 0.004322248511016369, 'right_rad_s': 0.0015081189339980483}, 'magnetic_field_frd': {'down_gauss': 0.2559056580066681, 'forward_gauss': -0.3339233696460724, 'right_gauss': 0.3074171245098114}, 'temperature_degc': 15.0, 'timestamp_us': 4597496423}}
 
     action_thread = None
     if app.options_menu.action == 'platform':

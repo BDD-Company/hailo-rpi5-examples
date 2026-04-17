@@ -252,6 +252,14 @@ class MockDroneMover:
         logger.debug("MockDroneMover.move_to_target_zenith_async(roll=%.2f, pitch=%.2f, thrust=%.3f)",
                       roll_degree, pitch_degree, thrust)
 
+    async def move_to_target_ned(self, target_position_ned):
+        logger.debug(
+            "MockDroneMover.move_to_target_ned(north=%.2f, east=%.2f, down=%.2f)",
+            target_position_ned.north_m,
+            target_position_ned.east_m,
+            target_position_ned.down_m,
+        )
+
     async def standstill(self):
         logger.debug("MockDroneMover.standstill()")
 
@@ -482,6 +490,7 @@ def main():
             'target_lost_fade_per_frame': 0.99,
             'target_estimator_clear_history_after_target_lost_frames': 3,
             'estimation_use_3d': False,
+            'follow_target_position_ned': False,
             'estimation_lookahead_frames': 5,
             'estimation_lookahead_dynamic': False,
             'estimation_lookahead_dynamic_frames_near': 3,
@@ -508,13 +517,14 @@ def main():
 
     config_dict['DEBUG'] = True
     config_dict.update({
-            'estimation_3d' : True,
-            'estimation_3d_method' : 'numpy',
-            'estimation_lookahead_frames': 5,
-            'estimation_lookahead_dynamic': True,
-            'estimation_lookahead_dynamic_frames_near': 2,
-            'estimation_lookahead_dynamic_frames_medium': 4,
-            'estimation_lookahead_dynamic_frames_far': 8,
+        'follow_target_position_ned': True,
+        'estimation_3d' : True,
+        'estimation_3d_method' : 'numpy',
+        'estimation_lookahead_frames': 5,
+        'estimation_lookahead_dynamic': True,
+        'estimation_lookahead_dynamic_frames_near': 2,
+        'estimation_lookahead_dynamic_frames_medium': 4,
+        'estimation_lookahead_dynamic_frames_far': 8,
     })
 
     if args.params:
