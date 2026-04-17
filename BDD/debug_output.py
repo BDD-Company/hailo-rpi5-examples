@@ -431,7 +431,13 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
         detection_dict = None
         while frame is None:
             detection_dict = frame_queue.get()
-            frame : np.ndarray = detection_dict['detections'].frame
+            if detection_dict is None:
+                logger.debug("debug_output_thread: sentinel before first frame — exiting")
+                return
+            det = detection_dict.get('detections')
+            if det is None or getattr(det, 'frame', None) is None:
+                continue
+            frame = det.frame
         frame_h, frame_w, _ = frame.shape
         logger.debug("Got first frame of size W:%u, H:%u", frame_w, frame_h)
 
@@ -464,15 +470,24 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
                 if annotated_frame is not None:
                     sink.process_frame(annotated_frame)
 
-            except:
-                frame_id = -1 if detection_dict is None else detection_dict['detections'].frame_id
-                logger.exception("exception while processing frame %d", frame_id, exc_info=True, stack_info=True)
+            except Exception:
+                frame_id = -1
+                try:
+                    if detection_dict is not None:
+                        det = detection_dict.get('detections')
+                        if det is not None:
+                            frame_id = getattr(det, 'frame_id', -1)
+                except Exception:
+                    pass
+                logger.exception(
+                    "exception while processing frame %s", frame_id, exc_info=True, stack_info=True,
+                )
                 break
 
             finally:
                 detection_dict = None
-    except Exception as e:
-        logger.exception("!!! frame: %s", frame, exc_info=True, stack_info=True)
+    except Exception:
+        logger.exception("debug_output_thread: fatal error", exc_info=True, stack_info=True)
     finally:
         sink.stop()
 

@@ -26,12 +26,12 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
-from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
+from helpers import FrameMetadata, Rect, XY, Detection, Detections, MoveCommand, STOP
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
-from video_sink_gstreamer import RecorderSink
+from video_sink_gstreamer import RecorderSink, WaylandDisplaySink
 from video_sink_multi import MultiSink
-from opencv_show_image_sink import OpenCVShowImageSink
+from pipelines import DISPLAY_PIPELINE
 
 
 # logging and debugging stuff
@@ -47,10 +47,52 @@ DEBUG = False
 # User-defined class to be used in the callback function
 # -----------------------------------------------------------------------------------------------
 # Inheritance from the app_callback_class
+PROBE_ENQUEUE_LOG_EVERY = 300
+PROBE_STALL_WARN_AFTER_S = 2.5
+PROBE_STALL_WARN_INTERVAL_S = 20.0
+
+
 class user_app_callback_class(app_callback_class):
     def __init__(self, detections_queue):
         super().__init__()
         self.detections_queue = detections_queue
+        self._probe_lock = threading.Lock()
+        self._probe_seen = 0
+        self._probe_enqueued = 0
+        self._last_enqueue_mono = 0.0
+        self._last_stall_warn_mono = 0.0
+        self._watch_stop = threading.Event()
+        self._probe_watchdog = threading.Thread(
+            target=self._probe_watchdog_loop,
+            name="app_callback_probe_watchdog",
+            daemon=True,
+        )
+        self._probe_watchdog.start()
+
+    def _probe_watchdog_loop(self):
+        while not self._watch_stop.wait(2.0):
+            if not self.running:
+                break
+            with self._probe_lock:
+                last_enq = self._last_enqueue_mono
+                enq = self._probe_enqueued
+                seen = self._probe_seen
+            if enq == 0 or last_enq <= 0.0:
+                continue
+            idle = time.monotonic() - last_enq
+            if idle < PROBE_STALL_WARN_AFTER_S:
+                continue
+            now = time.monotonic()
+            if now - self._last_stall_warn_mono < PROBE_STALL_WARN_INTERVAL_S:
+                continue
+            self._last_stall_warn_mono = now
+            logger.warning(
+                "app_callback: no detection enqueue for %.1fs (probe_seen=%d enqueued=%d) — "
+                "pipeline may stall before identity callback or duplicate-only traffic",
+                idle,
+                seen,
+                enq,
+            )
 
 
 # -----------------------------------------------------------------------------------------------
@@ -106,6 +148,8 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
     # Using the user_data to count the number of frames
     user_data.increment()
+    with user_data._probe_lock:
+        user_data._probe_seen += 1
 
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
@@ -187,6 +231,20 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         )
     )
 
+    now_mono = time.monotonic()
+    with user_data._probe_lock:
+        user_data._probe_enqueued += 1
+        user_data._last_enqueue_mono = now_mono
+        enq_n = user_data._probe_enqueued
+    if enq_n % PROBE_ENQUEUE_LOG_EVERY == 0:
+        delay_ms = (detection_end_timestamp_ns - detection_start_timestamp_ns) / 1_000_000
+        logger.info(
+            "app_callback: enqueued %d frames (frame_id=%s pipeline_delay_ms=%.1f)",
+            enq_n,
+            frame_id,
+            delay_ms,
+        )
+
     return Gst.PadProbeReturn.OK
 
 
@@ -203,6 +261,11 @@ class App(GStreamerDetectionApp):
 
 
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
+        if getattr(self.options_menu, "display", False):
+            # Main pipeline display is disabled in --display mode.
+            # Debug frames are shown via WaylandDisplaySink from debug_output_thread.
+            return "fakesink"
+
         if not self.record_videos:
             return "fakesink"
 
@@ -288,7 +351,7 @@ def main():
         video_output_chunk_length_s=5,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True)
+        record_videos=False)  # disabled: x264enc in main pipeline overloads CPU on Pi5; debug_*.mkv via RecorderSink is enough
 
     control_config = {
         'confidence_min': 0.4,
@@ -404,15 +467,17 @@ def main():
         )
     action_thread.start()
 
-    debug_sinks = [
-        RecorderSink(30,
-            "./_DEBUG",
-            segment_seconds=5,
-            filename_base=f"debug_{start_time_str}",
-        ),
-    ]
     if app.options_menu.display:
-        debug_sinks.append(OpenCVShowImageSink(window_title='DEBUG IMAGE'))
+        # Single display window through waylandsink with debug overlay frames.
+        debug_sinks = [WaylandDisplaySink(fps_hint=30, sync=False)]
+    else:
+        debug_sinks = [
+            RecorderSink(30,
+                "./_DEBUG",
+                segment_seconds=2,
+                filename_base=f"debug_{start_time_str}",
+            ),
+        ]
     sink = MultiSink(debug_sinks)
 
     output_thread = threading.Thread(

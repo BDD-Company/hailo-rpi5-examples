@@ -36,6 +36,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
 
     START_TIME_MS = time.monotonic_ns() / 1000_000
     MIN_CONFIDENCE       = control_config.pop('confidence_min', 0.1)
+    MOVE_CONFIDENCE      = control_config.pop('confidence_move', MIN_CONFIDENCE)
     FADE_COEFF           = control_config.pop('target_lost_fade_per_frame', 0.5)
     FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
     # P-gain at centre (small error) — keeps oscillation away
@@ -140,7 +141,8 @@ async def platform_controlling_thread_async(platform_connection_string, platform
             target_relative_pos = None
 
             detection = detections[0] if detections else Detection()
-            if detection.confidence >= MIN_CONFIDENCE:
+            # Movement gate must use confidence_move; confidence_min can be stricter for analytics/debug.
+            if detection.confidence >= MOVE_CONFIDENCE:
                 seen_target = True
                 # offset from frame centre to target, normalised [−0.5, 0.5]
                 # positive x → target is to the right  → pan right
@@ -173,7 +175,17 @@ async def platform_controlling_thread_async(platform_connection_string, platform
 
                 in_dead_zone = (abs(target_relative_pos.x) < DEAD_ZONE and
                                 abs(target_relative_pos.y) < DEAD_ZONE)
-                if not in_dead_zone:
+                if detection.confidence < MOVE_CONFIDENCE:
+                    logger.debug(
+                        "target seen but below move threshold: conf=%.3f < move_conf=%.3f",
+                        detection.confidence,
+                        MOVE_CONFIDENCE,
+                    )
+                    debug_info["mode"] = (
+                        f"track(wait_conf) conf={detection.confidence:.2f} "
+                        f"size={detection.bbox.area():.3f}"
+                    )
+                elif not in_dead_zone:
                     # PD-controller: each frame move by PD-corrected angular error.
                     # move_relative does:  new_pos = current_pos() + delta * speed_adjustments
                     delta = angle_to_target.multiplied_by_XY(AXIS_SIGNS)
@@ -186,6 +198,13 @@ async def platform_controlling_thread_async(platform_connection_string, platform
                                  target_relative_pos, DEAD_ZONE)
                     debug_info["mode"] = f"follow(locked)  size={detection.bbox.area():.3f}"
             else:
+                if detections:
+                    logger.debug(
+                        "top detection below move threshold: conf=%.3f < move_conf=%.3f (min_conf=%.3f)",
+                        detection.confidence,
+                        MOVE_CONFIDENCE,
+                        MIN_CONFIDENCE,
+                    )
                 prev_target_relative_pos = None  # reset D-term when target lost
                 if seen_target:
                     prev_angle_to_target *= FADE_COEFF

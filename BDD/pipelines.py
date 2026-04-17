@@ -238,13 +238,17 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=2, name='
     tappas_post_process_dir = os.environ.get(TAPPAS_POSTPROC_PATH_KEY, TAPPAS_POSTPROC_PATH_DEFAULT)
     whole_buffer_crop_so = os.path.join(tappas_post_process_dir, 'cropping_algorithms/libwhole_buffer.so')
 
+    # Keep queue depth symmetrical before aggregator inputs.
+    # This helps avoid long-term desync between bypass and inference branches.
+    agg_branch_max_size_buffers = bypass_max_size_buffers
+
     # Construct the inference wrapper pipeline string
     inference_wrapper_pipeline = (
         f'{QUEUE(name=f"{name}_input_q")} ! '
         f'hailocropper name={name}_crop so-path={whole_buffer_crop_so} function-name=create_crops use-letterbox=true resize-method=inter-area internal-offset=true '
         f'hailoaggregator name={name}_agg '
-        f'{name}_crop. ! {QUEUE(max_size_buffers=bypass_max_size_buffers, name=f"{name}_bypass_q")} ! {name}_agg.sink_0 '
-        f'{name}_crop. ! {inner_pipeline} ! {name}_agg.sink_1 '
+        f'{name}_crop. ! {QUEUE(max_size_buffers=agg_branch_max_size_buffers, name=f"{name}_bypass_q")} ! {name}_agg.sink_0 '
+        f'{name}_crop. ! {inner_pipeline} ! {QUEUE(max_size_buffers=agg_branch_max_size_buffers, name=f"{name}_to_agg_q")} ! {name}_agg.sink_1 '
         f'{name}_agg. ! {QUEUE(name=f"{name}_output_q")} '
     )
 

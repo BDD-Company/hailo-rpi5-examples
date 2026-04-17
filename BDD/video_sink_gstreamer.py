@@ -58,13 +58,14 @@ class _FrameQueuePusher:
             appsrc = self._get_appsrc()
             if appsrc is not None:
                 try:
+                    # new_wrapped() avoids a separate allocate+fill GI call,
+                    # reducing GIL hold time per frame (important for picamera2).
                     data = frame.tobytes()
-                    buf = Gst.Buffer.new_allocate(None, len(data), None)
-                    buf.fill(0, data)
+                    buf = Gst.Buffer.new_wrapped(data)
                     ret = appsrc.emit("push-buffer", buf)
-                    # optional: handle backpressure; here we just drop on error
+                    # Yield the GIL so picamera2 callback threads can run.
+                    time.sleep(0)
                     if ret != Gst.FlowReturn.OK and not self._drop_if_error:
-                        # simple yield
                         time.sleep(0.001)
                     # logger.debug("!!! emitted frame for : %s", appsrc.name)
                 except Exception:
@@ -278,14 +279,27 @@ class RecorderSink(interfaces.FrameSinkInterface):
         # self._splitmux.connect("format-location", self._on_format_location)
 
         self._pipeline.set_state(Gst.State.PLAYING)
+
+        # Watch for pipeline errors (silent failures like x264enc or splitmuxsink issues)
+        bus = self._pipeline.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message::error", self._on_bus_error)
+        bus.connect("message::warning", self._on_bus_warning)
+
         self._pusher.start()
-        logger.info(f"[RecorderSink] Writing ~{self.segment_ns/1e9:.0f}s MKV segments to {pattern_path}")
+        logger.info("[RecorderSink] Writing ~%.0fs MKV segments to %s", self.segment_ns / 1e9, pattern_path)
+
+    def _on_bus_error(self, bus, message):
+        err, debug = message.parse_error()
+        logger.error("[RecorderSink] GStreamer error: %s | debug: %s", err, debug)
+
+    def _on_bus_warning(self, bus, message):
+        warn, debug = message.parse_warning()
+        logger.warning("[RecorderSink] GStreamer warning: %s | debug: %s", warn, debug)
 
     def process_frame(self, frame):
         _validate_frame(frame, self.w, self.h)
         self._pusher.submit(frame)
-
-        # logger.debug("[RecorderSink] %s / %s\tpushed frame %s", self.out_dir, self.filename_base, frame.id)
 
     def stop(self):
         # Drain gracefully
@@ -318,42 +332,163 @@ class RecorderSink(interfaces.FrameSinkInterface):
 # ------------------------ Class 3: Display Sink ------------------------------
 class DisplaySink(interfaces.FrameSinkInterface):
     """
-    Display annotated frames on screen using GStreamer autovideosink.
-    Pipeline: appsrc -> videoconvert -> autovideosink
+    Show annotated frames with OpenCV HighGUI **on the GLib main thread** (same
+    thread as Gst / MainLoop).  OpenCV's GTK backend uses GLib; calling
+    namedWindow/imshow from ``debug_output_thread`` races GStreamer's main
+    context and yields an empty grey window plus
+    ``g_main_context_push_thread_default`` warnings.
+
+    The worker thread only enqueues a BGR copy.  A ``GLib.timeout_add`` tick
+    (DISPLAY_FPS) pulls the latest buffer and calls ``imshow`` / ``waitKey`` —
+    in practice this behaved **more reliably** on Pi5 than coalesced
+    ``idle_add`` from the worker (see logs: timer ≈1700+ frames vs idle ≈90).
     """
-    def __init__(self, fps_hint: float = 30.0, window_title: str = 'BDD'):
+    DISPLAY_FPS   = 25
+    DISPLAY_SCALE = 1   # divisor applied to both width and height (2 → 640×360)
+
+    def __init__(self, fps_hint: float = 30.0, window_title: str = 'DEBUG IMAGE',
+                 video_sink: str = 'waylandsink'):   # video_sink kept for API compat
+        self.fps           = float(fps_hint) if fps_hint and fps_hint > 0 else 30.0
+        self.window_title  = window_title
+        self._w_src = self._h_src = 0
+        self._w_disp = self._h_disp = 0
+        self._min_interval = 1.0 / max(1, self.DISPLAY_FPS)
+        self._last_show    = 0.0
+        self._lock = threading.Lock()
+        self._pending_bgr = None
+        self._glib_tick_id = None
+        self._window_ready = False
+
+    def start(self, frame_size):
+        self._w_src, self._h_src = int(frame_size[0]), int(frame_size[1])
+        self._w_disp = max(1, self._w_src // self.DISPLAY_SCALE)
+        self._h_disp = max(1, self._h_src // self.DISPLAY_SCALE)
+        logger.info(
+            "[DisplaySink] %dx%d → display %dx%d @ %dfps (GUI on GLib main thread)",
+            self._w_src, self._h_src, self._w_disp, self._h_disp, self.DISPLAY_FPS,
+        )
+
+    def install_glib_tick(self):
+        """Call once from the thread that runs GLib.MainLoop, before ``loop.run()``."""
+        if self._glib_tick_id is not None:
+            return
+        interval_ms = max(1, int(1000 / max(1, self.DISPLAY_FPS)))
+        self._glib_tick_id = GLib.timeout_add(interval_ms, self._on_glib_tick)
+        logger.info("[DisplaySink] GLib redraw timer every %d ms", interval_ms)
+
+    def _on_glib_tick(self):
+        if self._w_disp <= 0:
+            return True
+        pending = None
+        with self._lock:
+            if self._pending_bgr is not None:
+                pending = self._pending_bgr
+                self._pending_bgr = None
+        if pending is None:
+            return True
+        try:
+            if not self._window_ready:
+                cv2.namedWindow(self.window_title, cv2.WINDOW_NORMAL)
+                self._window_ready = True
+            cv2.imshow(self.window_title, pending)
+            cv2.waitKey(1)
+        except Exception:
+            logger.exception("[DisplaySink] redraw failed")
+        return True
+
+    def process_frame(self, frame: np.ndarray):
+        now = time.monotonic()
+        if now - self._last_show < self._min_interval:
+            return
+        self._last_show = now
+        if self._w_disp != self._w_src or self._h_disp != self._h_src:
+            small = cv2.resize(frame, (self._w_disp, self._h_disp))
+        else:
+            small = frame
+        bgr = cv2.cvtColor(small, cv2.COLOR_RGB2BGR)
+        with self._lock:
+            self._pending_bgr = bgr.copy()
+
+    def dispose_after_main_loop(self):
+        """Call from the GLib main thread after MainLoop.quit (same thread as install)."""
+        tid = self._glib_tick_id
+        self._glib_tick_id = None
+        if tid is not None:
+            try:
+                GLib.source_remove(tid)
+            except Exception:
+                logger.exception("[DisplaySink] source_remove failed")
+        with self._lock:
+            self._pending_bgr = None
+        if self._window_ready:
+            try:
+                cv2.destroyWindow(self.window_title)
+            except Exception:
+                logger.exception("[DisplaySink] destroyWindow failed")
+            self._window_ready = False
+
+    def stop(self):
+        """Called from debug_output_thread — do not call GTK/OpenCV GUI here."""
+        with self._lock:
+            self._pending_bgr = None
+
+
+class WaylandDisplaySink(interfaces.FrameSinkInterface):
+    """Display RGB frames via GStreamer appsrc -> waylandsink."""
+
+    def __init__(self, fps_hint: float = 30.0, sync: bool = False):
         self.fps = float(fps_hint) if fps_hint and fps_hint > 0 else 30.0
-        self.window_title = window_title
-        self.w, self.h = 0, 0
+        self.sync = bool(sync)
         self._pipeline = None
         self._appsrc = None
-        self._pusher = _FrameQueuePusher(lambda: self._appsrc, drop_if_error=True, overwriting_queue=True, queue_size=4)
+        self._frame_duration_ns = int(1_000_000_000 / max(1.0, self.fps))
+        self._pts_ns = 0
+        self._lock = threading.Lock()
+
     def start(self, frame_size):
-        self.w, self.h = map(int, frame_size)
-        launch = (
-            f'appsrc name=disp_src is-live=true block=false format=time do-timestamp=true '
-            f'caps=video/x-raw,format=RGB,width={self.w},height={self.h} '
-            f'! videoconvert '
-            f'! autovideosink sync=false title="{self.window_title}"'
+        width, height = int(frame_size[0]), int(frame_size[1])
+        Gst.init(None)
+
+        pipeline_str = (
+            "appsrc name=debug_appsrc is-live=true format=time block=false "
+            f"caps=video/x-raw,format=RGB,width={width},height={height},framerate={int(round(self.fps))}/1 ! "
+            "queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! "
+            "videoconvert ! "
+            f"waylandsink sync={'true' if self.sync else 'false'}"
         )
-        self._pipeline = Gst.parse_launch(launch)
-        self._appsrc = self._pipeline.get_by_name("disp_src")
+        self._pipeline = Gst.parse_launch(pipeline_str)
+        self._appsrc = self._pipeline.get_by_name("debug_appsrc")
         self._pipeline.set_state(Gst.State.PLAYING)
-        self._pusher.start()
-        logger.info(f"[DisplaySink] Showing video via autovideosink ({self.w}x{self.h})")
+        logger.info("[WaylandDisplaySink] started %dx%d @ %.1ffps", width, height, self.fps)
+
     def process_frame(self, frame: np.ndarray):
-        self._pusher.submit(frame)
+        if self._appsrc is None or frame is None:
+            return
+        try:
+            rgb = np.ascontiguousarray(frame)
+            payload = rgb.tobytes()
+
+            buf = Gst.Buffer.new_allocate(None, len(payload), None)
+            buf.fill(0, payload)
+            with self._lock:
+                buf.pts = self._pts_ns
+                buf.dts = self._pts_ns
+                buf.duration = self._frame_duration_ns
+                self._pts_ns += self._frame_duration_ns
+            self._appsrc.emit("push-buffer", buf)
+        except Exception:
+            logger.exception("[WaylandDisplaySink] failed to push frame")
+
     def stop(self):
-        self._pusher.stop()
-        if self._pipeline:
+        if self._appsrc is not None:
             try:
-                if self._appsrc is not None:
-                    self._appsrc.emit("end-of-stream")
-                else:
-                    self._pipeline.send_event(Gst.Event.new_eos())
+                self._appsrc.emit("end-of-stream")
             except Exception:
-                logger.exception("[DisplaySink] Error sending EOS")
+                pass
+        if self._pipeline is not None:
             self._pipeline.set_state(Gst.State.NULL)
+        self._appsrc = None
+        self._pipeline = None
 
 
 # ----------------------------- Example usage ---------------------------------
