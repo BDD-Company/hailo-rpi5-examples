@@ -298,6 +298,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
         # drone = debug_collect_call_info(drone, history_max_size=3)
         pass
     else:
+        # just to keep existing code itact, remove when no longer needed
         drone.clear_command_history = lambda : None
         drone.last_command = lambda : "--"
 

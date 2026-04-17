@@ -156,7 +156,7 @@ class TargetEstimator3D(TargetEstimatorInterface):
 
 
     def describe_prev_estimation(self):
-        return f"{self.name()} {str(self._last_method)}"
+        return f"{self.name()} {self._last_method.name if self._last_method else '--'}"
 
 
     def _forget_old(self, ref_ts_ns: int) -> None:
