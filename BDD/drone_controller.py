@@ -733,7 +733,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         moving = True
                     else:
                         # NOTE: perfroming conversion from camera referene frame to done's FRD
-                        await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
+                        await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust, current_telemetry=telemetry_dict)
                         moving = True
 
                     if moving and takeoff_time_ns is None:
