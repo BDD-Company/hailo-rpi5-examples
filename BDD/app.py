@@ -347,6 +347,11 @@ def main():
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
 
+        # params to go to the drone config ("drone_" prefix is stripped then)
+        'drone_use_set_attitude': False,
+        'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
+        'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+
         'DEBUG': DEBUG
     }
 

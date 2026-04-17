@@ -250,6 +250,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
         logger.warning("follow_target_position_ned requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True
 
+    DRONE_CONFIG_PREFIX = 'drone_'
+    for drone_config_key in [k for k in control_config.keys() if k.startswith(DRONE_CONFIG_PREFIX)]:
+        drone_config_key_stripped = drone_config_key.removeprefix(DRONE_CONFIG_PREFIX)
+        drone_config[drone_config_key_stripped]=control_config.pop(drone_config_key)
+
     if len(control_config) > 0:
         logger.warning("Unknonw/unused config parameters: %s", control_config)
 
@@ -684,7 +689,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 logger.info("Setting new command regulator coeffs P=%s D=%s", pd_coeff_p, PD_COEFF_D)
                 command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
                 target_relative_pos_pd = target_relative_pos
-                if target_relative_pos is not None:
+                USE_SET_ATTITUDE = drone_config.get('use_set_attitude', False)
+                if USE_SET_ATTITUDE:
+                    logger.warning('NOT APPLYING P D since flying via set_attitude API')
+                    target_relative_pos_pd = target_relative_pos
+                elif target_relative_pos is not None:
                     logger.debug("!!! target before PD: %s", target_relative_pos)
                     target_relative_pos_pd = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
                     logger.debug("!!! target after PD: %s, regulator coeffs: %s", target_relative_pos_pd, command_regulator.get_coeffs())
