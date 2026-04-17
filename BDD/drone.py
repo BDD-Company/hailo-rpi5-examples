@@ -302,19 +302,18 @@ class DroneMover():
         Safe to call without await from inside the asyncio loop."""
         return dotdict({aspect: self._telemetry_dict_cache.get(aspect) for aspect in self.telemetry_aspects})
 
-    async def move_to_target_ned(self, target_position_ned):
+    async def move_to_target_ned(self, target_position_ned, current_telemetry = None):
         if target_position_ned is None:
             logger.warning("No NED target provided, ignoring command")
             return
 
-        current_telemetry = self.get_telemetry_dict_cached()
-        yaw_deg = current_telemetry.get('attitude_euler', {}).get('yaw_deg', 0)
+        current_telemetry = current_telemetry or self.get_telemetry_dict_cached()
+        # it is not critical if we can't get yaw
+        yaw_deg = (current_telemetry.get('attitude_euler', {}) or {}).get('yaw_deg', 0)
+
         drone_offboard = debug_collect_call_info(self.drone.offboard)
 
         await drone_offboard.set_position_ned(
-            # north_m: float
-            # east_m: float
-            # down_m: float
             PositionNedYaw(
                 north_m = target_position_ned.north_m,
                 east_m = target_position_ned.east_m,
@@ -331,13 +330,8 @@ class DroneMover():
             logger.warning("drone is UPSIDE-DOWN, ignoring command")
             return
 
-        # Keep commanded tilt within a safe envelope to avoid toppling.
-        def _clamp(angle: float) -> float:
-            return angle
-            # return max(-SAFE_TILT_DEG, min(SAFE_TILT_DEG, angle))
-
-        safe_roll = _clamp(roll_degree)
-        safe_pitch = _clamp(pitch_degree)
+        safe_roll = roll_degree
+        safe_pitch = pitch_degree
         drone_offboard = debug_collect_call_info(self.drone.offboard)
 
         await drone_offboard.set_attitude_rate(

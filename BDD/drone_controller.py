@@ -149,6 +149,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     global DEBUG
     DEBUG           = control_config.pop('DEBUG', False)
+    DEBUG_TELEMETRY_DICT = control_config.pop('debug_telemetry_dict', None)
+
     logger.debug("!!!!! DEBUG state: %s", DEBUG)
     CONFIDENCE_MIN  = control_config.pop('confidence_min', 0.1)
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
@@ -228,13 +230,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
         control_config.pop('estimation_3d_mode', None)
 
     ESTIMATION_3D_METHOD = VelocityMethod(estimation_3d_method) # OR any VelocityMethod 'wls'
-    ESTIMATION_LOOKAHEAD_FRAMES         = control_config.pop('estimation_lookahead_frames', 2)
-    ESTIMATION_LOOKAHEAD_DYNAMIC        = control_config.pop('estimation_lookahead_dynamic', False)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT   = control_config.pop('estimation_lookahead_dynamic_sqrt', True)
+    ESTIMATION_LOOKAHEAD_FRAMES                = control_config.pop('estimation_lookahead_frames', 2)
+    ESTIMATION_LOOKAHEAD_DYNAMIC               = control_config.pop('estimation_lookahead_dynamic', False)
+    ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT          = control_config.pop('estimation_lookahead_dynamic_sqrt', True)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
-    FOLLOW_TARGET_POSITION_NED = control_config.pop('follow_target_position_ned', False)
+    FOLLOW_TARGET_POSITION_NED                 = control_config.pop('follow_target_position_ned', False)
 
 
     DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.pop('delay_takeof_until_n_detection_frames', 3)
@@ -457,7 +459,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             skipped_detetions = 0
             frame_capture_timestampt_ns = detections_obj.meta.capture_timestamp_ns or None
 
-            telemetry_dict : dict = drone.get_telemetry_dict_cached()
+            telemetry_dict : dict = await drone.get_telemetry_dict()
+            if DEBUG and not all(telemetry_dict.values()) and DEBUG_TELEMETRY_DICT:
+                telemetry_dict = DEBUG_TELEMETRY_DICT
+                logger.warning("!!! USING DEBUG TELEMETRY data !!!")
+
             logger.debug("telemetry: %s", telemetry_dict)
             debug_info = telemetry_dict
 
@@ -485,6 +491,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             detections.sort(reverse=True, key = lambda d : d.confidence)
             target_relative_pos = None
             target_relative_pos_uncorrected = None
+            target_position_ned = None
             frame_id = detections_obj.frame_id
             target_estimator = None
 
@@ -499,7 +506,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 # NOTE: At large distances estimation higly undershoots, formula corrects it to be good enough
                 estimated_distance_m *= (math.log(estimated_distance_m, 10) + 0.5)
 
-                drone_pose = get_pose(telemetry_dict)
+                if not all(telemetry_dict.values()):
+                    drone_pose = None
+                else:
+                    drone_pose = get_pose(telemetry_dict)
 
                 mode = 'follow'
 
@@ -535,62 +545,64 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 estimate_mode = ''
                 target_relative_pos_old = target_relative_pos
 
-                if ESTIMATION_3D:
+                if ESTIMATION_3D and estimated_distance_m is not None and drone_pose:
                     target_estimator = target_estimator_3d
                     # --- 3-D world-frame position estimation ---
-                    if estimated_distance_m is not None and drone_pose:
-                        try:
-                            # _quat = get_orientation_quaternion(telemetry_dict)
-                            # _drone_pos = get_position_ned(telemetry_dict)
-                            target_pos_ned = project_camera_to_ned(
-                                detection.bbox.center.x,
-                                detection.bbox.center.y,
+                    try:
+                        # _quat = get_orientation_quaternion(telemetry_dict)
+                        # _drone_pos = get_position_ned(telemetry_dict)
+                        target_pos_ned = project_camera_to_ned(
+                            detection.bbox.center.x,
+                            detection.bbox.center.y,
+                            AIM_POINT.x,
+                            AIM_POINT.y,
+                            FRAME_ANGLUAR_SIZE_DEG.x,
+                            FRAME_ANGLUAR_SIZE_DEG.y,
+                            estimated_distance_m,
+                            drone_pose.quaternion,
+                            drone_pose.position,
+                        )
+                        target_estimator_3d.add(target_pos_ned, current_frame_timestamp_ns)
+                        logger.debug("!!! drone pos NED: N=%.2f E=%.2f D=%.2f\n\ttarget NED: N=%.2f E=%.2f D=%.2f (distance=%.1fm)",
+                                drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
+                                target_pos_ned.north_m, target_pos_ned.east_m, target_pos_ned.down_m,
+                                estimated_distance_m)
+
+                        estimated_pos_ned = target_estimator_3d.estimate(
+                            estimate_at_ns,
+                            None,
+                            method=ESTIMATION_3D_METHOD
+                        )
+                        if estimated_pos_ned is None:
+                            logger.warning('3D estimation fallback to: %s, target_estimator_3d has %s items',
+                                target_pos_ned, target_estimator_3d.history_size())
+                            target_relative_pos = target_relative_pos_old
+                            target_position_ned = target_position_prev_ned
+                        else:
+                            target_position_prev_ned = target_position_ned
+                            target_position_ned = estimated_pos_ned
+                            # third one is distane, which we don't need
+                            estimated_x, estimated_y, _ = project_ned_to_camera(
+                                estimated_pos_ned,
                                 AIM_POINT.x,
                                 AIM_POINT.y,
                                 FRAME_ANGLUAR_SIZE_DEG.x,
                                 FRAME_ANGLUAR_SIZE_DEG.y,
-                                estimated_distance_m,
                                 drone_pose.quaternion,
-                                drone_pose.position,
+                                drone_pose.position
                             )
-                            target_estimator_3d.add(target_pos_ned, current_frame_timestamp_ns)
-                            logger.debug("!!! drone pos NED: N=%.2f E=%.2f D=%.2f\n\ttarget NED: N=%.2f E=%.2f D=%.2f (distance=%.1fm)",
-                                    drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
-                                    target_pos_ned.north_m, target_pos_ned.east_m, target_pos_ned.down_m,
-                                    estimated_distance_m)
+                            target_relative_pos = XY(estimated_x, estimated_y)
+                        target_relative_pos = AIM_POINT - target_relative_pos
 
-                            estimated_pos_ned = target_estimator_3d.estimate(
-                                estimate_at_ns,
-                                None,
-                                method=ESTIMATION_3D_METHOD
-                            )
-                            if estimated_pos_ned is None:
-                                logger.warning('3D estimation fallback to: %s, target_estimator_3d has %s items',
-                                    target_pos_ned, target_estimator_3d.history_size())
-                                target_relative_pos = target_relative_pos_old
-                                target_position_ned = target_position_prev_ned
-                            else:
-                                target_position_prev_ned = target_position_ned
-                                target_position_ned = estimated_pos_ned
-                                # third one is distane, which we don't need
-                                estimated_x, estimated_y, _ = project_ned_to_camera(
-                                    estimated_pos_ned,
-                                    AIM_POINT.x,
-                                    AIM_POINT.y,
-                                    FRAME_ANGLUAR_SIZE_DEG.x,
-                                    FRAME_ANGLUAR_SIZE_DEG.y,
-                                    drone_pose.quaternion,
-                                    drone_pose.position
-                                )
-                                target_relative_pos = XY(estimated_x, estimated_y)
-                            target_relative_pos = AIM_POINT - target_relative_pos
-
-                            # estimate_mode = f'3D={ESTIMATION_3D_METHOD}'
-                        except Exception:
-                            logger.debug("3D estimation failed", exc_info=True)
+                        # estimate_mode = f'3D={ESTIMATION_3D_METHOD}'
+                    except Exception:
+                        logger.debug("3D estimation failed", exc_info=True)
 
                 # NOTE: ??? maybe use as fallback if 3d estimation is not available
                 else:
+                    if ESTIMATION_3D:
+                        logger.warning("!!! USING 2D estimator because either POSE or DISTANCE are unavailable")
+
                     target_estimator = target_estimator_2d
                     target_relative_pos = target_estimator.estimate_target_pos(estimate_at_ns, target_relative_pos)
 
@@ -699,14 +711,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     logger.warning("Delaying takeoff for %s frames (now have %s)", DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES, target_estimator.history_size())
                     pass
                 else:
-                    if FOLLOW_TARGET_POSITION_NED:
-                        if target_position_ned is not None:
-                            mode += " NED "
-                            debug_info["mode"] = mode
-                            await drone.move_to_target_ned(target_position_ned)
-                            moving = True
-                        else:
-                            logger.warning("follow_target_position_ned is enabled but no NED target is available yet")
+                    if FOLLOW_TARGET_POSITION_NED and target_position_ned:
+                        mode += " NED "
+                        debug_info["mode"] = mode
+                        await drone.move_to_target_ned(target_position_ned, telemetry_dict)
+                        moving = True
                     else:
                         # NOTE: perfroming conversion from camera referene frame to done's FRD
                         await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust)
@@ -718,14 +727,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
             else:
                 # IF no detection or NONE of the detections has big confidence
-                if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES and target_estimator.history_size() > 0:
+                if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES and target_estimator_2d.history_size() > 0:
                     logger.warning("!!! CLEARING HISTORY")
-                    target_estimator.clear_history()
+                    target_estimator_2d.clear_history()
+                    target_estimator_3d.clear_history()
 
                 if seen_target:
                     if FOLLOW_TARGET_POSITION_NED:
                         if target_position_prev_ned is not None:
-                            await drone.move_to_target_ned(target_position_prev_ned)
+                            await drone.move_to_target_ned(target_position_prev_ned, telemetry_dict)
                             moving = True
                             debug_info["mode"] = "follow last-ned"
                         else:
@@ -781,4 +791,4 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 output_queue.put(output)
 
         except:
-            logging.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, move_command, exc_info=True)
+            logger.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, move_command, exc_info=True)
