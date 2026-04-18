@@ -10,7 +10,7 @@ from helpers import XY
 from drone import DroneMover
 from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
-from estimate_distance import estimate_distance_class, DistanceClass
+from estimate_distance import estimate_distance_class, DistanceClass, measure_object_size
 from telemetry_position import (
     # get_position_ned,
     # get_orientation_quaternion,
@@ -511,7 +511,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 seen_target = True
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
-                estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
+                object_size = measure_object_size(detections_obj.frame, detection.bbox) or detection.bbox.size
+                estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, object_size)
 
                 estimated_distance_m = estimated_distance_m if estimated_distance_m else 1
                 # NOTE: At large distances estimation higly undershoots, formula corrects it to be good enough
