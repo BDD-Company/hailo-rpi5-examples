@@ -511,7 +511,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 seen_target = True
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
-                object_size = measure_object_size(detections_obj.frame, detection.bbox) or detection.bbox.size
+                object_size = measure_object_size(frame, detection.bbox) or detection.bbox.size
                 estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, object_size)
 
                 estimated_distance_m = estimated_distance_m if estimated_distance_m else 1
