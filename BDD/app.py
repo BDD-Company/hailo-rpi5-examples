@@ -28,6 +28,8 @@ from gi.repository import Gst, GLib
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
 from OverwriteQueue import OverwriteQueue
+import numpy as np
+from bytetrack import BYTETracker, STrack
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
 from video_sink_multi import MultiSink
@@ -48,9 +50,11 @@ DEBUG = False
 # -----------------------------------------------------------------------------------------------
 # Inheritance from the app_callback_class
 class user_app_callback_class(app_callback_class):
-    def __init__(self, detections_queue):
+    def __init__(self, detections_queue, tracker: BYTETracker):
         super().__init__()
         self.detections_queue = detections_queue
+        self.tracker = tracker
+        self._bt_frame_id = 0
 
 
 # -----------------------------------------------------------------------------------------------
@@ -95,6 +99,26 @@ def normalized_frame_id(buffer: Gst.Buffer, frame_meta) -> int:
 
 
 seen_frames = deque(maxlen=10)
+
+def _match_track_to_detection(
+    track_det_bbox: np.ndarray, detections: list
+) -> int | None:
+    """Return index of detection in `detections` with highest IoU against track_det_bbox."""
+    best_idx, best_iou = None, 0.0
+    x1, y1, x2, y2 = track_det_bbox
+    for i, det in enumerate(detections):
+        b = det.bbox
+        ix1 = max(x1, b.left_edge);  iy1 = max(y1, b.top_edge)
+        ix2 = min(x2, b.right_edge); iy2 = min(y2, b.bottom_edge)
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        area_a = (x2 - x1) * (y2 - y1)
+        area_b = b.width * b.height
+        union = area_a + area_b - inter
+        iou = inter / union if union > 0 else 0.0
+        if iou > best_iou:
+            best_iou = iou
+            best_idx = i
+    return best_idx
 
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_callback_class):
@@ -149,30 +173,32 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     detection_count = 0
     detections_list = []
     for detection in detections:
-        detection : hailo.HailoDetection = detection
-
-        # DEBUG_dump('detecion: ', detection)
-
-        # label = detection.get_label()
+        detection: hailo.HailoDetection = detection
         bbox = detection.get_bbox()
-
         confidence = detection.get_confidence()
-        # if label == "person":
-        # Get track ID
-        track_id = 0
-        track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-        if len(track) == 1:
-            track_id = track[0].get_id()
-        else:
-            track_id = None
-
         detection_count += 1
         detections_list.append(Detection(
-            bbox = Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
-            confidence = confidence,
-            track_id = track_id,
-            # class_id = detection.class_id,
+            bbox=Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
+            confidence=confidence,
+            track_id=None,
         ))
+
+    # Run ByteTracker to assign stable track IDs
+    if detections_list:
+        dets_array = np.array([
+            [d.bbox.left_edge, d.bbox.top_edge, d.bbox.right_edge, d.bbox.bottom_edge, d.confidence]
+            for d in detections_list
+        ])
+    else:
+        dets_array = np.empty((0, 5))
+
+    active_tracks = user_data.tracker.update(dets_array, user_data._bt_frame_id)
+    user_data._bt_frame_id += 1
+
+    for track in active_tracks:
+        idx = _match_track_to_detection(track.det_bbox, detections_list)
+        if idx is not None:
+            detections_list[idx].track_id = track.track_id
 
     # if len(detections) != 0:
     user_data.detections_queue.put(
@@ -270,19 +296,9 @@ def main():
     start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
     event = threading.Event()
-    user_data = user_app_callback_class(detections_queue)
-    user_data.use_frame = True
 
     arg_parser = get_default_parser()
     arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
-    app = App(
-        app_callback,
-        user_data,
-        parser=arg_parser,
-        video_output_chunk_length_s=10,
-        video_output_path='./_DEBUG',
-        video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True)
 
     control_config = {
         'confidence_min': 0.4,
@@ -356,8 +372,33 @@ def main():
         'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
         'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
 
-        'DEBUG': DEBUG
+        'DEBUG': DEBUG,
+
+        'bytetrack_track_thresh': 0.5,
+        'bytetrack_det_thresh':   0.6,
+        'bytetrack_match_thresh': 0.8,
+        'bytetrack_track_buffer': 30,
+        'bytetrack_frame_rate':   30,
     }
+
+    bytetracker = BYTETracker(
+        track_thresh=control_config['bytetrack_track_thresh'],
+        det_thresh=control_config['bytetrack_det_thresh'],
+        match_thresh=control_config['bytetrack_match_thresh'],
+        track_buffer=control_config['bytetrack_track_buffer'],
+        frame_rate=control_config['bytetrack_frame_rate'],
+    )
+    user_data = user_app_callback_class(detections_queue, bytetracker)
+    user_data.use_frame = True
+
+    app = App(
+        app_callback,
+        user_data,
+        parser=arg_parser,
+        video_output_chunk_length_s=10,
+        video_output_path='./_DEBUG',
+        video_filename_base=f"RAW_{start_time_str}",
+        record_videos=True)
 
     logger.info("!!! Config: %s", control_config)
     if DEBUG:
