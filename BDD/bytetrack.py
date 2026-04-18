@@ -227,3 +227,96 @@ def _associate(
         return [], list(range(len(stracks))), list(range(len(dets)))
     track_bboxes = np.array([t.bbox for t in stracks])
     return _greedy_match(_iou_batch(track_bboxes, dets[:, :4]), thresh)
+
+
+# -----------------------------------------------------------------------
+# Tracker
+# -----------------------------------------------------------------------
+
+class BYTETracker:
+    """ByteTrack with two-stage IoU association and Kalman prediction.
+
+    Stage 1: high-confidence detections matched against all active + lost tracks.
+    Stage 2: low-confidence detections matched against unmatched active tracks.
+    """
+
+    def __init__(
+        self,
+        track_thresh: float = 0.5,
+        det_thresh:   float = 0.6,
+        match_thresh: float = 0.8,
+        track_buffer: int   = 30,
+        frame_rate:   float = 30.0,
+    ):
+        self.track_thresh = track_thresh
+        self.det_thresh   = det_thresh
+        self.match_thresh = match_thresh
+        self.max_lost_age = int(frame_rate / 30.0 * track_buffer)
+        self._kf = KalmanFilter(frame_rate=frame_rate)
+        self.tracked_stracks: list[STrack] = []
+        self.lost_stracks:    list[STrack] = []
+
+    def update(self, dets: np.ndarray, frame_id: int) -> list[STrack]:
+        """
+        Args:
+            dets: (N, 5) array [x1, y1, x2, y2, score] in normalised 0-1 coords.
+            frame_id: monotonically increasing frame counter.
+        Returns:
+            Active STrack list (state == Tracked).
+        """
+        if len(dets) > 0:
+            mask      = dets[:, 4] >= self.track_thresh
+            high_dets = dets[mask]
+            low_dets  = dets[~mask]
+        else:
+            high_dets = np.empty((0, 5))
+            low_dets  = np.empty((0, 5))
+
+        n_tracked   = len(self.tracked_stracks)
+        strack_pool = self.tracked_stracks + self.lost_stracks
+
+        for t in strack_pool:
+            t.predict()
+
+        # Stage 1: high_dets vs full pool (tracked + lost)
+        matches1, unm_pool1, unm_high = _associate(strack_pool, high_dets, self.match_thresh)
+        for ti, di in matches1:
+            strack_pool[ti].update(high_dets[di, :4], high_dets[di, 4], frame_id)
+
+        unm_tracked = [strack_pool[ti] for ti in unm_pool1 if ti < n_tracked]
+        unm_lost    = [strack_pool[ti] for ti in unm_pool1 if ti >= n_tracked]
+
+        # Stage 2: low_dets vs unmatched tracked stracks
+        matches2, unm_r2, _ = _associate(unm_tracked, low_dets, 0.5)
+        for ti, di in matches2:
+            unm_tracked[ti].update(low_dets[di, :4], low_dets[di, 4], frame_id)
+
+        matched2_set = {ti for ti, _ in matches2}
+        newly_lost = [unm_tracked[i] for i in range(len(unm_tracked))
+                      if i not in matched2_set]
+        for t in newly_lost:
+            t.mark_lost()
+
+        # New tracks from unmatched high detections
+        new_tracks: list[STrack] = []
+        for di in unm_high:
+            t = STrack(high_dets[di, :4], high_dets[di, 4], self._kf)
+            if t.score >= self.det_thresh:
+                t.activate(frame_id)
+                new_tracks.append(t)
+
+        # Prune timed-out lost tracks
+        all_lost = newly_lost + unm_lost
+        surviving_lost: list[STrack] = []
+        for t in all_lost:
+            if frame_id - t.frame_id <= self.max_lost_age:
+                surviving_lost.append(t)
+            else:
+                t.mark_removed()
+
+        self.tracked_stracks = (
+            [t for t in strack_pool if t.state == TrackState.Tracked] + new_tracks
+        )
+        self.lost_stracks = surviving_lost
+
+        return list(self.tracked_stracks)

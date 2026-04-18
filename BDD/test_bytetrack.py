@@ -132,5 +132,106 @@ def test_strack_mark_lost_and_removed():
     assert t.state == TrackState.Removed
 
 
+from bytetrack import BYTETracker
+
+
+def _det(x1, y1, x2, y2, score):
+    return [x1, y1, x2, y2, score]
+
+
+def _tracker():
+    STrack.reset_counter()
+    return BYTETracker(track_thresh=0.5, det_thresh=0.6, match_thresh=0.8,
+                       track_buffer=5, frame_rate=30)
+
+
+def test_tracker_no_dets_returns_empty():
+    t = _tracker()
+    result = t.update(np.empty((0, 5)), frame_id=0)
+    assert result == []
+
+
+def test_tracker_single_detection_creates_track():
+    t = _tracker()
+    dets = np.array([_det(0.1, 0.1, 0.3, 0.3, 0.8)])
+    tracks = t.update(dets, frame_id=0)
+    assert len(tracks) == 1
+    assert tracks[0].track_id == 1
+    assert tracks[0].state == TrackState.Tracked
+
+
+def test_tracker_same_detection_keeps_track_id():
+    t = _tracker()
+    dets = np.array([_det(0.1, 0.1, 0.3, 0.3, 0.8)])
+    t.update(dets, frame_id=0)
+    tracks = t.update(dets, frame_id=1)
+    assert len(tracks) == 1
+    assert tracks[0].track_id == 1
+
+
+def test_tracker_lost_track_remembered():
+    t = _tracker()
+    dets = np.array([_det(0.1, 0.1, 0.3, 0.3, 0.8)])
+    t.update(dets, frame_id=0)
+    # Frame with no detections
+    tracks = t.update(np.empty((0, 5)), frame_id=1)
+    assert tracks == []
+    assert len(t.lost_stracks) == 1
+
+
+def test_tracker_lost_track_recovered():
+    t = _tracker()
+    dets = np.array([_det(0.1, 0.1, 0.3, 0.3, 0.8)])
+    t.update(dets, frame_id=0)
+    t.update(np.empty((0, 5)), frame_id=1)  # goes lost
+    # Reappears
+    tracks = t.update(dets, frame_id=2)
+    assert len(tracks) == 1
+    assert tracks[0].track_id == 1          # same ID recovered
+
+
+def test_tracker_lost_track_removed_after_buffer():
+    # track_buffer=5 → max_lost_age = 5 frames
+    t = _tracker()
+    dets = np.array([_det(0.1, 0.1, 0.3, 0.3, 0.8)])
+    t.update(dets, frame_id=0)
+    # 6 empty frames
+    for fid in range(1, 7):
+        t.update(np.empty((0, 5)), frame_id=fid)
+    assert len(t.lost_stracks) == 0
+
+
+def test_tracker_low_confidence_below_det_thresh_not_tracked():
+    # score=0.4 < det_thresh=0.6 → should not create a new track
+    t = _tracker()
+    dets = np.array([_det(0.1, 0.1, 0.3, 0.3, 0.4)])
+    tracks = t.update(dets, frame_id=0)
+    assert tracks == []
+
+
+def test_tracker_low_conf_rescues_lost_track():
+    t = _tracker()
+    # Establish a track
+    high_det = np.array([_det(0.1, 0.1, 0.3, 0.3, 0.8)])
+    t.update(high_det, frame_id=0)
+    # Next frame: only low-confidence detection at same position
+    low_det = np.array([_det(0.11, 0.11, 0.31, 0.31, 0.35)])
+    tracks = t.update(low_det, frame_id=1)
+    assert len(tracks) == 1
+    assert tracks[0].track_id == 1          # rescued via Stage 2
+
+
+def test_tracker_two_detections_two_tracks():
+    t = _tracker()
+    dets = np.array([
+        _det(0.1, 0.1, 0.3, 0.3, 0.9),
+        _det(0.6, 0.6, 0.8, 0.8, 0.9),
+    ])
+    tracks = t.update(dets, frame_id=0)
+    assert len(tracks) == 2
+    ids = {tr.track_id for tr in tracks}
+    assert len(ids) == 2                    # distinct IDs
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-qq", __file__]))
