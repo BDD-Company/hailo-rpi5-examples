@@ -83,6 +83,8 @@ class TrackState(IntEnum):
 class STrack:
     """Single tracked object with Kalman filter state."""
 
+    # Shared across all BYTETracker instances; IDs are globally unique within a process.
+    # Intentional for single-tracker use; use reset_counter() in tests.
     _id_counter: int = 0
 
     @classmethod
@@ -200,6 +202,9 @@ def _greedy_match(
 ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
     """Greedy IoU matching, highest IoU first.
 
+    Uses greedy (not optimal Hungarian) assignment. Adequate for single-target
+    use; with many similar-IoU detections the optimal assignment may differ.
+
     Returns (matched_pairs, unmatched_row_indices, unmatched_col_indices).
     """
     matched: list[tuple[int, int]] = []
@@ -260,7 +265,9 @@ class BYTETracker:
         """
         Args:
             dets: (N, 5) array [x1, y1, x2, y2, score] in normalised 0-1 coords.
-            frame_id: monotonically increasing frame counter.
+            frame_id: monotonically increasing frame counter (NOT a timestamp).
+                      Must increment by ~1 per frame; track_buffer expiry is
+                      based on frame_id differences, not wall time.
         Returns:
             Active STrack list (state == Tracked).
         """
