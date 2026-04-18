@@ -410,7 +410,7 @@ class Detection:
 
 @dataclass(slots=True, frozen=True)
 class FrameMetadata:
-    capture_timestamp_ns : int = 0
+    capture_timestamp_ns : int | None = None
     detection_start_timestamp_ns : int = 0
     detection_end_timestamp_ns : int = 0
 

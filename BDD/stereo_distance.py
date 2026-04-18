@@ -90,6 +90,9 @@ def stereo_distance(
     the preloaded remap arrays (one point lookup — no full-frame remap at runtime).
     """
     w, h = calib.image_size
+    assert frame_width == w and frame_height == h, (
+        f"Frame size {frame_width}x{frame_height} != calibration size {w}x{h}"
+    )
     cx_l = int(np.clip(left_det.bbox.center.x  * frame_width,  0, w - 1))
     cy_l = int(np.clip(left_det.bbox.center.y  * frame_height, 0, h - 1))
     cx_r = int(np.clip(right_det.bbox.center.x * frame_width,  0, w - 1))

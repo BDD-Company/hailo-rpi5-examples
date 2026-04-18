@@ -1,6 +1,9 @@
 # BDD/test_stereo_pairer.py
+import time
+
 import pytest
 from helpers import Detections, StereoDetections, FrameMetadata
+from stereo_pairer import StereoPairer
 
 
 def _make_detections(frame_id=1, ts=1_000_000_000):
@@ -21,18 +24,12 @@ def test_stereo_detections_fields():
     assert sd.pair_timestamp_ns == 1_000_250_000
 
 
-import time
-from stereo_pairer import StereoPairer
-
-
 class _CollectQueue:
     """Simple list-backed queue stub for tests."""
     def __init__(self):
         self.items = []
     def put(self, item):
         self.items.append(item)
-    def get(self, timeout=None):
-        return self.items.pop(0)
 
 
 def test_pair_emitted_when_timestamps_close():
@@ -67,7 +64,10 @@ def test_mono_fallback_after_timeout():
     pairer.put('left', left)
     right = _make_detections(2, ts=old_ts + 500_000_000)
     pairer.put('right', right)
-    assert any(i is left for i in q.items)
+    assert len(q.items) == 1
+    assert q.items[0] is left
+    assert isinstance(q.items[0], Detections)
+    assert not isinstance(q.items[0], StereoDetections)
 
 
 def test_pair_timestamp_is_average():

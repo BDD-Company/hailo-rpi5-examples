@@ -57,7 +57,7 @@ class StereoPairer:
                 self._output_queue.put(StereoDetections(left=left, right=right, pair_timestamp_ns=avg))
             else:
                 self._buffers[camera_id].append((detections, received_ns))
-                self._flush_timed_out()
+            self._flush_timed_out()
 
     def _flush_timed_out(self) -> None:
         now = time.monotonic_ns()
