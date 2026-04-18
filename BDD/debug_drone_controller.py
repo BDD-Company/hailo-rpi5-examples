@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import sys
 import types
@@ -22,6 +23,9 @@ import queue
 from math import nan
 from pathlib import Path
 from datetime import datetime
+
+# До import cv2: Qt + GLib (Gst) на одной машине часто ломают отрисовку; GTK3 стабильнее.
+os.environ.setdefault("OPENCV_UI_BACKEND", "GTK3")
 
 import cv2
 import numpy as np
@@ -377,12 +381,16 @@ class InteractiveDisplaySink:
         cv2.resizeWindow(self._window_name, frame_size[0], frame_size[1])
 
     def process_frame(self, frame):
-        cv2.imshow(self._window_name, frame)
+        # Не портим буфер кадра из очереди (его же читает логика дрона).
+        vis = np.ascontiguousarray(frame)
+        # BDD: кадр из GStreamer/VideoReader — RGB; imshow ожидает BGR.
+        if vis.ndim == 3 and vis.shape[2] == 3:
+            vis = cv2.cvtColor(vis, cv2.COLOR_RGB2BGR)
+        cv2.imshow(self._window_name, vis)
+        cv2.waitKey(1)
+
         while True:
-            key = cv2.waitKeyEx(0)  # block indefinitely
-            w,h = frame.shape[1], frame.shape[0]
-            color = (0, 0, 0)
-            cv2.rectangle(frame, (0,0), (w,h), color, thickness=-1)
+            key = cv2.waitKeyEx(0)
             if key == _KEY_RIGHT or key == ord("d"):
                 self._replay_queue.advance()
                 return

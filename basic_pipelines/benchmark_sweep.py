@@ -20,6 +20,10 @@ Usage examples:
   python basic_pipelines/benchmark_sweep.py \\
     --videos-dir test_videos/ --hef-path model.hef --out-dir sweep_out/ \\
     --sweep-config my_grid.json
+
+  # Default: each benchmark saves frames (--save-detection-frames-every 1), then builds
+  # combo_xxxx/{video_stem}_preview.mp4 via ffmpeg and deletes the JPEGs. Disable with
+  # --save-detection-frames-every 0. Requires ffmpeg in PATH.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ import argparse
 import itertools
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -44,13 +49,13 @@ DETECTION_SWEEP: dict[str, list] = {
 TRACKING_SWEEP: dict[str, list] = {
     'iou_thr':              [0.4, 0.6, 0.8],
     'kalman_dist_thr':      [0.4, 0.6, 0.8],
-    'keep_new_frames':      [1, 2, 3],
+    'keep_new_frames':      [1, 3, 6, 10],
     'keep_tracked_frames':  [0, 5, 15],
-    'keep_lost_frames':     [0, 2],
+    'keep_lost_frames':     [0, 2, 5],
 }
 
 DEFAULTS: dict[str, Any] = {
-    'nms_score_threshold':    0.5,
+    'nms_score_threshold':    0.3,
     'nms_iou_threshold':      0.35,
     'iou_thr':                0.8,
     'kalman_dist_thr':        0.8,
@@ -94,6 +99,38 @@ def find_videos(videos_dir: Path) -> list[Path]:
     return sorted(p for p in videos_dir.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS)
 
 
+def _assemble_preview_from_jpegs(frames_dir: Path, run_tag: str, out_mp4: Path, fps: float) -> int:
+    """Encode ``{run_tag}_frame_*.jpg`` under ``frames_dir`` to H.264 MP4. Returns ffmpeg exit code."""
+    pattern = str(frames_dir / f'{run_tag}_frame_*.jpg')
+    jpgs = sorted(frames_dir.glob(f'{run_tag}_frame_*.jpg'))
+    if not jpgs:
+        return 0
+    cmd = [
+        'ffmpeg', '-nostdin', '-y',
+        '-hide_banner', '-loglevel', 'warning',
+        '-framerate', str(fps),
+        '-pattern_type', 'glob',
+        '-i', pattern,
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-pix_fmt', 'yuv420p',
+        str(out_mp4),
+    ]
+    return subprocess.run(cmd, stdin=subprocess.DEVNULL).returncode
+
+
+def _remove_frame_jpegs(frames_dir: Path, run_tag: str) -> None:
+    for p in frames_dir.glob(f'{run_tag}_frame_*.jpg'):
+        p.unlink(missing_ok=True)
+
+
+def _rmdir_if_empty(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:
+        pass
+
+
 def run_benchmark_for_video(
     benchmark_py: Path,
     video: Path,
@@ -101,6 +138,9 @@ def run_benchmark_for_video(
     log_path: Path,
     params: dict[str, Any],
     timeout_s: int = 300,
+    *,
+    save_detection_frames_every: int = 1,
+    preview_fps: float = 30.0,
 ) -> int:
     cmd = [
         sys.executable, str(benchmark_py),
@@ -114,12 +154,27 @@ def run_benchmark_for_video(
         '--tracker-keep-tracked-frames', str(params['keep_tracked_frames']),
         '--tracker-keep-lost-frames',  str(params['keep_lost_frames']),
     ]
+    frames_dir: Path | None = None
+    if save_detection_frames_every > 0:
+        frames_dir = log_path.parent / '_frames' / video.stem
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        cmd += [
+            '--save-detection-frames-dir', str(frames_dir),
+            '--save-detection-frames-every', str(save_detection_frames_every),
+            '--save-detection-frames-max', '0',
+            '--video-sink', 'fakesink',
+        ]
     err_path = log_path.with_suffix('.err')
     try:
         with log_path.open('w') as log_fh, err_path.open('w') as err_fh:
-            result = subprocess.run(cmd, stdout=log_fh, stderr=err_fh,
-                                    timeout=timeout_s,
-                                    env={**os.environ, 'DISPLAY': os.environ.get('DISPLAY', ':0')})
+            result = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=err_fh,
+                timeout=timeout_s,
+                env={**os.environ, 'DISPLAY': os.environ.get('DISPLAY', ':0')},
+            )
         rc = result.returncode
     except subprocess.TimeoutExpired:
         print(f"  WARNING: benchmark timed out after {timeout_s}s for {video.name}", file=sys.stderr)
@@ -134,6 +189,35 @@ def run_benchmark_for_video(
     if log_path.exists():
         lines = [l for l in log_path.read_text().splitlines() if l.strip()]
         log_path.write_text('\n'.join(lines) + ('\n' if lines else ''))
+
+    if frames_dir is not None and frames_dir.exists():
+        run_tag = video.stem
+        frames_root = log_path.parent / '_frames'
+        if rc == 0:
+            out_mp4 = log_path.parent / f'{video.stem}_preview.mp4'
+            jpgs = sorted(frames_dir.glob(f'{run_tag}_frame_*.jpg'))
+            if not jpgs:
+                shutil.rmtree(frames_dir, ignore_errors=True)
+                _rmdir_if_empty(frames_root)
+            else:
+                print(
+                    f"  encoding {len(jpgs)} frames → {out_mp4.name} (ffmpeg) …",
+                    flush=True,
+                )
+                ff_rc = _assemble_preview_from_jpegs(frames_dir, run_tag, out_mp4, preview_fps)
+                if ff_rc != 0:
+                    print(
+                        f"  WARNING: ffmpeg failed ({ff_rc}) for {video.name}; JPEGs left in {frames_dir}",
+                        file=sys.stderr,
+                    )
+                else:
+                    _remove_frame_jpegs(frames_dir, run_tag)
+                    shutil.rmtree(frames_dir, ignore_errors=True)
+                    _rmdir_if_empty(frames_root)
+        else:
+            shutil.rmtree(frames_dir, ignore_errors=True)
+            _rmdir_if_empty(frames_root)
+
     return rc
 
 
@@ -259,9 +343,30 @@ def parse_args() -> argparse.Namespace:
                         help='Print parameter combinations and exit without running')
     parser.add_argument('--metrics-only', action='store_true',
                         help='Skip benchmark runs, compute metrics and ranking from existing logs in --out-dir')
+    parser.add_argument(
+        '--save-detection-frames-every',
+        type=int,
+        default=1,
+        help=(
+            'If > 0: benchmark.py runs with --save-detection-frames-dir/--video-sink fakesink; '
+            'after each successful run JPEGs are encoded to {video_stem}_preview.mp4 in the combo '
+            'directory via ffmpeg, then removed. Set to 0 to skip frame export and preview videos. '
+            'Requires ffmpeg in PATH when > 0.'
+        ),
+    )
+    parser.add_argument(
+        '--preview-fps',
+        type=float,
+        default=30.0,
+        help='Framerate passed to ffmpeg for *_preview.mp4 (default: 30)',
+    )
     args = parser.parse_args()
     if args.frame_tolerance < 0:
         parser.error('--frame-tolerance must be >= 0')
+    if args.save_detection_frames_every < 0:
+        parser.error('--save-detection-frames-every must be >= 0')
+    if args.preview_fps <= 0:
+        parser.error('--preview-fps must be > 0')
     return args
 
 
@@ -372,6 +477,14 @@ def main() -> int:
         print("ERROR: --hef-path is required unless --metrics-only is set", file=sys.stderr)
         return 1
 
+    if args.save_detection_frames_every > 0 and not shutil.which('ffmpeg'):
+        print(
+            'ERROR: --save-detection-frames-every > 0 requires ffmpeg in PATH '
+            '(or pass --save-detection-frames-every 0).',
+            file=sys.stderr,
+        )
+        return 1
+
     sweep_config = None
     if args.sweep_config:
         sweep_config = json.loads(args.sweep_config.read_text())
@@ -420,7 +533,15 @@ def main() -> int:
                 print(f"{prefix}  [skip, log exists]", flush=True)
                 continue
             print(prefix, flush=True)
-            rc = run_benchmark_for_video(benchmark_py, video, args.hef_path, log_path, params)
+            rc = run_benchmark_for_video(
+                benchmark_py,
+                video,
+                args.hef_path,
+                log_path,
+                params,
+                save_detection_frames_every=args.save_detection_frames_every,
+                preview_fps=args.preview_fps,
+            )
             if rc != 0:
                 print(f"  WARNING: benchmark exited with code {rc} for {video.name}", file=sys.stderr)
 

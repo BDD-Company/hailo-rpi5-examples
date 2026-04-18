@@ -283,7 +283,11 @@ class GStreamerApp:
 
     def shutdown(self, signum=None, frame=None):
         logger.info("Shutting down... Hit Ctrl-C again to force quit.")
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+        except ValueError:
+            # shutdown() may run from the GStreamer bus thread (e.g. debug_detections.py GST thread)
+            logger.debug("SIGINT handler not reset: signal.signal only works on the main thread")
         self.pipeline.set_state(Gst.State.PAUSED)
         GLib.usleep(100000)  # 0.1 second delay
 
@@ -357,8 +361,27 @@ class GStreamerApp:
                 identity_pad.add_probe(Gst.PadProbeType.BUFFER, self.app_callback, self.user_data)
 
         hailo_display = self.pipeline.get_by_name("hailo_display")
-        if hailo_display is None and not getattr(self.options_menu, 'ui', False):
-            logger.warning("Warning: hailo_display element not found, add <fpsdisplaysink name=hailo_display> to your pipeline to support fps display.")
+        if hailo_display is None and not getattr(self.options_menu, "ui", False):
+            # record_videos=False → часто один fakesink вместо fpsdisplaysink — это не ошибка
+            has_fakesink = False
+            it = self.pipeline.iterate_elements()
+            while True:
+                result, element = it.next()
+                if result != Gst.IteratorResult.OK:
+                    break
+                fac = element.get_factory()
+                if fac is not None and fac.get_name() == "fakesink":
+                    has_fakesink = True
+                    break
+            if has_fakesink:
+                logger.debug(
+                    "hailo_display отсутствует: хвост пайплайна без экрана (fakesink), FPS overlay не используется."
+                )
+            else:
+                logger.warning(
+                    "Warning: hailo_display element not found, add <fpsdisplaysink name=hailo_display> "
+                    "to your pipeline to support fps display."
+                )
 
         # Disable QoS to prevent frame drops
         disable_qos(self.pipeline)
@@ -663,12 +686,11 @@ class GStreamerDetectionApp(GStreamerApp):
             tracker_pipeline = f'{tracker_pipeline} ! '
 
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
-        if self.source_type == 'rpi':
-            # production case == video from camera, use custom pipeline
-            display_pipeline = self.get_output_pipeline_string(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
-        else:
-            # here custom pipeline might break rewinding of initial source, use default display pipeline
-            display_pipeline = DISPLAY_PIPELINE(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
+        # Всегда через get_output_pipeline_string: подклассы (напр. debug_detections.StepDetectionApp)
+        # подменяют хвост пайплайна (fakesink) и для файла тоже; базовая реализация — DISPLAY_PIPELINE.
+        display_pipeline = self.get_output_pipeline_string(
+            video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps
+        )
 
         pipeline_string = (
             f'{source_pipeline} ! '

@@ -1,8 +1,9 @@
 #! /usr/bin/env python
 
 import subprocess
+import threading
 import time
-from queue import Queue
+from queue import Empty, Queue
 import json
 import pprint
 import dataclasses
@@ -403,15 +404,41 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     return frame
 
 
-def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
+def _get_detection_dict(frame_queue: Queue, companion_thread: threading.Thread | None, timeout_s: float):
+    """Блокирующий get; с companion_thread — с таймаутом и выходом, если поток уже завершился."""
+    while True:
+        if companion_thread is not None and not companion_thread.is_alive():
+            return None
+        try:
+            if companion_thread is not None:
+                return frame_queue.get(timeout=timeout_s)
+            return frame_queue.get()
+        except Empty:
+            continue
+
+
+def debug_output_thread(
+    frame_queue: Queue,
+    sink: FrameSinkInterface | None = None,
+    companion_thread: threading.Thread | None = None,
+):
+    """Поток отладочного вывода. OpenCV лучше вызывать с главного потока (см. debug_detections.py).
+
+    companion_thread: если задан (нап. поток drone_controller), get() с таймаутом и
+    выход после его завершения, чтобы main не зависал в frame_queue.get().
+    """
+    timeout_s = 0.25
 
     frame = None
     try:
         # Get the first frame and figure out image dimensions
         detection_dict = None
         while frame is None:
-            detection_dict = frame_queue.get()
-            frame : np.ndarray = detection_dict['detections'].frame
+            detection_dict = _get_detection_dict(frame_queue, companion_thread, timeout_s)
+            if detection_dict is None:
+                logger.info("No debug frame before companion thread exit; skipping display.")
+                return
+            frame: np.ndarray = detection_dict['detections'].frame
         frame_h, frame_w, _ = frame.shape
         logger.debug("Got first frame of size W:%u, H:%u", frame_w, frame_h)
 
@@ -420,13 +447,16 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
         while True:
             try:
                 if detection_dict is None:
-                    detection_dict = frame_queue.get()
+                    detection_dict = _get_detection_dict(frame_queue, companion_thread, timeout_s)
+                    if detection_dict is None:
+                        logger.info("Companion thread finished; closing debug display.")
+                        break
                 annotated_frame = annotate_frame_with_detection_info(detection_dict)
 
                 if annotated_frame is not None:
                     sink.process_frame(annotated_frame)
 
-            except:
+            except Exception:
                 frame_id = -1 if detection_dict is None else detection_dict['detections'].frame_id
                 logger.exception("exception while processing frame %d", frame_id, exc_info=True, stack_info=True)
                 break

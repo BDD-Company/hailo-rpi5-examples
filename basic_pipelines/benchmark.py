@@ -121,10 +121,14 @@ class user_app_callback_class(app_callback_class):
         self.stage_latency: Optional[StageLatencyAggregator] = StageLatencyAggregator()
         self.detections_info = defaultdict(list)
         self.save_detection_frames_dir: Optional[Path] = None
-        self.save_detection_frames_max = 1
+        self.save_detection_frames_max = 0
         self.save_detection_frames_every = 1
         self.saved_detection_frames = 0
         self.run_tag = "stream"
+        # Pushes BGR frames to multiprocessing.Queue for cv2.imshow; only safe when the app
+        # started the display consumer (--use-frame). Saving JPEGs sets use_frame for numpy
+        # extraction but must not fill the queue without a reader (deadlock after maxsize=3).
+        self.forward_frames_to_display_queue = True
 
     def new_detection(self, class_id, confidence : float):
         self.detections_info[class_id].append(confidence)
@@ -139,9 +143,7 @@ class user_app_callback_class(app_callback_class):
         self.save_detection_frames_every = every_n
         self.run_tag = run_tag
 
-    def should_save_frame(self, frame_id: int, detection_count: int) -> bool:
-        if detection_count <= 0:
-            return False
+    def should_save_frame(self, frame_id: int) -> bool:
         if self.save_detection_frames_dir is None:
             return False
         if self.save_detection_frames_max > 0 and self.saved_detection_frames >= self.save_detection_frames_max:
@@ -265,9 +267,10 @@ def app_callback(pad, info, user_data):
         # cv2.putText(frame, f"{user_data.new_function()} {user_data.new_variable}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         # Convert the frame to BGR
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        if user_data.should_save_frame(frame_id=frame_id, detection_count=detection_count):
+        if user_data.should_save_frame(frame_id):
             user_data.save_detection_frame(frame_id=frame_id, frame_bgr=frame_bgr)
-        user_data.set_frame(frame_bgr)
+        if getattr(user_data, 'forward_frames_to_display_queue', True):
+            user_data.set_frame(frame_bgr)
 
     if string_to_print:
         print(string_to_print)
@@ -287,7 +290,6 @@ class BenchmarkApp(GStreamerDetectionApp):
             ('--tracker-keep-new-frames',     'tracker_keep_new_frames',     int,   1),
             ('--tracker-keep-tracked-frames', 'tracker_keep_tracked_frames', int,   0),
             ('--tracker-keep-lost-frames',    'tracker_keep_lost_frames',    int,   0),
-            ('--save-detection-frames-max',   'save_detection_frames_max',   int,   1),
             ('--save-detection-frames-every', 'save_detection_frames_every', int,   1),
         ]:
             try:
@@ -296,11 +298,21 @@ class BenchmarkApp(GStreamerDetectionApp):
                 pass  # already in default parser
         try:
             parser.add_argument(
+                '--save-detection-frames-max',
+                dest='save_detection_frames_max',
+                type=int,
+                default=0,
+                help='How many JPEGs to write at most (0 = no limit). Ignored if --save-detection-frames-dir is not set.',
+            )
+        except Exception:
+            pass
+        try:
+            parser.add_argument(
                 '--save-detection-frames-dir',
                 dest='save_detection_frames_dir',
                 type=str,
                 default=None,
-                help='Directory to save callback frames with drawn detections',
+                help='Directory to save callback frames (overlay + count); all frames matching --save-detection-frames-every / -max, including with zero detections',
             )
         except Exception:
             pass
@@ -314,6 +326,20 @@ class BenchmarkApp(GStreamerDetectionApp):
             )
         except Exception:
             pass
+        try:
+            parser.add_argument(
+                '--video-sink',
+                dest='video_sink',
+                type=str,
+                default='fakesink',
+                help=(
+                    'Element passed to fpsdisplaysink as video-sink. Default fakesink avoids crashes '
+                    'when autovideosink picks DirectFB on headless/SSH sessions. Use autovideosink or '
+                    'waylandsink for on-screen preview.'
+                ),
+            )
+        except Exception:
+            pass
         super().__init__(app_callback, user_data, parser=parser)
         if getattr(self.options_menu, 'no_stage_latency', False):
             self.user_data.stage_latency = None
@@ -321,12 +347,22 @@ class BenchmarkApp(GStreamerDetectionApp):
         if getattr(self.options_menu, 'save_detection_frames_dir', None):
             # Saving callback frames requires pulling image data from GstBuffer.
             self.user_data.use_frame = True
+        self.user_data.forward_frames_to_display_queue = bool(
+            getattr(self.options_menu, 'use_frame', False)
+        )
         self.user_data.configure_frame_saving(
             save_dir=getattr(self.options_menu, 'save_detection_frames_dir', None),
-            max_frames=max(0, int(getattr(self.options_menu, 'save_detection_frames_max', 1))),
+            max_frames=max(0, int(getattr(self.options_menu, 'save_detection_frames_max', 0))),
             every_n=max(1, int(getattr(self.options_menu, 'save_detection_frames_every', 1))),
             run_tag=video_tag,
         )
+
+    def create_pipeline(self):
+        vs = getattr(self.options_menu, 'video_sink', None)
+        if isinstance(vs, str) and vs.strip():
+            self.video_sink = vs.strip()
+            print(f"Using GStreamer video sink: {self.video_sink}")
+        super().create_pipeline()
 
     def get_pipeline_string(self):
         nms_score = getattr(self.options_menu, 'nms_score_threshold', 0.3)
@@ -353,7 +389,7 @@ class BenchmarkApp(GStreamerDetectionApp):
         )
         detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
         tracker_pipeline = TRACKER_PIPELINE(
-            class_id=1,
+            class_id=-1,
             keep_past_metadata='false',
             qos='false',
             iou_thr=getattr(self.options_menu, 'tracker_iou_thr', 0.6),
@@ -389,7 +425,7 @@ class BenchmarkApp(GStreamerDetectionApp):
         markers = (
             ("bench_after_source", 0),
             ("bench_after_infer", 1),
-            ("bench_after_tracker", 2),
+            # ("bench_after_tracker", 2),
             ("identity_callback", 3),
         )
         pads_and_idx = []

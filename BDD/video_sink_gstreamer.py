@@ -292,6 +292,23 @@ class RecorderSink(interfaces.FrameSinkInterface):
                 pass
             self._pipeline.set_state(Gst.State.NULL)
 
+        # splitmuxsink открывает первый файл при старте; при останове до данных остаётся 0 bytes
+        prefix = f"{self.filename_base}_"
+        try:
+            for p in self.out_dir.iterdir():
+                if not p.is_file() or p.suffix.lower() != ".mkv":
+                    continue
+                if not p.name.startswith(prefix):
+                    continue
+                try:
+                    if p.stat().st_size == 0:
+                        p.unlink()
+                        logger.debug("[RecorderSink] removed empty segment %s", p.name)
+                except OSError:
+                    logger.debug("[RecorderSink] could not unlink %s", p, exc_info=True)
+        except OSError:
+            logger.debug("[RecorderSink] cleanup empty segments: iterdir failed", exc_info=True)
+
     # internals
     # def _on_format_location(self, splitmux, fragment_id: int):
     #     # Build timestamped filename with fragment counter

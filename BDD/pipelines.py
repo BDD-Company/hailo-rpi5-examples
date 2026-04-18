@@ -14,6 +14,7 @@ from hailo_apps.hailo_app_python.core.common.defines import (
 )
 
 import os
+from pathlib import Path
 
 """
 Set of pipelines based on hailo default examples.
@@ -112,12 +113,22 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
             f'videoscale ! '
         )
     else:
-        source_element = (
-            f'filesrc location="{video_source}" name={name} ! '
-            f' qtdemux name=demux demux.video_0 ! '
-            f'{QUEUE(name=f"{name}_queue_decode")} ! '
-            f'decodebin name={name}_decodebin ! '
-        )
+        # decodebin + filesrc иногда даёт «Could not determine type of stream» на части MKV/WebM;
+        # uridecodebin с file:// URI стабильнее определяет Matroska. Остальные файлы — filesrc + decodebin.
+        vp = Path(str(video_source)).expanduser().resolve()
+        ext = vp.suffix.lower()
+        if ext in ('.mkv', '.webm'):
+            uri = vp.as_uri().replace('"', '%22')
+            source_element = (
+                f'uridecodebin uri="{uri}" name={name} ! '
+                f'{QUEUE(name=f"{name}_queue_decode")} ! '
+            )
+        else:
+            source_element = (
+                f'filesrc location="{video_source}" name={name} ! '
+                f'{QUEUE(name=f"{name}_queue_decode")} ! '
+                f'decodebin name={name}_decodebin ! '
+            )
 
     # Set up the fps caps.
     # If sync is True, constrain the rate with the given frame_rate.
