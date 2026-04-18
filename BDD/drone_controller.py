@@ -357,7 +357,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             # logger.debug("!!! awaiting detection... ")
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
-                r : Detections = detections_queue.get(block=True, timeout=0.02)
+                r : Detections = detections_queue.get(timeout=0.02)
                 if r is STOP:
                     logger.info("stopping")
                     break

@@ -406,6 +406,7 @@ class Detection:
     bbox : Rect = field(default_factory=Rect)
     confidence : float = 0.0
     track_id : int|None = 0
+    class_id : int|None = None
 
 @dataclass(slots=True, frozen=True)
 class FrameMetadata:
