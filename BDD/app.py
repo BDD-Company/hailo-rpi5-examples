@@ -22,14 +22,14 @@ from platform_controller import platform_controlling_thread
 
 # from mavsdk.telemetry import EulerAngle
 
+import numpy as np
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
+from bytetrack import BYTETracker
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
 from OverwriteQueue import OverwriteQueue
-import numpy as np
-from bytetrack import BYTETracker
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
 from video_sink_multi import MultiSink
@@ -99,11 +99,14 @@ def normalized_frame_id(buffer: Gst.Buffer, frame_meta) -> int:
 
 seen_frames = deque(maxlen=10)
 
+_MIN_MATCH_IOU = 0.1
+
+
 def _match_track_to_detection(
     track_det_bbox: np.ndarray, rects: list
 ) -> int | None:
     """Return index of rect in `rects` with highest IoU against track_det_bbox."""
-    best_idx, best_iou = None, 0.0
+    best_idx, best_iou = None, _MIN_MATCH_IOU
     x1, y1, x2, y2 = track_det_bbox
     for i, b in enumerate(rects):
         ix1 = max(x1, b.left_edge)
@@ -172,7 +175,6 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     # Extract raw detection data before constructing frozen Detection objects
     raw_dets = []
     for detection in detections:
-        detection: hailo.HailoDetection = detection
         bbox = detection.get_bbox()
         raw_dets.append((
             Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
@@ -188,6 +190,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     else:
         dets_array = np.empty((0, 5))
 
+    # BYTETracker is not thread-safe; safe here because GStreamer uses a single streaming thread.
     active_tracks = user_data.tracker.update(dets_array, frame_id)
 
     # Build index → track_id map before constructing Detection objects
