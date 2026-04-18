@@ -22,6 +22,9 @@ def measure_object_size(frame: np.ndarray, bbox: 'Rect') -> 'XY | None':
 
     fh, fw = frame.shape[:2]
 
+    if fw == 0 or fh == 0:
+        return None
+
     x1 = int(np.clip(bbox.p1.x * fw, 0, fw - 1))
     y1 = int(np.clip(bbox.p1.y * fh, 0, fh - 1))
     x2 = int(np.clip(bbox.p2.x * fw, 0, fw))
@@ -40,7 +43,8 @@ def measure_object_size(frame: np.ndarray, bbox: 'Rect') -> 'XY | None':
 
     largest = max(contours, key=cv2.contourArea)
     bbox_px_area = (x2 - x1) * (y2 - y1)
-    if cv2.contourArea(largest) < 0.05 * bbox_px_area:
+    area = cv2.contourArea(largest)
+    if area < 0.05 * bbox_px_area or area > 0.90 * bbox_px_area:
         return None
 
     _, _, w, h = cv2.boundingRect(largest)

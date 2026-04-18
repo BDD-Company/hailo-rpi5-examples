@@ -34,7 +34,7 @@ def test_returns_none_when_no_dark_object():
     bbox = Rect.from_xyxy(0.0, 0.0, 1.0, 1.0)
     result = measure_object_size(frame, bbox)
     # Either None (noise guard) or a tiny value — must not crash
-    assert result is None or (0.0 < result.x <= 1.0 and 0.0 < result.y <= 1.0)
+    assert result is None
 
 
 def test_detects_dark_object_smaller_than_bbox():
