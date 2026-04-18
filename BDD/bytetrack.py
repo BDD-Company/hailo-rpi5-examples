@@ -290,10 +290,7 @@ class BYTETracker:
         matches2, unm_r2, _ = _associate(unm_tracked, low_dets, 0.5)
         for ti, di in matches2:
             unm_tracked[ti].update(low_dets[di, :4], low_dets[di, 4], frame_id)
-
-        matched2_set = {ti for ti, _ in matches2}
-        newly_lost = [unm_tracked[i] for i in range(len(unm_tracked))
-                      if i not in matched2_set]
+        newly_lost = [unm_tracked[i] for i in unm_r2]
         for t in newly_lost:
             t.mark_lost()
 
