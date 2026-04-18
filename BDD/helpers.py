@@ -422,6 +422,13 @@ class Detections:
     meta : FrameMetadata = field(default_factory=FrameMetadata)
 
 
+@dataclass(slots=True, frozen=True)
+class StereoDetections:
+    left: 'Detections'
+    right: 'Detections'
+    pair_timestamp_ns: int
+
+
 @dataclass(slots=True)
 class MoveCommand:
     # X - yaw
