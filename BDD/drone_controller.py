@@ -569,11 +569,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                             #pd_coeff_p
 
                     if THRUST_PROPORTIONAL_TO_TARGET_SIZE:
-                        if estimated_distance_m < 7:
+                        if estimated_distance_m < 11:
                             thrust *= 1.1
                             pd_coeff_p *= 1.1
 
-                            if estimated_distance_m < 5:
+                            if estimated_distance_m < 7:
                                 thrust *= 1.1
                                 pd_coeff_p *= 1.1
 

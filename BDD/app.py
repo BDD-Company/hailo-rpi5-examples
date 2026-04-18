@@ -288,10 +288,10 @@ def main():
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_min': 0.5,
-        'thrust_max': 0.5,
+        'thrust_min': 0.6,
+        'thrust_max': 0.9,
         'thrust_dynamic': False,
-        'thrust_proportional_to_target_size' : False,
+        'thrust_proportional_to_target_size' : True,
 
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
@@ -302,7 +302,7 @@ def main():
         'estimation_lookahead_dynamic_frames_medium': 2,
         'estimation_lookahead_dynamic_frames_far':    4, # can't be too big -- estimation will be too FAAR away.
 
-        'pd_coeff_p': 3,
+        'pd_coeff_p': 4,
         'pd_coeff_d': 0, #-1, # -1
         'pd_coeff_p_safe_min': 0.6,
         'pd_coeff_p_min' : 0.5,
@@ -328,7 +328,7 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m' : XY(1.8, 1.8),             # shahed small
+        'target_size_m' : XY(1.2, 1.2),             # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
         # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
