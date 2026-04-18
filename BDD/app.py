@@ -199,7 +199,6 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             track_id_map[idx] = track.track_id
 
     # Construct immutable Detection objects with track_id set at creation time
-    detection_count = len(raw_dets)
     detections_list = [
         Detection(
             bbox=rect,
