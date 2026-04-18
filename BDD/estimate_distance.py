@@ -4,7 +4,52 @@ import math
 from typing import Optional, Tuple
 from enum import Enum
 
+import cv2
+import numpy as np
+
 from helpers import XY
+
+
+def measure_object_size(frame: np.ndarray, bbox: 'Rect') -> 'XY | None':
+    """Return the normalized (0-1) size of the object inside bbox.
+
+    Uses inverted Otsu threshold on grayscale — reliable for dark objects
+    on bright backgrounds (drone against sky). Returns None on failure;
+    caller should fall back to bbox.size.
+    """
+    if frame is None:
+        return None
+
+    fh, fw = frame.shape[:2]
+
+    if fw == 0 or fh == 0:
+        return None
+
+    x1 = int(np.clip(bbox.p1.x * fw, 0, fw - 1))
+    y1 = int(np.clip(bbox.p1.y * fh, 0, fh - 1))
+    x2 = int(np.clip(bbox.p2.x * fw, 0, fw))
+    y2 = int(np.clip(bbox.p2.y * fh, 0, fh))
+
+    if (x2 - x1) < 4 or (y2 - y1) < 4:
+        return None
+
+    crop = frame[y1:y2, x1:x2]
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+    bbox_px_area = (x2 - x1) * (y2 - y1)
+    area = cv2.contourArea(largest)
+    if area < 0.05 * bbox_px_area or area > 0.90 * bbox_px_area:
+        return None
+
+    _, _, w, h = cv2.boundingRect(largest)
+    return XY(w / fw, h / fh)
+
 
 def estimate_distance(
     target_size_m: XY,
