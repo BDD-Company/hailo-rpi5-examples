@@ -71,7 +71,7 @@ Input: dets (N×5 array), current tracked/lost stracks
 
 2. Split dets:
    high_dets = dets[score >= track_thresh]
-   low_dets  = dets[det_thresh <= score < track_thresh]
+   low_dets  = dets[score < track_thresh]   # all low-confidence dets
 
 Stage 1 — match high_dets against tracked stracks:
    iou_matrix = iou(tracked_bboxes, high_det_bboxes)   # shape (T × H)
@@ -86,7 +86,8 @@ Stage 2 — match low_dets against candidate_lost (not yet fully lost):
    → remaining candidate_lost → mark_lost()
 
 New tracks:
-   unmatched_high dets → new STrack(New)
+   unmatched_high dets with score >= det_thresh → new STrack(New)
+   (det_thresh = track_thresh + 0.1 by default; filters out borderline high dets)
    (confirmed to Tracked on next frame they are matched)
 
 Lost stracks surviving > track_buffer frames → mark_removed()
@@ -162,7 +163,7 @@ user_data = user_app_callback_class(detections_queue, bytetracker)
 
 ```python
 'bytetrack_track_thresh': 0.5,   # high-confidence detection threshold (stage 1)
-'bytetrack_det_thresh':   0.6,   # min score to create a new track
+'bytetrack_det_thresh':   0.6,   # min score to create a new track (should be > track_thresh)
 'bytetrack_match_thresh': 0.8,   # IoU threshold for greedy matching
 'bytetrack_track_buffer': 30,    # frames a Lost track is kept (30fps → 1 s)
 'bytetrack_frame_rate':   30,    # used to scale Kalman process noise
