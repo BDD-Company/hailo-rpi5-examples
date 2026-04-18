@@ -2,7 +2,7 @@
 """Minimal ByteTrack — pure numpy, no external dependencies."""
 
 from __future__ import annotations
-from enum import IntEnum
+from enum import IntEnum  # used by TrackState added in Task 2
 import numpy as np
 
 # -----------------------------------------------------------------------
@@ -21,6 +21,8 @@ class KalmanFilter:
     """
 
     def __init__(self, frame_rate: float = 30.0):
+        # frame_rate accepted for API compatibility with BYTETracker;
+        # noise is scaled by box height, not frame rate.
         # State transition: pos += vel (dt = 1 frame)
         self._F = np.eye(8)
         for i in range(4):
@@ -62,6 +64,6 @@ class KalmanFilter:
         std = _STD_WEIGHT_POS * h
         R = np.diag(np.array([std, std, std / 10, std]) ** 2)
         S = self._H @ cov @ self._H.T + R
-        K = cov @ self._H.T @ np.linalg.inv(S)
+        K = np.linalg.solve(S.T, (cov @ self._H.T).T).T
         innovation = np.array(bbox_cxcywh, dtype=float) - self._H @ mean
         return mean + K @ innovation, (np.eye(8) - K @ self._H) @ cov
