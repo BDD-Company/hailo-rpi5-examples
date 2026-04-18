@@ -46,7 +46,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from mpl_toolkits.mplot3d import proj3d
 from matplotlib.lines import Line2D
 
-from debug_telemetry_position import FramePose, parse_telemetry_log
+from debug_telemetry_position import FramePose, Pose, parse_telemetry_log
 from telemetry_position import Quaternion, rotate_frd_to_ned
 
 import logging
@@ -75,6 +75,7 @@ class HighlightStyle:
 
 FRAME_RE = re.compile(r"frame=#(\d+)")
 TARGET_RE = re.compile(r"frame=#(\d+).*?!!! target : XY\(([^,]+),\s*([^)]+)\)")
+TARGET_ESTIMATE_RE = re.compile(r"frame=#(\d+).*?!!! estimated new target pos XY\(([^,]+),\s*([^)]+)\)")
 ESTIMATED_DISTANCE_RE = re.compile(r"frame=#(\d+).*?estimated distance:\s*\([^,@]+[,@]\s*([\.\d]+)m?\)")
 
 
@@ -104,7 +105,8 @@ _PROP_UNIT_Y = np.sin(_prop_theta) * PROP_RADIUS
 PROP_CENTRES_FRD = BODY_VERTS_FRD[:4]
 
 VECTOR_SCALE = {"vel": 1, "acc": 1, "mag": 8.0}
-TARGET_COLOR = (0.0, 0.75, 0.75)  # cyan/teal
+TARGET_ESTIMATE_COLOR = (0.0, 0.0, 1.0)  # blue
+TARGET_COLOR = (1.0, 0.0, 1.0)  # magenta
 TARGET_COLOR_TRACE = (0.0, 0.5, 0.5)
 PLAYBACK_INTERVAL_MS = 50
 
@@ -168,6 +170,16 @@ def parse_target_xy(lines: list[str]) -> dict[int, tuple[float, float]]:
             targets[fid] = (x, y)
     return targets
 
+def parse_target_estimate_xy(lines: list[str]) -> dict[int, tuple[float, float]]:
+    """Extract target XY per frame from log lines"""
+    targets: dict[int, tuple[float, float]] = {}
+    for line in lines:
+        m = TARGET_ESTIMATE_RE.search(line)
+        if m:
+            fid = int(m.group(1))
+            x, y = float(m.group(2)), float(m.group(3))
+            targets[fid] = (x, y)
+    return targets
 
 def parse_target_distance(lines: list[str]) -> dict[int, float]:
     """Extract target distance per frame from log lines containing 'estimated distance:'."""
@@ -589,7 +601,8 @@ class TelemetryView(QWidget):
 
     def __init__(self, frames: list[FramePose], pos, vel, acc, mag,
                  target_xy: dict[int, tuple[float, float]],
-                 target_distance : dict[int, float]):
+                 target_distance : dict[int, float],
+                 target_estimate_xy: dict[int, tuple[float, float]] = None):
         super().__init__()
         self._frames = frames
         self._pos = pos
@@ -598,6 +611,7 @@ class TelemetryView(QWidget):
         self._mag = mag
         self._target_xy = target_xy
         self._target_distance = target_distance
+        self._target_estimate_xy = target_estimate_xy
 
         lo = QVBoxLayout(self)
         lo.setContentsMargins(0, 0, 0, 0)
@@ -676,6 +690,8 @@ class TelemetryView(QWidget):
         self._quiv_normal = None
         self._quiv_front = None
         self._quiv_target = None
+        self._quiv_target_estimate = None
+
         self._cam_polys = None
         self._target_trail = {}  # idx -> Line3D artist (small ball)
 
@@ -789,8 +805,8 @@ class TelemetryView(QWidget):
 
     def update_frame(self, idx: int):
         self._last_idx = idx
-        fp = self._frames[idx]
-        p = fp.pose
+        fp : FramePose = self._frames[idx]
+        p : Pose = fp.pose
         cx, cy, cz = self._pos[idx]
 
         # Past trail
@@ -823,7 +839,7 @@ class TelemetryView(QWidget):
 
 
         # Remove old quiver arrows and camera polys
-        for attr in ("_quiv_vel", "_quiv_acc", "_quiv_front", "_quiv_normal", "_quiv_target"):
+        for attr in ("_quiv_vel", "_quiv_acc", "_quiv_front", "_quiv_normal", "_quiv_target", "_quiv_target_estimate"):
             q = getattr(self, attr)
             if q is not None:
                 q.set_visible(False)
@@ -889,21 +905,32 @@ class TelemetryView(QWidget):
             linewidth=0.5, zorder=4)
         self._ax.add_collection3d(self._cam_polys)
 
+        def add_vector(x, y, length, color):
+                target_frd = np.array([[-y * 2 * hv, -x * 2 * hh, -length]])
+                norm = np.linalg.norm(target_frd)
+                if norm > 0 and length is not None:
+                    target_frd = target_frd / norm * length
+                target_ned = _quat_rotate_array(p.quaternion, target_frd)
+                t = _ned_array_to_plot(target_ned)[0]
+                return self._ax.quiver(
+                    cx, cy, cz, t[0], t[1], t[2],
+                    color=color, arrow_length_ratio=0.05, lw=1.0), (t[0], t[1], t[2]
+                )
+
+        target_distance_m = self._target_distance.get(fp.frame_id, L)
+        if self._target_estimate_xy:
+            target_estimate = self._target_estimate_xy.get(fp.frame_id)
+            if target_estimate is not None:
+                tx, ty = target_estimate
+                self._quiv_target_estimate, _ = add_vector(tx, ty, target_distance_m, TARGET_ESTIMATE_COLOR)
+                self._quiv_target_estimate.set_visible(self._show_target)
+
+
         # Target direction vector
         target = self._target_xy.get(fp.frame_id)
         if target is not None:
             tx, ty = target
-            distance_m = self._target_distance.get(fp.frame_id, L)
-
-            target_frd = np.array([[-ty * 2 * hv, -tx * 2 * hh, -L]])
-            norm = np.linalg.norm(target_frd)
-            if norm > 0 and distance_m is not None:
-                target_frd = target_frd / norm * distance_m
-            target_ned = _quat_rotate_array(p.quaternion, target_frd)
-            t = _ned_array_to_plot(target_ned)[0]
-            self._quiv_target = self._ax.quiver(
-                cx, cy, cz, t[0], t[1], t[2],
-                color=TARGET_COLOR, arrow_length_ratio=0.05, lw=4.0)
+            self._quiv_target, t = add_vector(tx, ty, target_distance_m, TARGET_COLOR)
             self._quiv_target.set_visible(self._show_target)
 
             # Target trail ball at t
@@ -1134,9 +1161,10 @@ class FlightDebugger(QWidget):
 
         pos, vel, acc, mag = precompute_telemetry(frames)
         target_xy = parse_target_xy(log_lines)
+        target_estimate_xy = parse_target_estimate_xy(log_lines)
         target_distance = parse_target_distance(log_lines)
 
-        self._telem_view = TelemetryView(frames, pos, vel, acc, mag, target_xy, target_distance)
+        self._telem_view = TelemetryView(frames, pos, vel, acc, mag, target_xy, target_distance, target_estimate_xy)
 
         self._nav = NavigationBar(self._ctrl, frames,
                                   show_switch=bool(pairs))
