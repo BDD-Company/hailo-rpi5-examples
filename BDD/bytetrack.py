@@ -155,6 +155,8 @@ class STrack:
         self.mean, self.cov = self._kf.predict(mean, self.cov)
 
     def update(self, det_bbox: np.ndarray, score: float, frame_id: int) -> None:
+        if self.mean is None:
+            raise RuntimeError("STrack.update() called before activate()")
         self._det_bbox = np.array(det_bbox, dtype=float)
         self.score = float(score)
         self.mean, self.cov = self._kf.update(
@@ -188,7 +190,9 @@ def _iou_batch(bboxes_a: np.ndarray, bboxes_b: np.ndarray) -> np.ndarray:
     area_a = (bboxes_a[:, 2] - bboxes_a[:, 0]) * (bboxes_a[:, 3] - bboxes_a[:, 1])
     area_b = (bboxes_b[:, 2] - bboxes_b[:, 0]) * (bboxes_b[:, 3] - bboxes_b[:, 1])
     union = area_a[:, None] + area_b[None, :] - inter
-    return np.where(union > 0, inter / union, 0.0)
+    iou = np.zeros_like(inter)
+    np.divide(inter, union, out=iou, where=union > 0)
+    return iou
 
 
 def _greedy_match(

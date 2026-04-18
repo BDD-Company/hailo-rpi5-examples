@@ -58,9 +58,14 @@ def test_update_reduces_uncertainty():
 from bytetrack import STrack, TrackState
 
 
+@pytest.fixture(autouse=True)
+def reset_strack_counter():
+    STrack.reset_counter()
+    yield
+
+
 def _make_strack(x1=0.1, y1=0.1, x2=0.3, y2=0.3, score=0.8):
     kf = KalmanFilter()
-    STrack.reset_counter()
     return STrack(np.array([x1, y1, x2, y2]), score, kf)
 
 
