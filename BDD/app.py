@@ -29,7 +29,7 @@ from gi.repository import Gst, GLib
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
 from OverwriteQueue import OverwriteQueue
 import numpy as np
-from bytetrack import BYTETracker, STrack
+from bytetrack import BYTETracker
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
 from video_sink_multi import MultiSink
@@ -54,7 +54,6 @@ class user_app_callback_class(app_callback_class):
         super().__init__()
         self.detections_queue = detections_queue
         self.tracker = tracker
-        self._bt_frame_id = 0
 
 
 # -----------------------------------------------------------------------------------------------
@@ -101,15 +100,16 @@ def normalized_frame_id(buffer: Gst.Buffer, frame_meta) -> int:
 seen_frames = deque(maxlen=10)
 
 def _match_track_to_detection(
-    track_det_bbox: np.ndarray, detections: list
+    track_det_bbox: np.ndarray, rects: list
 ) -> int | None:
-    """Return index of detection in `detections` with highest IoU against track_det_bbox."""
+    """Return index of rect in `rects` with highest IoU against track_det_bbox."""
     best_idx, best_iou = None, 0.0
     x1, y1, x2, y2 = track_det_bbox
-    for i, det in enumerate(detections):
-        b = det.bbox
-        ix1 = max(x1, b.left_edge);  iy1 = max(y1, b.top_edge)
-        ix2 = min(x2, b.right_edge); iy2 = min(y2, b.bottom_edge)
+    for i, b in enumerate(rects):
+        ix1 = max(x1, b.left_edge)
+        iy1 = max(y1, b.top_edge)
+        ix2 = min(x2, b.right_edge)
+        iy2 = min(y2, b.bottom_edge)
         inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
         area_a = (x2 - x1) * (y2 - y1)
         area_b = b.width * b.height
@@ -169,36 +169,45 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     #         id(frame), hash(frame.data.tobytes())
     # )
 
-    # Parse the detections
-    detection_count = 0
-    detections_list = []
+    # Extract raw detection data before constructing frozen Detection objects
+    raw_dets = []
     for detection in detections:
         detection: hailo.HailoDetection = detection
         bbox = detection.get_bbox()
-        confidence = detection.get_confidence()
-        detection_count += 1
-        detections_list.append(Detection(
-            bbox=Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
-            confidence=confidence,
-            track_id=None,
+        raw_dets.append((
+            Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
+            detection.get_confidence(),
         ))
 
     # Run ByteTracker to assign stable track IDs
-    if detections_list:
+    if raw_dets:
         dets_array = np.array([
-            [d.bbox.left_edge, d.bbox.top_edge, d.bbox.right_edge, d.bbox.bottom_edge, d.confidence]
-            for d in detections_list
+            [r.left_edge, r.top_edge, r.right_edge, r.bottom_edge, c]
+            for r, c in raw_dets
         ])
     else:
         dets_array = np.empty((0, 5))
 
-    active_tracks = user_data.tracker.update(dets_array, user_data._bt_frame_id)
-    user_data._bt_frame_id += 1
+    active_tracks = user_data.tracker.update(dets_array, frame_id)
 
+    # Build index → track_id map before constructing Detection objects
+    track_id_map: dict[int, int] = {}
+    temp_rects = [r for r, _ in raw_dets]
     for track in active_tracks:
-        idx = _match_track_to_detection(track.det_bbox, detections_list)
+        idx = _match_track_to_detection(track.det_bbox, temp_rects)
         if idx is not None:
-            detections_list[idx].track_id = track.track_id
+            track_id_map[idx] = track.track_id
+
+    # Construct immutable Detection objects with track_id set at creation time
+    detection_count = len(raw_dets)
+    detections_list = [
+        Detection(
+            bbox=rect,
+            confidence=conf,
+            track_id=track_id_map.get(i),
+        )
+        for i, (rect, conf) in enumerate(raw_dets)
+    ]
 
     # if len(detections) != 0:
     user_data.detections_queue.put(
