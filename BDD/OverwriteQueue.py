@@ -31,7 +31,7 @@ class OverwriteQueue(Generic[T]):
         self.put(item)
 
 
-    def get(self, timeout: float | None = None) -> T:
+    def get(self, block, timeout: float | None = None) -> T:
         with self._cv:
             if self._d:
                 return self._d.popleft()

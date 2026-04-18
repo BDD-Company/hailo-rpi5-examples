@@ -9,7 +9,7 @@ from helpers import XY
 def estimate_distance(
     target_size_m: XY,
     frame_angular_size_deg: XY,
-    target_frame_size : float
+    target_frame_size : XY
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     Estimate range to a target from known true size and image occupancy.
@@ -54,12 +54,12 @@ def estimate_distance_class(
     frame_angular_size_deg: XY,
     target_frame_size : XY,
     distance_classes : list[float] = None
-) -> tuple[DistanceClass, float] | None:
+) -> tuple[DistanceClass, float] | tuple[None, None]:
     distance_classes = distance_classes if distance_classes and len(distance_classes) == 2 else [5, 10]
 
     dx, dy, d = estimate_distance(target_size_m, frame_angular_size_deg, target_frame_size)
     if d is None:
-        return None
+        return (None, None)
 
     if d < distance_classes[0]:
         return DistanceClass.NEAR, d

@@ -43,13 +43,6 @@ def get_position_from_telemetry(telemetry_dict) -> XY|None:
     else:
         return None
 
-def is_drone_moving(telemetry_dict):
-    velocity = telemetry_dict.get('odometry', {}).get('velocity_body', None)
-    if velocity:
-        return abs(velocity["x_m_s"]) > 0.01 \
-            and abs(velocity["y_m_s"]) > 0.01 \
-            and abs(velocity["z_m_s"]) > 0.01
-
 
 def clamp(min_val, val, max_val):
     typeof_val = type(val)
@@ -131,8 +124,9 @@ def compute_inertia_correction(telemetry_dict, target_relative_pos, gain, min_sp
     )
 
 
-async def drone_controlling_thread_async(drone_connection_string, drone_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None):
+async def drone_controlling_thread_async(drone_connection_string, drone_config, detections_queue, control_config = None, output_queue = None, signal_event_when_ready = None):
     # from math import radians
+    control_config = control_config or {}
 
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
     global global_logger
@@ -224,9 +218,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     if len(control_config) > 0:
         logger.warning("Unknonw/unused config parameters: %s", control_config)
 
-
-    distance_r = 0.1
-    distance_r *= distance_r
     seen_target = False
     last_seen_target_at_frame = 0
     frame_id = 0
@@ -322,7 +313,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
         def compute_p(target_size):
             # avoid tipping over on hallucinations while close to the ground
             if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
-                logger.warning("Initial stage of flight, reducing P to %s", PD_COEFF_P_MIN)
+                logger.warning("Initial stage of flight, reducing P to %s", PD_COEFF_P_SAFE_MIN)
                 return PD_COEFF_P_SAFE_MIN
 
             if not PD_COEFF_P_DYNAMIC:
@@ -366,7 +357,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             # logger.debug("!!! awaiting detection... ")
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
-                r : Detections = detections_queue.get(0.02)
+                r : Detections = detections_queue.get(block=True, timeout=0.02)
                 if r is STOP:
                     logger.info("stopping")
                     break
@@ -385,26 +376,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     logger.warning("No frames (%d times), no detections, input queue empty? prev action: %s", skipped_detetions, drone.last_command())
 
                 continue
-            except:
+            except Exception:
                 logger.exception("Serious error getting next detection from a queue", exc_info=True)
                 break
 
             update_timestamps()
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
-
-            # if DEBUG:
-            #     # NOTE: injecting fake detections to debug
-            #     import math
-            #     __tmp_delta_confidence = math.sin(detections_obj.frame_id / 100) / 10
-            #     __tmp_delta_x = math.sin(detections_obj.frame_id / 100) / 4
-            #     __tmp_delta_y = math.cos(detections_obj.frame_id / 100) / 4
-            #     detections_obj.detections.append(
-            #                 Detection(
-            #                     bbox = Rect.from_xywh(0.2 + __tmp_delta_x, 0.2 + __tmp_delta_y, 0.05, 0.05),
-            #                     confidence = 0.3 + __tmp_delta_confidence,
-            #                     track_id = 1
-            #                 )
-            #     )
 
             logger.debug("!!! GOT DETECTIONS, objects detected: %s (%s), detection delay: %sms, total delay: %sms",
                     len(detections_obj.detections),
@@ -478,7 +455,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     mode += '* '
 
                     number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_FRAMES
-                    if ESTIMATION_LOOKAHEAD_DYNAMIC and estimated_distance is not None:
+                    if ESTIMATION_LOOKAHEAD_DYNAMIC and estimated_distance_class is not None:
                         if estimated_distance_class == DistanceClass.FAR:
                             number_of_frames_to_estimate_pos = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR
                         elif estimated_distance_class == DistanceClass.MEDIUM:
@@ -568,7 +545,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                             mode += " RED "
                             #pd_coeff_p
 
-                    if THRUST_PROPORTIONAL_TO_TARGET_SIZE:
+                    if THRUST_PROPORTIONAL_TO_TARGET_SIZE and estimated_distance_m is not None:
                         if estimated_distance_m < 11:
                             thrust *= 1.1
                             pd_coeff_p *= 1.1
@@ -598,7 +575,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 logger.debug("angle to target: %s", angle_to_target)
 
-                mode += f'size: {target_size:.3}, estimated distance: {estimated_distance}, p: {pd_coeff_p * 1.0 : .3} '
+                mode += f'size: {target_size:.3}, estimated distance: {estimated_distance_class} {estimated_distance_m if estimated_distance_m is None else math.nan:.2}, p: {pd_coeff_p * 1.0 : .3} '
 
                 # while still taking off, avoid dangerous moves
                 # if flight_time_ns < SAFE_TAKEOFF_PERIOD_NS:
@@ -637,6 +614,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 if seen_target:
                     prev_angle_to_target *= FADE_COEFF
                     # NOTE: perfroming conversion from camera referene frame to done's FRD
+                    thrust=THRUST_MIN
                     await drone.move_to_target_zenith_async(roll_degree=-prev_angle_to_target.x, pitch_degree=prev_angle_to_target.y, thrust=thrust)
                     # Just t visualize the point we are moving to
                     target_relative_pos = prev_angle_to_target.divided_by_XY(FRAME_ANGLUAR_SIZE_DEG)
@@ -681,5 +659,5 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 }
                 output_queue.put(output)
 
-        except:
-            logging.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, move_command, exc_info=True)
+        except Exception:
+            logger.exception("Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, move_command)
