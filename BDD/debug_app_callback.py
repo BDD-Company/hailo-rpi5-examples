@@ -543,7 +543,7 @@ def main():
             'target_estimator_clear_history_after_target_lost_frames': 3,
             'estimation_3d': False,
             'follow_target_position_ned': False,
-            'estimation_lookahead_frames': 5,
+            'estimation_lookahead_frames': 2,
             'estimation_lookahead_dynamic': False,
             'pd_coeff_p': 3,
             'pd_coeff_d': 0,
@@ -565,11 +565,13 @@ def main():
         'follow_target_position_ned': True,
         'estimation_3d': True,
         'estimation_3d_method': 'numpy',
-        'estimation_lookahead_frames': 5,
+        'estimation_lookahead_frames': 1,
         'estimation_lookahead_dynamic': True,
-        'estimation_lookahead_dynamic_frames_near': 2,
-        'estimation_lookahead_dynamic_frames_medium': 4,
-        'estimation_lookahead_dynamic_frames_far': 8,
+        'estimation_lookahead_dynamic_sqrt': False,
+        'estimation_lookahead_dynamic_factor': 0.1,
+        'estimation_lookahead_dynamic_frames_near': 0,
+        'estimation_lookahead_dynamic_frames_medium': 0,
+        'estimation_lookahead_dynamic_frames_far': 0,
     })
 
     if args.params:
