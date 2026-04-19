@@ -64,6 +64,31 @@ def clamp(min_val, val, max_val):
     return typeof_val(max(min_val, min(max_val, val)))
 
 
+def _pick_target_detection(
+    detections: list,
+    confidence_min: float,
+    locked_track_id: int | None,
+    use_track_lock: bool,
+) -> Detection | None:
+    """
+    Выбор одной детекции для сопровождения. При use_track_lock и заданном
+    locked_track_id возвращает только детекции с этим ByteTrack track_id,
+    чтобы не перескакивать на случайные высоко-уверенные ложные срабатывания.
+    Если заблокированный трек в кадре отсутствует — None (ведём себя как
+    при потере цели, оценщик/затухание сами продолжают движение).
+    """
+    pool = [d for d in detections if d is not None and d.confidence >= confidence_min]
+    if not pool:
+        return None
+    effective_lock = locked_track_id if use_track_lock else None
+    if effective_lock is not None:
+        locked = [d for d in pool if d.track_id == effective_lock]
+        if locked:
+            return max(locked, key=lambda d: d.confidence)
+        return None
+    return max(pool, key=lambda d: d.confidence)
+
+
 def compute_inertia_correction(telemetry_dict, target_relative_pos, gain, min_speed_ms=0.3):
     """
     Inertia correction computed entirely in FRD reference frame.
@@ -245,6 +270,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.pop('delay_takeof_until_n_detection_frames', 3)
 
+    BYTETRACK_TARGET_LOCK = control_config.pop('bytetrack_target_lock', True)
+
     AIM_POINT = control_config.pop('aim_point', XY(0.5, 0.5))
     aim_point = AIM_POINT
     # AIM_POINT = XY(0.5, 0.5)
@@ -323,6 +350,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     target_position_ned = None
     target_position_prev_ned = None
     estimated_velocity_ned = None
+    locked_track_id: int | None = None
 
     # NOTE: HUGE age to avoid purging prev positions, since it doesn't work as expected RN
     max_target_age_ns = 5_000_000_000_000
@@ -426,7 +454,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
                 r : Detections = detections_queue.get(0.02)
-                if r is STOP:
+                if r is STOP or r is None:
                     logger.info("stopping")
                     break
                 detections_obj = r
@@ -503,16 +531,19 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
             # filter out accidential Nones
             detections = [d for d in detections if d is not None]
-            # detections.sort(reverse=True, key = lambda d : d.track_id)
-            detections.sort(reverse=True, key = lambda d : d.confidence)
             target_relative_pos = None
             target_relative_pos_uncorrected = None
             target_position_ned = None
             frame_id = detections_obj.frame_id
             target_estimator = None
 
-            detection = detections[0] if len(detections) > 0 else Detection()
+            picked = _pick_target_detection(
+                detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK
+            )
+            detection = picked if picked is not None else Detection()
             if detection.confidence >= CONFIDENCE_MIN:
+                if BYTETRACK_TARGET_LOCK and detection.track_id is not None:
+                    locked_track_id = detection.track_id
                 seen_target = True
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
@@ -774,6 +805,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     logger.warning("!!! CLEARING HISTORY")
                     target_estimator_2d.clear_history()
                     target_estimator_3d.clear_history()
+                    locked_track_id = None
 
                 if seen_target:
                     if FOLLOW_TARGET_POSITION_NED:
