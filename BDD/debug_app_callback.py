@@ -236,12 +236,12 @@ from bytetrack import BYTETracker
 from debug_drone_controller import (
     parse_log, find_files_in_dir,
     MockMonotonicNs, MockDroneMover,
-    InteractiveDisplaySink,
+    ReplayQueue, InteractiveDisplaySink,
 )
 import drone_controller as drone_controller_module
 
 from flight_debugger import VideoReader
-from helpers import XY, STOP
+from helpers import XY
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 
@@ -376,79 +376,44 @@ def set_frame_context(frame: np.ndarray, detections: list):
 
 
 # ===================================================================
-# Feeder: drives frames through app_callback one at a time
+# Pre-process: run all frames through app_callback, collect Detections
 # ===================================================================
 
-class AppCallbackFeeder:
-    """Feeds log-parsed frames through app_callback, paced by advance().
+def run_app_callback_on_all_frames(
+    frame_data_list: list[dict],
+    mock_pad: MockGstPad,
+    user_data: user_app_callback_class,
+    mock_monotonic: MockMonotonicNs,
+) -> list:
+    """Run app_callback synchronously for every frame and return Detections list."""
+    from queue import Queue as _SyncQueue
+    import queue as _queue_mod
 
-    Exposes advance() / stop() so InteractiveDisplaySink can drive it
-    the same way it drives ReplayQueue in debug_drone_controller.
-    """
+    # Swap user_data's queue for a plain Queue so we can get() without blocking
+    orig_queue = user_data.detections_queue
+    sync_q = _SyncQueue()
+    user_data.detections_queue = sync_q
 
-    def __init__(
-        self,
-        frame_data_list: list[dict],
-        frames_dict: dict,
-        mock_pad: MockGstPad,
-        user_data: user_app_callback_class,
-        mock_monotonic: MockMonotonicNs,
-        mock_drone_ref: list,
-        detections_queue: OverwriteQueue,
-    ):
-        self._frames = frame_data_list
-        self._frames_dict = frames_dict
-        self._pad = mock_pad
-        self._user_data = user_data
-        self._monotonic = mock_monotonic
-        self._drone_ref = mock_drone_ref
-        self._detections_queue = detections_queue
-        self._advance = threading.Event()
-        self._stopped = threading.Event()
-        # Auto-advance so the first frame goes through without user input
-        self._advance.set()
+    detections_list = []
+    for fdata in frame_data_list:
+        fid   = fdata['frame_id']
+        ts_ns = fdata['timestamp_ns']
+        mock_monotonic.set_frame(ts_ns)
+        set_frame_context(fdata['frame'], fdata['detections'])
+        mock_buffer = MockGstBuffer(fid, ts_ns)
+        mock_info   = MockGstPadProbeInfo(mock_buffer)
+        app_callback(mock_pad, mock_info, user_data)
+        try:
+            detections_list.append(sync_q.get_nowait())
+        except _queue_mod.Empty:
+            pass  # frame was deduplicated / skipped by app_callback
 
-    # -- InteractiveDisplaySink protocol --
-    def advance(self):
-        self._advance.set()
-
-    def stop(self):
-        self._stopped.set()
-        self._advance.set()  # unblock
-
-    # -- Thread body --
-    def run(self):
-        for fdata in self._frames:
-            self._advance.wait()
-            self._advance.clear()
-
-            if self._stopped.is_set():
-                break
-
-            fid = fdata['frame_id']
-            ts_ns = fdata['timestamp_ns']
-
-            # Advance mock clock
-            self._monotonic.set_frame(ts_ns)
-
-            # Feed telemetry to mock drone
-            if self._drone_ref[0] is not None:
-                self._drone_ref[0].set_frame_data(fid, fdata['telemetry'])
-
-            # Set per-frame context for monkey-patched functions
-            set_frame_context(fdata['frame'], fdata['detections'])
-
-            # Build mock GStreamer probe objects
-            mock_buffer = MockGstBuffer(fid, ts_ns)
-            mock_info = MockGstPadProbeInfo(mock_buffer)
-
-            # >>> This is the line that exercises app_callback <<<
-            result = app_callback(self._pad, mock_info, self._user_data)
-            logger.debug("app_callback returned %s for frame #%d", result, fid)
-
-        # End of frames: signal downstream to stop
-        self._detections_queue.put(STOP)
-        logger.info("Feeder finished: %d frames fed through app_callback", len(self._frames))
+    user_data.detections_queue = orig_queue
+    logger.info(
+        "Pre-processed %d frames → %d Detections objects",
+        len(frame_data_list), len(detections_list),
+    )
+    return detections_list
 
 
 # ===================================================================
@@ -633,35 +598,32 @@ def main():
     # -- Clear app.py's frame deduplication state --
     seen_frames.clear()
 
-    # -- Set up ByteTracker and user_data (mirrors app.py main) --
+    # -- Set up ByteTracker and user_data --
     bytetracker = BYTETracker(**bytetrack_config)
-    detections_queue = OverwriteQueue(maxsize=20)
-    user_data = user_app_callback_class(detections_queue, bytetracker)
+    user_data = user_app_callback_class(OverwriteQueue(maxsize=1), bytetracker)
     user_data.use_frame = True
 
-    # -- Set up feeder --
+    # -- Pre-process all frames through app_callback --
     mock_pad = MockGstPad()
-    feeder = AppCallbackFeeder(
-        frame_data_list=frame_data_list,
-        frames_dict=frames,
-        mock_pad=mock_pad,
-        user_data=user_data,
-        mock_monotonic=mock_monotonic,
-        mock_drone_ref=mock_drone,
-        detections_queue=detections_queue,
+    detections_list = run_app_callback_on_all_frames(
+        frame_data_list, mock_pad, user_data, mock_monotonic,
     )
 
-    feeder_thread = threading.Thread(
-        target=feeder.run,
-        name="AppCallbackFeeder",
-        daemon=True,
-    )
-    feeder_thread.start()
+    # -- Build ReplayQueue — same pattern as debug_drone_controller.py --
+    replay_queue = ReplayQueue(detections_list)
+
+    def on_frame_callback(frame_id, item_index):
+        fd = frames.get(frame_id, {})
+        if mock_drone[0] is not None:
+            mock_drone[0].set_frame_data(frame_id, fd.get("telemetry", {}))
+        mock_monotonic.set_frame(fd.get("timestamp_ns", 0))
+
+    replay_queue.set_on_frame_callback(on_frame_callback)
 
     # -- Set up output display --
     output_queue = OverwriteQueue(maxsize=200)
     sink = InteractiveDisplaySink(
-        feeder,  # has advance()/stop() — same protocol as ReplayQueue
+        replay_queue,
         autoplay=args.autoplay,
         window_title=f"App Callback Debug: {log_file}  {video_path}",
     )
@@ -674,10 +636,10 @@ def main():
     )
     output_thread.start()
 
-    # -- Run drone_controller on the main-ish thread --
+    # -- Run drone_controller on the main thread (same as debug_drone_controller.py) --
     logger.info(
-        "Starting app_callback replay with %d frames (ByteTracker: %s)...",
-        len(frame_data_list), bytetrack_config,
+        "Pre-processed %d → %d frames. Starting replay (ByteTracker: %s)...",
+        len(frame_data_list), len(detections_list), bytetrack_config,
     )
 
     drone_config = {"upside_down_angle_deg": 130, "upside_down_hold_s": 0.2}
@@ -685,7 +647,7 @@ def main():
         drone_controller_module.drone_controlling_thread(
             "replay://mock",
             drone_config,
-            detections_queue,
+            replay_queue,
             control_config=dict(config_dict),
             output_queue=output_queue,
         )
