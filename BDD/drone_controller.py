@@ -541,19 +541,26 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 seen_target = True
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
-                object_size = measure_object_size(detections_obj.frame, detection.bbox) or detection.bbox.size
-                logger.debug(f"!!! {TARGET_SIZE_M}, {FRAME_ANGLUAR_SIZE_DEG}, {detection.bbox.size}, {object_size}")
-                estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, object_size)
-                logger.debug(f"!!! estimated_distance: {estimated_distance_class} {estimated_distance_m}")
 
-                if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS and estimated_distance_m < 10:
-                    # HACK: we have a distance estimation issue here, distance is at least 50m
-                    estimated_distance_m = 80
+                # on very small sizes box margin added by detector is greater than real object size.
+                if detection.bbox.area() < 0.002:
+                    object_corrected_size = measure_object_size(detections_obj.frame, detection.bbox) or detection.bbox.size
+                else:
+                    object_corrected_size = detection.bbox.size
+
+                logger.debug(f"!!! {TARGET_SIZE_M}, {FRAME_ANGLUAR_SIZE_DEG}, {detection.bbox.size}, {object_corrected_size}")
+                estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, object_corrected_size)
+
+                logger.debug(f"!!! RAW estimated_distance: {estimated_distance_class} {estimated_distance_m}")
+
+                # if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS and estimated_distance_m < 10:
+                #     # HACK: we have a distance estimation issue here, distance is at least 50m
+                #     estimated_distance_m = 80
 
                 estimated_distance_m = estimated_distance_m if estimated_distance_m else 1
-                logger.debug(f"!!! estimated_distance: {estimated_distance_m}")
+                # logger.debug(f"!!! estimated_distance: {estimated_distance_m}")
                 # NOTE: At large distances estimation higly undershoots, formula corrects it to be good enough
-                estimated_distance_m *= (math.log(estimated_distance_m, 10) + 0.5)
+                # estimated_distance_m *= math.e #(math.log(estimated_distance_m, 10) + 0.5)
                 logger.debug(f"!!! estimated_distance: {estimated_distance_m}")
 
                 try:
