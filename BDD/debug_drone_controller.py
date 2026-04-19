@@ -366,7 +366,8 @@ class InteractiveDisplaySink:
     ESC / q      — stop replay
     """
 
-    def __init__(self, replay_queue: ReplayQueue, window_title: str = ""):
+    def __init__(self, replay_queue: ReplayQueue, window_title: str = "", autoplay = False):
+        self._autoplay = autoplay
         self._replay_queue = replay_queue
         self._window_title = window_title or "Debug Drone Controller Replay"
         self._window_name = "debug_replay"
@@ -379,11 +380,12 @@ class InteractiveDisplaySink:
     def process_frame(self, frame):
         cv2.imshow(self._window_name, frame)
         while True:
-            key = cv2.waitKeyEx(0)  # block indefinitely
+            wait_s = 0 if not self._autoplay else 1
+            key = cv2.waitKeyEx(wait_s)  # block indefinitely
             w,h = frame.shape[1], frame.shape[0]
             color = (0, 0, 0)
             cv2.rectangle(frame, (0,0), (w,h), color, thickness=-1)
-            if key == _KEY_RIGHT or key == ord("d"):
+            if self._autoplay or key == _KEY_RIGHT or key == ord("d"):
                 self._replay_queue.advance()
                 return
             if key == 27 or key == ord("q"):  # ESC or q
@@ -476,6 +478,12 @@ def main():
         type=lambda x: dict(ast.literal_eval(x)),
         default=None,
         help="Extra parameters of config to overwrite",
+    )
+    parser.add_argument(
+        "--autoplay",
+        action='store_true',
+        default=False,
+        help="do NOT wait for user input to advance frames",
     )
     args = parser.parse_args()
 
@@ -626,7 +634,7 @@ def main():
     # ── Set up output display ──────────────────────────────────────────
     output_queue = OverwriteQueue(maxsize=200)
 
-    sink = InteractiveDisplaySink(replay_queue, window_title=f"Debug Controller {log_file}  {video_path}")
+    sink = InteractiveDisplaySink(replay_queue, autoplay=args.autoplay, window_title=f"Debug Controller {log_file}  {video_path}")
 
     output_thread = threading.Thread(
         target=debug_output_thread,

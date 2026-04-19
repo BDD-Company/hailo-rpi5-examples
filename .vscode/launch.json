@@ -11,10 +11,11 @@
             "program": "BDD/debug_drone_controller.py",
             "console": "integratedTerminal",
             "args": [
-                "/media/enmk/Pet Projects/BDD/_BACKUPS/2026-04-13/_DEBUG_13/BDD_20260413-151446.log",
+                "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_04/BDD_20260418-161906.log",
                 "--video",
-                "/media/enmk/Pet Projects/BDD/_BACKUPS/2026-04-13/_DEBUG_13/RAW_20260413-151446_00000.mkv"
-            ]
+                "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_04/RAW_20260418-161906_00000.mkv",
+                "--autoplay"
+            ],
         },
         // {
         //     "name": "pytest test_DetectionsAggregator.py",
