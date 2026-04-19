@@ -123,6 +123,8 @@ def _match_track_to_detection(
             best_idx = i
     return best_idx
 
+USE_TRACKER = False
+
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_callback_class):
     # Get the GstBuffer from the probe info
@@ -197,37 +199,38 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         [(round(r.left_edge, 1), round(r.top_edge, 1), round(r.right_edge, 1), round(r.bottom_edge, 1), round(c, 3)) for r, c in raw_dets],
     )
 
-    # BYTETracker is not thread-safe; safe here because GStreamer uses a single streaming thread.
-    active_tracks = user_data.tracker.update(dets_array, frame_id)
-
-    logger.debug(
-        "frame=#%04d ByteTracker output: %d active tracks %s",
-        frame_id,
-        len(active_tracks),
-        [(t.track_id, t.state, round(t.score, 3)) for t in active_tracks],
-    )
-
-    # Build index → track_id map before constructing Detection objects
     track_id_map: dict[int, int] = {}
-    temp_rects = [r for r, _ in raw_dets]
-    for track in active_tracks:
-        idx = _match_track_to_detection(track.det_bbox, temp_rects)
-        logger.debug(
-            "frame=#%04d ByteTracker match: track_id=%d det_bbox=%s → det_idx=%s",
-            frame_id,
-            track.track_id,
-            [round(v, 1) for v in track.det_bbox],
-            idx,
-        )
-        if idx is not None:
-            track_id_map[idx] = track.track_id
+    if USE_TRACKER:
+        # BYTETracker is not thread-safe; safe here because GStreamer uses a single streaming thread.
+        active_tracks = user_data.tracker.update(dets_array, frame_id)
 
-    logger.debug(
-        "frame=#%04d ByteTracker track_id_map: %s (unmatched det indices: %s)",
-        frame_id,
-        track_id_map,
-        [i for i in range(len(raw_dets)) if i not in track_id_map],
-    )
+        logger.debug(
+            "frame=#%04d ByteTracker output: %d active tracks %s",
+            frame_id,
+            len(active_tracks),
+            [(t.track_id, t.state, round(t.score, 3)) for t in active_tracks],
+        )
+
+        # Build index → track_id map before constructing Detection objects
+        temp_rects = [r for r, _ in raw_dets]
+        for track in active_tracks:
+            idx = _match_track_to_detection(track.det_bbox, temp_rects)
+            logger.debug(
+                "frame=#%04d ByteTracker match: track_id=%d det_bbox=%s → det_idx=%s",
+                frame_id,
+                track.track_id,
+                [round(v, 1) for v in track.det_bbox],
+                idx,
+            )
+            if idx is not None:
+                track_id_map[idx] = track.track_id
+
+        logger.debug(
+            "frame=#%04d ByteTracker track_id_map: %s (unmatched det indices: %s)",
+            frame_id,
+            track_id_map,
+            [i for i in range(len(raw_dets)) if i not in track_id_map],
+        )
 
     # Construct immutable Detection objects with track_id set at creation time
     detections_list = [
