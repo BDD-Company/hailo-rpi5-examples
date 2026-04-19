@@ -75,7 +75,7 @@ class HighlightStyle:
 
 FRAME_RE = re.compile(r"frame=#(\d+)")
 TARGET_RE = re.compile(r"frame=#(\d+).*?!!! target : XY\(([^,]+),\s*([^)]+)\)")
-TARGET_ESTIMATE_RE = re.compile(r"frame=#(\d+).*?!!! estimated new target pos XY\(([^,]+),\s*([^)]+)\)")
+TARGET_ESTIMATE_RE = re.compile(r"frame=#(\d+).*?!!!.*estimated new target pos XY\(([^,]+),\s*([^)]+)\)")
 ESTIMATED_DISTANCE_RE = re.compile(r"frame=#(\d+).*?estimated distance:\s*\([^,@]+[,@]\s*([\.\d]+)m?\)")
 
 
