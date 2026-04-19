@@ -358,6 +358,7 @@ class ReplayQueue:
 # Key codes returned by cv2.waitKeyEx on Linux
 _KEY_RIGHT = 65363
 _KEY_LEFT  = 65361
+_KEY_SPACE = 32
 
 class InteractiveDisplaySink:
     """Frame sink that blocks on each frame until the user presses a key.
@@ -381,10 +382,10 @@ class InteractiveDisplaySink:
         cv2.imshow(self._window_name, frame)
         while True:
             wait_s = 0 if not self._autoplay else 1
-            key = cv2.waitKeyEx(wait_s)  # block indefinitely
-            w,h = frame.shape[1], frame.shape[0]
-            color = (0, 0, 0)
-            cv2.rectangle(frame, (0,0), (w,h), color, thickness=-1)
+            key = cv2.waitKeyEx(wait_s)
+            if key == _KEY_SPACE:
+               self._autoplay = not self._autoplay
+
             if self._autoplay or key == _KEY_RIGHT or key == ord("d"):
                 self._replay_queue.advance()
                 return
