@@ -7,10 +7,10 @@ from enum import Enum
 import cv2
 import numpy as np
 
-from helpers import XY
+from helpers import XY, Rect
 
 
-def measure_object_size(frame: np.ndarray, bbox: 'Rect') -> 'XY | None':
+def measure_object_size(frame: np.ndarray, bbox: Rect) -> 'XY | None':
     """Return the normalized (0-1) size of the object inside bbox.
 
     Uses inverted Otsu threshold on grayscale — reliable for dark objects
@@ -54,7 +54,7 @@ def measure_object_size(frame: np.ndarray, bbox: 'Rect') -> 'XY | None':
 def estimate_distance(
     target_size_m: XY,
     frame_angular_size_deg: XY,
-    target_frame_size : float
+    target_frame_size : XY
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     Estimate range to a target from known true size and image occupancy.

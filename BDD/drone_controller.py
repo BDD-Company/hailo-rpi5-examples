@@ -219,18 +219,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
 
     ESTIMATION_3D = control_config.pop('estimation_3d', None)
-    if ESTIMATION_3D is None:
-        ESTIMATION_3D = control_config.pop('estimation_use_3d', False)
-    else:
-        control_config.pop('estimation_use_3d', None)
+    # if ESTIMATION_3D is None:
+    #     ESTIMATION_3D = control_config.pop('estimation_use_3d', False)
+    # else:
+    #     control_config.pop('estimation_use_3d', None)
 
-    estimation_3d_method = control_config.pop('estimation_3d_method', None)
-    if estimation_3d_method is None:
-        estimation_3d_method = control_config.pop('estimation_3d_mode', 'numpy')
-    else:
-        control_config.pop('estimation_3d_mode', None)
-
-    ESTIMATION_3D_METHOD = VelocityMethod(estimation_3d_method) # OR any VelocityMethod 'wls'
+    ESTIMATION_3D_METHOD = VelocityMethod(control_config.pop('estimation_3d_method', None))
     ESTIMATION_3D_USE_INITIAL_VELOCITY         = control_config.pop('estimation_3d_use_initial_velocity', True)
 
     ESTIMATION_LOOKAHEAD_FRAMES                = control_config.pop('estimation_lookahead_frames', 2)
@@ -495,7 +489,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             debug_info['start_time_ms'] = START_TIME_MS
             debug_info['flight_time_ms'] = flight_time_ns / 1000_000
 
-            detections, frame = detections_obj.detections, detections_obj.frame
+            detections = detections_obj.detections
             detection = None
 
             # so telemetry action doesn't get into the logs

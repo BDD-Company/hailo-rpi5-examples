@@ -325,7 +325,7 @@ def main():
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'estimation_3d': True,
-        'estimation_3d_mode': 'cluster',
+        'estimation_3d_method': 'cluster',
         'estimation_3d_use_initial_velocity' : True,
 
         'estimation_lookahead_frames': 2,
