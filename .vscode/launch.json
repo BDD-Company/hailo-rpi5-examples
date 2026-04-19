@@ -11,12 +11,45 @@
             "program": "BDD/debug_drone_controller.py",
             "console": "integratedTerminal",
             "args": [
-                "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_04/BDD_20260418-161906.log",
+                "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/BDD_20260418-154834.log",
                 "--video",
-                "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_04/RAW_20260418-161906_00000.mkv",
+                "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/RAW_20260418-154834_00000.mkv",
                 "--autoplay"
             ],
+            "env": {
+                "QT_QPA_PLATFORM" : "xcb" // attempt to fix inverted color of image in OpenCV
+                , "QT_XCB_GL_INTEGRATION": "None"
+                , "LIBGL_ALWAYS_SOFTWARE" : "1"
+                , "QSG_RENDER_LOOP" : "basic"
+            }
         },
+        {
+            "name": "debug_app_callback.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "BDD/debug_app_callback.py",
+            "console": "integratedTerminal",
+            // "args": [
+            //     "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/BDD_20260418-154834.log",
+            //     "--video",
+            //     "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/RAW_20260418-154834_00000.mkv",
+            //     "--autoplay"
+            // ],
+            "args": [
+                "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/BDD_20260418-155222.log",
+                "--video",
+                "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/RAW_20260418-155223_00000.mkv",
+                "--autoplay"
+            ],
+
+            "env": {
+                "QT_QPA_PLATFORM" : "xcb" // attempt to fix inverted color of image in OpenCV
+                , "QT_XCB_GL_INTEGRATION": "None"
+                , "LIBGL_ALWAYS_SOFTWARE" : "1"
+                , "QSG_RENDER_LOOP" : "basic"
+            }
+
+        }
         // {
         //     "name": "pytest test_DetectionsAggregator.py",
         //     "type": "debugpy",
