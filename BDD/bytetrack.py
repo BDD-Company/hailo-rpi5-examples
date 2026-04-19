@@ -309,19 +309,25 @@ class BYTETracker:
             high_dets = np.empty((0, 5))
             low_dets  = np.empty((0, 5))
 
-        n_tracked   = len(self.tracked_stracks)
-        strack_pool = self.tracked_stracks + self.lost_stracks
-
-        for t in strack_pool:
+        for t in self.tracked_stracks + self.lost_stracks:
             t.predict()
 
-        # Stage 1: high_dets vs full pool (tracked + lost)
-        matches1, unm_pool1, unm_high = _associate(strack_pool, high_dets, self.match_thresh, self.match_max_dist)
-        for ti, di in matches1:
-            strack_pool[ti].update(high_dets[di, :4], high_dets[di, 4], frame_id)
+        # Stage 1a: high_dets vs tracked stracks (priority — active tracks claim first)
+        matches1a, unm_tracked1, unm_high1 = _associate(
+            self.tracked_stracks, high_dets, self.match_thresh, self.match_max_dist)
+        for ti, di in matches1a:
+            self.tracked_stracks[ti].update(high_dets[di, :4], high_dets[di, 4], frame_id)
 
-        unm_tracked = [strack_pool[ti] for ti in unm_pool1 if ti < n_tracked]
-        unm_lost    = [strack_pool[ti] for ti in unm_pool1 if ti >= n_tracked]
+        # Stage 1b: remaining high_dets vs lost stracks (recovery only for unclaimed dets)
+        rem_high = high_dets[unm_high1] if unm_high1 else np.empty((0, 5))
+        matches1b, unm_lost1, unm_high2_rel = _associate(
+            self.lost_stracks, rem_high, self.match_thresh, self.match_max_dist)
+        for ti, di in matches1b:
+            self.lost_stracks[ti].update(rem_high[di, :4], rem_high[di, 4], frame_id)
+        unm_high = [unm_high1[i] for i in unm_high2_rel]
+
+        unm_tracked = [self.tracked_stracks[ti] for ti in unm_tracked1]
+        unm_lost    = [self.lost_stracks[ti] for ti in unm_lost1]
 
         # Stage 2: low_dets vs unmatched tracked stracks
         matches2, unm_r2, _ = _associate(unm_tracked, low_dets, 0.5, self.match_max_dist)
@@ -348,8 +354,9 @@ class BYTETracker:
             else:
                 t.mark_removed()
 
+        all_stracks = self.tracked_stracks + self.lost_stracks
         self.tracked_stracks = (
-            [t for t in strack_pool if t.state == TrackState.Tracked] + new_tracks
+            [t for t in all_stracks if t.state == TrackState.Tracked] + new_tracks
         )
         self.lost_stracks = surviving_lost
 
