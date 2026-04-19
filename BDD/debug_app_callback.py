@@ -585,11 +585,12 @@ def main():
 
     # -- Extract ByteTracker config (consumed by app_callback, not drone_controller) --
     bytetrack_config = {
-        'track_thresh':  config_dict.pop('bytetrack_track_thresh', 0.5),
-        'det_thresh':    config_dict.pop('bytetrack_det_thresh', 0.6),
-        'match_thresh':  config_dict.pop('bytetrack_match_thresh', 0.8),
-        'track_buffer':  config_dict.pop('bytetrack_track_buffer', 30),
-        'frame_rate':    config_dict.pop('bytetrack_frame_rate', 30),
+        'track_thresh':   config_dict.pop('bytetrack_track_thresh', 0.3),
+        'det_thresh':     config_dict.pop('bytetrack_det_thresh', 0.35),
+        'match_thresh':   config_dict.pop('bytetrack_match_thresh', 0.3),
+        'track_buffer':   config_dict.pop('bytetrack_track_buffer', 30),
+        'frame_rate':     config_dict.pop('bytetrack_frame_rate', 30),
+        'match_max_dist': config_dict.pop('bytetrack_match_max_dist', 0.2),
     }
 
     # -- Open video --
