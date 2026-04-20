@@ -209,6 +209,10 @@ def collect_track_history(
     frame_images:  dict[int, np.ndarray] = {}
     width, height = 640, 480
 
+    # USE_TRACKER=False in app.py, so app_callback never calls tracker.update().
+    # We drive the tracker here using a sequential index so track_buffer works correctly.
+    tracker_frame_idx = 0
+
     for fdata in frame_data_list:
         fid   = fdata["frame_id"]
         ts_ns = fdata["timestamp_ns"]
@@ -217,6 +221,18 @@ def collect_track_history(
         mock_buffer = MockGstBuffer(fid, ts_ns)
         mock_info   = MockGstPadProbeInfo(mock_buffer)
         app_callback(mock_pad, mock_info, user_data)
+
+        dets = fdata["detections"]
+        dets_array = (
+            np.array([
+                [d.bbox.left_edge, d.bbox.top_edge,
+                 d.bbox.right_edge, d.bbox.bottom_edge, d.confidence]
+                for d in dets
+            ], dtype=float)
+            if dets else np.empty((0, 5))
+        )
+        user_data.tracker.update(dets_array, tracker_frame_idx)
+        tracker_frame_idx += 1
 
         # Snapshot active tracks
         for track in user_data.tracker.tracked_stracks:
