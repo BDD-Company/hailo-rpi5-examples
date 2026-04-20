@@ -243,6 +243,41 @@ def _center_dist_similarity_batch(
     return np.maximum(0.0, 1.0 - dist / max_dist)
 
 
+def _nms(dets: np.ndarray, iou_thresh: float | None, dist_thresh: float | None) -> np.ndarray:
+    """Pre-tracking NMS. Suppresses lower-confidence duplicates (sorted by score desc).
+
+    iou_thresh:  suppress if IoU > threshold (handles overlapping bbox duplicates).
+    dist_thresh: suppress if centre distance < threshold, normalised [0,1]
+                 (handles same-object bboxes with low IoU but similar centre).
+    Either or both may be set; suppression triggers if EITHER condition is met.
+    """
+    if len(dets) <= 1:
+        return dets
+    order = np.argsort(-dets[:, 4])
+    iou = _iou_batch(dets[:, :4], dets[:, :4]) if iou_thresh is not None else None
+    cx = (dets[:, 0] + dets[:, 2]) / 2
+    cy = (dets[:, 1] + dets[:, 3]) / 2
+    keep: list[int] = []
+    suppressed: set[int] = set()
+    for i in order:
+        if i in suppressed:
+            continue
+        keep.append(i)
+        for j in range(len(dets)):
+            if j in suppressed or j == i:
+                continue
+            should = False
+            if iou is not None and iou[i, j] > iou_thresh:
+                should = True
+            if not should and dist_thresh is not None:
+                d = ((cx[i] - cx[j]) ** 2 + (cy[i] - cy[j]) ** 2) ** 0.5
+                if d < dist_thresh:
+                    should = True
+            if should:
+                suppressed.add(j)
+    return dets[np.array(keep)]
+
+
 def _associate(
     stracks: list[STrack], dets: np.ndarray, thresh: float,
     match_max_dist: float | None = None,
@@ -275,18 +310,24 @@ class BYTETracker:
 
     def __init__(
         self,
-        track_thresh:   float = 0.5,
-        det_thresh:     float = 0.6,
-        match_thresh:   float = 0.8,
-        track_buffer:   int   = 30,
-        frame_rate:     float = 30.0,
-        match_max_dist: float | None = None,
+        track_thresh:      float = 0.5,
+        det_thresh:        float = 0.6,
+        match_thresh:      float = 0.8,
+        track_buffer:      int   = 30,
+        frame_rate:        float = 30.0,
+        match_max_dist:    float | None = None,
+        recovery_max_dist: float | None = None,
+        nms_thresh:        float | None = None,
+        nms_dist_thresh:   float | None = None,
     ):
-        self.track_thresh   = track_thresh
-        self.det_thresh     = det_thresh
-        self.match_thresh   = match_thresh
-        self.match_max_dist = match_max_dist
-        self.max_lost_age   = int(frame_rate / 30.0 * track_buffer)
+        self.track_thresh      = track_thresh
+        self.det_thresh        = det_thresh
+        self.match_thresh      = match_thresh
+        self.match_max_dist    = match_max_dist
+        self.recovery_max_dist = recovery_max_dist
+        self.nms_thresh        = nms_thresh
+        self.nms_dist_thresh   = nms_dist_thresh
+        self.max_lost_age      = int(frame_rate / 30.0 * track_buffer)
         self._kf = KalmanFilter(frame_rate=frame_rate)
         self.tracked_stracks: list[STrack] = []
         self.lost_stracks:    list[STrack] = []
@@ -302,6 +343,8 @@ class BYTETracker:
             Active STrack list (state == Tracked).
         """
         if len(dets) > 0:
+            if self.nms_thresh is not None or self.nms_dist_thresh is not None:
+                dets = _nms(dets, self.nms_thresh, self.nms_dist_thresh)
             mask      = dets[:, 4] >= self.track_thresh
             high_dets = dets[mask]
             low_dets  = dets[~mask]
@@ -325,6 +368,22 @@ class BYTETracker:
         for ti, di in matches1b:
             self.lost_stracks[ti].update(rem_high[di, :4], rem_high[di, 4], frame_id)
         unm_high = [unm_high1[i] for i in unm_high2_rel]
+
+        # Stage 1.5: recovery pass — unmatched tracked stracks vs remaining high dets,
+        # using last raw-detection position instead of Kalman prediction.
+        # Targets sudden direction reversals where prediction error > match_max_dist.
+        if self.recovery_max_dist is not None and unm_tracked1 and unm_high:
+            rec_stracks = [self.tracked_stracks[i] for i in unm_tracked1]
+            rec_dets    = high_dets[unm_high]
+            obs_boxes   = np.array([t.det_bbox for t in rec_stracks])
+            sim15 = _center_dist_similarity_batch(obs_boxes, rec_dets[:, :4], self.recovery_max_dist)
+            matches15, _, _ = _greedy_match(sim15, 0.0)
+            matched_t = {ri for ri, _ in matches15}
+            matched_h = {ci for _, ci in matches15}
+            for ri, ci in matches15:
+                rec_stracks[ri].update(rec_dets[ci, :4], rec_dets[ci, 4], frame_id)
+            unm_tracked1 = [ti for idx, ti in enumerate(unm_tracked1) if idx not in matched_t]
+            unm_high     = [di for idx, di in enumerate(unm_high)     if idx not in matched_h]
 
         unm_tracked = [self.tracked_stracks[ti] for ti in unm_tracked1]
         unm_lost    = [self.lost_stracks[ti] for ti in unm_lost1]

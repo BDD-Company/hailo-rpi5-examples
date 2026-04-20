@@ -421,7 +421,10 @@ def main():
         'bytetrack_match_thresh':   0.3,
         'bytetrack_track_buffer':   30,
         'bytetrack_frame_rate':     30,
-        'bytetrack_match_max_dist': 0.2,
+        'bytetrack_match_max_dist':    0.2,
+        'bytetrack_recovery_max_dist': None,
+        'bytetrack_nms_thresh':        0.3,
+        'bytetrack_nms_dist_thresh':   0.06,
     }
 
     bytetracker = BYTETracker(
@@ -431,6 +434,9 @@ def main():
         track_buffer=control_config['bytetrack_track_buffer'],
         frame_rate=control_config['bytetrack_frame_rate'],
         match_max_dist=control_config.get('bytetrack_match_max_dist'),
+        recovery_max_dist=control_config.get('bytetrack_recovery_max_dist'),
+        nms_thresh=control_config.get('bytetrack_nms_thresh'),
+        nms_dist_thresh=control_config.get('bytetrack_nms_dist_thresh'),
     )
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True

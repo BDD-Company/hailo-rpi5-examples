@@ -132,7 +132,7 @@ def test_strack_mark_lost_and_removed():
     assert t.state == TrackState.Removed
 
 
-from bytetrack import BYTETracker
+from bytetrack import BYTETracker, _nms
 
 
 def _det(x1, y1, x2, y2, score):
@@ -143,6 +143,61 @@ def _tracker():
     STrack.reset_counter()
     return BYTETracker(track_thresh=0.5, det_thresh=0.6, match_thresh=0.8,
                        track_buffer=5, frame_rate=30)
+
+
+def test_nms_iou_suppresses_duplicate():
+    # Two nearly-identical boxes: IoU > 0.9
+    dets = np.array([
+        _det(0.10, 0.90, 0.15, 0.99, 0.63),
+        _det(0.11, 0.90, 0.15, 0.99, 0.35),
+    ])
+    result = _nms(dets, iou_thresh=0.3, dist_thresh=None)
+    assert len(result) == 1
+    assert result[0, 4] == pytest.approx(0.63)  # higher-confidence kept
+
+
+def test_nms_dist_suppresses_close_centres():
+    # Two boxes with low IoU (~0.15) but close centres (dist ≈ 0.05)
+    dets = np.array([
+        _det(0.561, 0.349, 0.597, 0.412, 0.63),
+        _det(0.577, 0.357, 0.623, 0.494, 0.50),
+    ])
+    result_iou_only = _nms(dets, iou_thresh=0.3, dist_thresh=None)
+    assert len(result_iou_only) == 2          # IoU alone doesn't suppress
+    result_both = _nms(dets, iou_thresh=0.3, dist_thresh=0.06)
+    assert len(result_both) == 1              # centre distance suppresses
+    assert result_both[0, 4] == pytest.approx(0.63)
+
+
+def test_nms_keeps_distant_boxes():
+    # Two detections far apart: must not be suppressed
+    dets = np.array([
+        _det(0.1, 0.1, 0.2, 0.2, 0.9),
+        _det(0.7, 0.7, 0.9, 0.9, 0.8),
+    ])
+    result = _nms(dets, iou_thresh=0.3, dist_thresh=0.06)
+    assert len(result) == 2
+
+
+def test_tracker_nms_prevents_spurious_track():
+    # Without NMS: duplicate detection creates 2 tracks.
+    # With NMS: only 1 track created.
+    STrack.reset_counter()
+    t_no_nms = BYTETracker(track_thresh=0.3, det_thresh=0.35, match_thresh=0.3,
+                            track_buffer=5, frame_rate=30, match_max_dist=0.2)
+    dets = np.array([
+        _det(0.084, 0.928, 0.116, 0.990, 0.63),
+        _det(0.086, 0.928, 0.115, 0.990, 0.35),  # near-identical duplicate
+    ])
+    tracks_no_nms = t_no_nms.update(dets, frame_id=0)
+    assert len(tracks_no_nms) == 2  # spurious second track
+
+    STrack.reset_counter()
+    t_nms = BYTETracker(track_thresh=0.3, det_thresh=0.35, match_thresh=0.3,
+                        track_buffer=5, frame_rate=30, match_max_dist=0.2,
+                        nms_thresh=0.3, nms_dist_thresh=0.06)
+    tracks_nms = t_nms.update(dets, frame_id=0)
+    assert len(tracks_nms) == 1    # duplicate suppressed
 
 
 def test_tracker_no_dets_returns_empty():

@@ -285,6 +285,25 @@ def parse_args():
         help="Track style: lines=center polyline only / boxes=polyline+bbox rects (default: lines)",
     )
     p.add_argument(
+        "--recovery-max-dist", type=float, default=None,
+        help="Enable Stage 1.5 recovery matching using last observed position. "
+             "Value is the max centre distance (0–1 normalised) to recover a "
+             "track after a sudden direction change (e.g. 0.3). "
+             "Overrides bytetrack_recovery_max_dist from the log config.",
+    )
+    p.add_argument(
+        "--nms-thresh", type=float, default=0.3,
+        help="IoU threshold for pre-tracker NMS (default: 0.3). "
+             "Suppresses duplicate detections with IoU above this value. "
+             "Set to 0 or omit to disable IoU-based suppression.",
+    )
+    p.add_argument(
+        "--nms-dist-thresh", type=float, default=0.06,
+        help="Centre-distance threshold for pre-tracker NMS in normalised [0–1] coords "
+             "(default: 0.06). Suppresses duplicate detections whose centres are closer "
+             "than this value even when their IoU is low. Set to 0 to disable.",
+    )
+    p.add_argument(
         "--out", type=Path, default=None,
         help="Output file (single/video) or directory (frames). "
              "Default: tracker_output/ next to log file.",
@@ -312,7 +331,10 @@ def _find_videos_for_log(log_file: Path, all_videos: list[Path], window_s: int =
     return matched
 
 
-def _process_one(log_file: Path, video_path, output_mode: str, style: str, out_path: Path) -> None:
+def _process_one(log_file: Path, video_path, output_mode: str, style: str, out_path: Path,
+                 recovery_max_dist: float | None = None,
+                 nms_thresh: float | None = 0.3,
+                 nms_dist_thresh: float | None = 0.06) -> None:
     logger.info("=== Processing %s → %s ===", log_file.name, out_path)
 
     config_dict, frames, base_ns = parse_log(log_file)
@@ -329,7 +351,14 @@ def _process_one(log_file: Path, video_path, output_mode: str, style: str, out_p
         "match_thresh":   config_dict.get("bytetrack_match_thresh",   0.3),
         "track_buffer":   config_dict.get("bytetrack_track_buffer",   30),
         "frame_rate":     config_dict.get("bytetrack_frame_rate",     30),
-        "match_max_dist": config_dict.get("bytetrack_match_max_dist", 0.2),
+        "match_max_dist":    config_dict.get("bytetrack_match_max_dist",    0.2),
+        "recovery_max_dist": (
+            recovery_max_dist
+            if recovery_max_dist is not None
+            else config_dict.get("bytetrack_recovery_max_dist", None)
+        ),
+        "nms_thresh":      config_dict.get("bytetrack_nms_thresh",      nms_thresh),
+        "nms_dist_thresh": config_dict.get("bytetrack_nms_dist_thresh", nms_dist_thresh),
     }
 
     video_reader = VideoReader(video_path)
@@ -392,13 +421,19 @@ def main():
             else:
                 out_path = base_out / stem
 
-            _process_one(log_file, video_path, args.output, args.style, out_path)
+            _process_one(log_file, video_path, args.output, args.style, out_path,
+                         recovery_max_dist=args.recovery_max_dist,
+                         nms_thresh=args.nms_thresh or None,
+                         nms_dist_thresh=args.nms_dist_thresh or None)
 
     else:
         log_file   = args.path
         video_path = args.video
         out_path   = args.out or (log_file.parent / "tracker_output")
-        _process_one(log_file, video_path, args.output, args.style, out_path)
+        _process_one(log_file, video_path, args.output, args.style, out_path,
+                     recovery_max_dist=args.recovery_max_dist,
+                     nms_thresh=args.nms_thresh or None,
+                     nms_dist_thresh=args.nms_dist_thresh or None)
 
 
 if __name__ == "__main__":
