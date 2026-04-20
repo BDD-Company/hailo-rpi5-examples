@@ -347,7 +347,7 @@ def main():
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_min': 0.7,
+        'thrust_min': 0.5,
         'thrust_max': 0.9,
         'thrust_dynamic': False,
         'thrust_proportional_to_target_size' : False,
@@ -356,15 +356,16 @@ def main():
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'estimation_3d': True,
-        'estimation_3d_method': 'cluster',
-        'estimation_3d_use_initial_velocity' : True,
+        'estimation_3d_method': 'numpy',
+        'estimation_3d_use_initial_velocity' : False,
 
-        'estimation_lookahead_frames': 2,
+        'estimation_lookahead_frames': 1,
         'estimation_lookahead_dynamic': True,
-        'estimation_lookahead_dynamic_sqrt': True,
-        'estimation_lookahead_dynamic_frames_near':   1,
-        'estimation_lookahead_dynamic_frames_medium': 1,
-        'estimation_lookahead_dynamic_frames_far':    1, # can't be too big -- estimation will be too FAAR away.
+        'estimation_lookahead_dynamic_sqrt': False,
+	'estimation_lookahead_dynamic_factor': 0.1,
+        'estimation_lookahead_dynamic_frames_near':   0,
+        'estimation_lookahead_dynamic_frames_medium': 0,
+        'estimation_lookahead_dynamic_frames_far':    0, # can't be too big -- estimation will be too FAAR away.
 
         'pd_coeff_p': 3,
         'pd_coeff_d': 0, #-1, # -1
@@ -392,7 +393,7 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m' : XY(1.8, 1.8),             # shahed small
+        'target_size_m': XY(x=1.2, y=1.2),            # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
         # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
@@ -416,11 +417,11 @@ def main():
 
         'DEBUG': DEBUG,
 
-        'bytetrack_track_thresh': 0.5,
-        'bytetrack_det_thresh':   0.6,
-        'bytetrack_match_thresh': 0.8,
-        'bytetrack_track_buffer': 30,
-        'bytetrack_frame_rate':   30,
+        'bytetrack_track_thresh': 0.2,
+        'bytetrack_det_thresh': 0.2,
+        'bytetrack_match_thresh': 0.3,
+        'bytetrack_track_buffer': 10,
+        'bytetrack_frame_rate': 30
     }
 
     bytetracker = BYTETracker(
