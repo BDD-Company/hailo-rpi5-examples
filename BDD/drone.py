@@ -147,19 +147,30 @@ class DroneMover():
                 logging.debug("connected!")
                 break
 
+        # Enable arming without GPS before waiting for health
+        await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
+        # keep armed even if not took off for long time (1000 seconds)
+        await drone.param.set_param_float("COM_DISARM_PRFLT", 1000.0)
+
+        logging.info("Waiting for local position...")
         async for health in drone.telemetry.health():
             logging.debug("Health report: %s", health.__str__())
-            if health.is_armable:
-                logging.debug("seems armable")
-            break
+            if health.is_local_position_ok:
+                logging.debug("local position OK")
+                break
+
+        # Prime and start offboard before arming so PX4 allows arm without GPS
+        logging.debug("Priming offboard...")
+        await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
+        logger.debug("Entering Offboard mode...")
+        try:
+            await drone.offboard.start()
+        except OffboardError as e:
+            logger.error("Failed to enter Offboard mode: %s, aborting", e, exc_info=True)
+            raise
 
         async def arm():
             logging.info("arming")
-
-            # # Enable arming without GPS
-            await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
-            # keep armed even if not took off for long time (1000 seconds)
-            await drone.param.set_param_float("COM_DISARM_PRFLT", 1000.0)
 
             arming_exception = None
             for i in range(arm_attempts):
@@ -181,21 +192,7 @@ class DroneMover():
             else:
                 logging.info("armed")
 
-
         await arm()
-
-
-        await asyncio.sleep(1) # TODO(vnemkov): maybe remove?
-
-        await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
-
-        logger.debug("Entering Offboard mode...")
-        try:
-            await drone.offboard.start()
-        except OffboardError as e:
-            logger.error("Failed to enter Offboard mode: %s, aborting", e, exc_info=True)
-            await drone.action.disarm()
-            raise
 
         self.offboard = drone.offboard
 

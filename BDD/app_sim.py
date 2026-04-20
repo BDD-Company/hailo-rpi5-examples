@@ -301,8 +301,8 @@ def main():
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames': 3,
 
-        'estimation_3d': True,
-        'estimation_3d_mode': 'wls',
+        'estimation_3d': False,
+        'estimation_3d_method': 'wls',
         'estimation_lookahead_frames': 2,
         'estimation_lookahead_dynamic': False,
         'estimation_lookahead_dynamic_frames_near':   1,
@@ -330,8 +330,8 @@ def main():
 
         'frame_angular_size_deg': XY(107, 85),
 
-        # 'target_size_m': XY(0.2, 0.2),           # balloon
-        'target_size_m': XY(1.8, 1.8),             # shahed small
+        'target_size_m': XY(0.2, 0.2),           # balloon
+        # 'target_size_m': XY(1.8, 1.8),             # shahed small
         # 'target_size_m': XY(3.5, 2.5),           # shahed large
 
         'inertia_correction_gain': 0,
@@ -343,6 +343,12 @@ def main():
 
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
+
+        # params to go to the drone config ("drone_" prefix is stripped then)
+        'drone_use_set_attitude': False,
+        'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
+        'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+
 
         'DEBUG': DEBUG,
     }
