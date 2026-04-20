@@ -164,6 +164,8 @@ def _render_frames(
     out_path.mkdir(parents=True, exist_ok=True)
     for fid in frame_ids:
         canvas = frame_images.get(fid, _blank(width, height)).copy()
+        if canvas.shape[1] != width or canvas.shape[0] != height:
+            canvas = cv2.resize(canvas, (width, height))
         _draw_trajectories(canvas, track_history, up_to_frame=fid,
                            width=width, height=height, style=style)
         cv2.imwrite(str(out_path / f"frame_{fid:04d}.png"), canvas)
@@ -183,10 +185,20 @@ def _render_video(
     if out_path.suffix.lower() not in (".mp4", ".avi", ".mkv"):
         out_path = out_path.with_suffix(".mp4")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, 30.0, (width, height))
+    # avc1 (H.264) works on macOS; fall back to mp4v if unavailable
+    for fourcc_str in ("avc1", "mp4v"):
+        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        writer = cv2.VideoWriter(str(out_path), fourcc, 30.0, (width, height))
+        if writer.isOpened():
+            break
+    if not writer.isOpened():
+        logger.error("Failed to open VideoWriter for %s", out_path)
+        return
     for fid in frame_ids:
         canvas = frame_images.get(fid, _blank(width, height)).copy()
+        # Normalise to canonical resolution in case of stray black frames
+        if canvas.shape[1] != width or canvas.shape[0] != height:
+            canvas = cv2.resize(canvas, (width, height))
         _draw_trajectories(canvas, track_history, up_to_frame=fid,
                            width=width, height=height, style=style)
         writer.write(canvas)
@@ -244,12 +256,16 @@ def collect_track_history(
 
         img = fdata["frame"]
         frame_images[fid] = img.copy()
-        if img is not None:
-            height, width = img.shape[:2]
+        # Use the FIRST actual frame to set canonical dimensions,
+        # so later black fallback frames (480×640) don't override them.
+        if width == 640 and height == 480 and img is not None and img.size > 0:
+            h, w = img.shape[:2]
+            if h > 0 and w > 0:
+                height, width = h, w
 
     logger.info(
-        "Collected %d frames, %d unique tracks",
-        len(frame_images), len(track_history),
+        "Collected %d frames, %d unique tracks (resolution %dx%d)",
+        len(frame_images), len(track_history), width, height,
     )
     return track_history, frame_images, width, height
 
