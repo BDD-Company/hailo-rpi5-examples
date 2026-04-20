@@ -9,9 +9,11 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 import types
 import time as real_time_module
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -274,31 +276,33 @@ def parse_args():
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
+_TS_RE = re.compile(r"(\d{8})-(\d{6})")
 
-    # Resolve paths
-    if args.path.is_dir():
-        log_file, video_files = find_files_in_dir(args.path)
-        if log_file is None:
-            print(f"No .log file found in {args.path}", file=sys.stderr)
-            sys.exit(1)
-        video_path = video_files or None
-    else:
-        log_file  = args.path
-        video_path = args.video
 
-    # Default output path
-    out_path = args.out or (log_file.parent / "tracker_output")
+def _parse_file_ts(path: Path) -> datetime | None:
+    m = _TS_RE.search(path.stem)
+    if not m:
+        return None
+    return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
 
-    logger.info("Log: %s  Video: %s  Output: %s  Mode: %s  Style: %s",
-                log_file, video_path, out_path, args.output, args.style)
 
-    # Parse log
+def _find_videos_for_log(log_file: Path, all_videos: list[Path], window_s: int = 120) -> list[Path]:
+    """Return video files whose filename timestamp is within window_s of log_file's timestamp."""
+    log_ts = _parse_file_ts(log_file)
+    if log_ts is None:
+        return all_videos  # no timestamp in name — give all videos
+    window = timedelta(seconds=window_s)
+    matched = [v for v in all_videos if (vts := _parse_file_ts(v)) and abs(vts - log_ts) <= window]
+    return matched
+
+
+def _process_one(log_file: Path, video_path, output_mode: str, style: str, out_path: Path) -> None:
+    logger.info("=== Processing %s → %s ===", log_file.name, out_path)
+
     config_dict, frames, base_ns = parse_log(log_file)
     if not frames:
-        print("No frame data in log", file=sys.stderr)
-        sys.exit(1)
+        logger.warning("No frame data in %s — skipping", log_file.name)
+        return
 
     if not config_dict:
         config_dict = {}
@@ -312,14 +316,12 @@ def main():
         "match_max_dist": config_dict.get("bytetrack_match_max_dist", 0.2),
     }
 
-    # Open video
     video_reader = VideoReader(video_path)
     if not video_reader.available:
-        logger.warning("No video loaded — black frames will be used")
+        logger.warning("No video for %s — black frames will be used", log_file.name)
 
     frame_data_list = build_frame_data_list(frames, video_reader)
 
-    # Mock time
     mock_monotonic = MockMonotonicNs(base_ns)
     mock_time = types.ModuleType("mock_time")
     for attr in dir(real_time_module):
@@ -342,10 +344,45 @@ def main():
     )
 
     frame_ids = sorted(frame_images.keys())
-    logger.info("Rendering mode=%s style=%s ...", args.output, args.style)
-    render(args.output, args.style, track_history, frame_images, frame_ids,
-           width, height, out_path)
+    render(output_mode, style, track_history, frame_images, frame_ids, width, height, out_path)
     logger.info("Done → %s", out_path)
+
+
+def main():
+    args = parse_args()
+
+    if args.path.is_dir():
+        log_files = sorted(args.path.glob("*.log"))
+        if not log_files:
+            print(f"No .log files found in {args.path}", file=sys.stderr)
+            sys.exit(1)
+
+        all_videos = (
+            sorted(args.path.glob("RAW_*.mkv")) + sorted(args.path.glob("RAW_*.mp4"))
+            or sorted(args.path.glob("*.mkv")) + sorted(args.path.glob("*.mp4"))
+        )
+
+        base_out = args.out or (args.path / "tracker_output")
+
+        for log_file in log_files:
+            matched_videos = _find_videos_for_log(log_file, all_videos)
+            video_path = matched_videos if matched_videos else None
+
+            stem = log_file.stem
+            if args.output == "single":
+                out_path = base_out / f"{stem}.png"
+            elif args.output == "video":
+                out_path = base_out / f"{stem}.mp4"
+            else:
+                out_path = base_out / stem
+
+            _process_one(log_file, video_path, args.output, args.style, out_path)
+
+    else:
+        log_file   = args.path
+        video_path = args.video
+        out_path   = args.out or (log_file.parent / "tracker_output")
+        _process_one(log_file, video_path, args.output, args.style, out_path)
 
 
 if __name__ == "__main__":
