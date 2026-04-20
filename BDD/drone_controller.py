@@ -21,6 +21,8 @@ from telemetry_position import (
 )
 # from drone_killswitch import kill_on_rc_switch_on_channel
 from helpers import Detection, Detections, MoveCommand, STOP
+from gpiozero import CPUTemperature, Device
+
 
 from helpers import (
     debug_collect_call_info,
@@ -255,7 +257,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     ESTIMATION_LOOKAHEAD_FRAMES                = control_config.pop('estimation_lookahead_frames', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC               = control_config.pop('estimation_lookahead_dynamic', False)
     ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT          = control_config.pop('estimation_lookahead_dynamic_sqrt', True)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR          = control_config.pop('estimation_lookahead_dynamic_factor', 1)
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR        = control_config.pop('estimation_lookahead_dynamic_factor', 1)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
@@ -292,9 +294,14 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     frame_id = 0
     pd_coeff_p_dynamic_stage = None
 
+    cpu = CPUTemperature()
+    logger.warning(f"PRE START CPU Temperature: {cpu.temperature}°C")
+
 
     drone = DroneMover(drone_connection_string, drone_config)
     logger.debug("starting up drone... with %s, config: %s", drone_connection_string, drone_config)
+
+    logger.warning(f"POST START CPU Temperature: {cpu.temperature}°C")
 
     # udp_port = 14560
     # killdrone_thread = threading.Thread(
@@ -536,6 +543,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK
             )
             detection = picked if picked is not None else Detection()
+            logger.warning(f"!!!!! Temperature: {cpu.temperature}°C")
             if detection.confidence >= CONFIDENCE_MIN:
                 if BYTETRACK_TARGET_LOCK and detection.track_id is not None:
                     locked_track_id = detection.track_id
