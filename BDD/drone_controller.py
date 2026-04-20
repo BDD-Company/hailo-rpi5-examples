@@ -10,6 +10,7 @@ from helpers import XY
 from drone import DroneMover
 from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
+from telemetry_position import PositionNED, VelocityNED
 from estimate_distance import estimate_distance_class, DistanceClass, measure_object_size
 from telemetry_position import (
     # get_position_ned,
@@ -61,6 +62,31 @@ def is_drone_moving(telemetry_dict):
 def clamp(min_val, val, max_val):
     typeof_val = type(val)
     return typeof_val(max(min_val, min(max_val, val)))
+
+
+def _pick_target_detection(
+    detections: list,
+    confidence_min: float,
+    locked_track_id: int | None,
+    use_track_lock: bool,
+) -> Detection | None:
+    """
+    Выбор одной детекции для сопровождения. При use_track_lock и заданном
+    locked_track_id возвращает только детекции с этим ByteTrack track_id,
+    чтобы не перескакивать на случайные высоко-уверенные ложные срабатывания.
+    Если заблокированный трек в кадре отсутствует — None (ведём себя как
+    при потере цели, оценщик/затухание сами продолжают движение).
+    """
+    pool = [d for d in detections if d is not None and d.confidence >= confidence_min]
+    if not pool:
+        return None
+    effective_lock = locked_track_id if use_track_lock else None
+    if effective_lock is not None:
+        locked = [d for d in pool if d.track_id == effective_lock]
+        if locked:
+            return max(locked, key=lambda d: d.confidence)
+        return None
+    return max(pool, key=lambda d: d.confidence)
 
 
 def compute_inertia_correction(telemetry_dict, target_relative_pos, gain, min_speed_ms=0.3):
@@ -218,28 +244,28 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
 
     ESTIMATION_3D = control_config.pop('estimation_3d', None)
-    if ESTIMATION_3D is None:
-        ESTIMATION_3D = control_config.pop('estimation_use_3d', False)
-    else:
-        control_config.pop('estimation_use_3d', None)
+    # if ESTIMATION_3D is None:
+    #     ESTIMATION_3D = control_config.pop('estimation_use_3d', False)
+    # else:
+    #     control_config.pop('estimation_use_3d', None)
 
-    estimation_3d_method = control_config.pop('estimation_3d_method', None)
-    if estimation_3d_method is None:
-        estimation_3d_method = control_config.pop('estimation_3d_mode', 'numpy')
-    else:
-        control_config.pop('estimation_3d_mode', None)
+    ESTIMATION_3D_METHOD = VelocityMethod(control_config.pop('estimation_3d_method', None))
+    ESTIMATION_3D_USE_INITIAL_VELOCITY         = control_config.pop('estimation_3d_use_initial_velocity', True)
 
-    ESTIMATION_3D_METHOD = VelocityMethod(estimation_3d_method) # OR any VelocityMethod 'wls'
     ESTIMATION_LOOKAHEAD_FRAMES                = control_config.pop('estimation_lookahead_frames', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC               = control_config.pop('estimation_lookahead_dynamic', False)
     ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT          = control_config.pop('estimation_lookahead_dynamic_sqrt', True)
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR          = control_config.pop('estimation_lookahead_dynamic_factor', 1)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
+
     FOLLOW_TARGET_POSITION_NED                 = control_config.pop('follow_target_position_ned', False)
 
 
     DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.pop('delay_takeof_until_n_detection_frames', 3)
+
+    BYTETRACK_TARGET_LOCK = control_config.pop('bytetrack_target_lock', True)
 
     AIM_POINT = control_config.pop('aim_point', XY(0.5, 0.5))
     aim_point = AIM_POINT
@@ -318,6 +344,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     current_frame_timestamp_ns = time.monotonic_ns()
     target_position_ned = None
     target_position_prev_ned = None
+    estimated_velocity_ned = None
+    locked_track_id: int | None = None
 
     # NOTE: HUGE age to avoid purging prev positions, since it doesn't work as expected RN
     max_target_age_ns = 5_000_000_000_000
@@ -421,7 +449,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
                 r : Detections = detections_queue.get(0.02)
-                if r is STOP:
+                if r is STOP or r is None:
                     logger.info("stopping")
                     break
                 detections_obj = r
@@ -490,7 +518,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             debug_info['start_time_ms'] = START_TIME_MS
             debug_info['flight_time_ms'] = flight_time_ns / 1000_000
 
-            detections, frame = detections_obj.detections, detections_obj.frame
+            detections = detections_obj.detections
             detection = None
 
             # so telemetry action doesn't get into the logs
@@ -498,30 +526,48 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
             # filter out accidential Nones
             detections = [d for d in detections if d is not None]
-            # detections.sort(reverse=True, key = lambda d : d.track_id)
-            detections.sort(reverse=True, key = lambda d : d.confidence)
             target_relative_pos = None
             target_relative_pos_uncorrected = None
             target_position_ned = None
             frame_id = detections_obj.frame_id
             target_estimator = None
 
-            detection = detections[0] if len(detections) > 0 else Detection()
+            picked = _pick_target_detection(
+                detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK
+            )
+            detection = picked if picked is not None else Detection()
             if detection.confidence >= CONFIDENCE_MIN:
+                if BYTETRACK_TARGET_LOCK and detection.track_id is not None:
+                    locked_track_id = detection.track_id
                 seen_target = True
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
-                object_size = measure_object_size(frame, detection.bbox) or detection.bbox.size
-                estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, object_size)
+                # on very small sizes box margin added by detector is greater than real object size.
+                if detection.bbox.area() < 0.002:
+                    object_corrected_size = measure_object_size(detections_obj.frame, detection.bbox) or detection.bbox.size
+                else:
+                    object_corrected_size = detection.bbox.size
+
+                logger.debug(f"!!! {TARGET_SIZE_M}, {FRAME_ANGLUAR_SIZE_DEG}, {detection.bbox.size}, {object_corrected_size}")
+                estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, object_corrected_size)
+
+                logger.debug(f"!!! RAW estimated_distance: {estimated_distance_class} {estimated_distance_m}")
+
+                # if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS and estimated_distance_m < 10:
+                #     # HACK: we have a distance estimation issue here, distance is at least 50m
+                #     estimated_distance_m = 80
 
                 estimated_distance_m = estimated_distance_m if estimated_distance_m else 1
+                # logger.debug(f"!!! estimated_distance: {estimated_distance_m}")
                 # NOTE: At large distances estimation higly undershoots, formula corrects it to be good enough
-                estimated_distance_m *= (math.log(estimated_distance_m, 10) + 0.5)
+                # estimated_distance_m *= math.e #(math.log(estimated_distance_m, 10) + 0.5)
+                logger.debug(f"!!! estimated_distance: {estimated_distance_m}")
 
-                if not all(telemetry_dict.values()):
-                    drone_pose = None
-                else:
+                try:
                     drone_pose = get_pose(telemetry_dict)
+                except:
+                    logger.warning("Can't get dron pose from telemetry")
+                    drone_pose = None
 
                 mode = 'follow'
 
@@ -543,14 +589,17 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 if ESTIMATION_LOOKAHEAD_DYNAMIC:
                     distance = estimated_distance_m if estimated_distance_m else 1
                     if ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT:
-                        estimate_lookeahead_frames = int(math.sqrt(distance))
-                    else:
-                        if estimated_distance_class == DistanceClass.FAR:
-                            estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR + int(math.sqrt(distance))
-                        elif estimated_distance_class == DistanceClass.MEDIUM:
-                            estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM + int(math.sqrt(distance))
-                        elif estimated_distance_class == DistanceClass.NEAR:
-                            estimate_lookeahead_frames = ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
+                        estimate_lookeahead_frames = int(math.sqrt(distance)) + 1
+
+                    if ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR:
+                        estimate_lookeahead_frames = int(distance * ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR)
+
+                    if estimated_distance_class == DistanceClass.FAR:
+                        estimate_lookeahead_frames += ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR
+                    elif estimated_distance_class == DistanceClass.MEDIUM:
+                        estimate_lookeahead_frames += ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM
+                    elif estimated_distance_class == DistanceClass.NEAR:
+                        estimate_lookeahead_frames += ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
 
                 estimate_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * estimate_lookeahead_frames
                 estimate_at_ns = current_frame_timestamp_ns + estimate_delta_ns
@@ -580,11 +629,24 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                 target_pos_ned.north_m, target_pos_ned.east_m, target_pos_ned.down_m,
                                 estimated_distance_m)
 
-                        estimated_pos_ned = target_estimator_3d.estimate(
-                            estimate_at_ns,
-                            None,
-                            method=ESTIMATION_3D_METHOD
-                        )
+                        if ESTIMATION_3D_USE_INITIAL_VELOCITY and target_estimator_3d.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES:
+                            # still accumulating trajectory estimation
+                            estimated_velocity_ned = target_estimator_3d.estimate_velocity(
+                                estimate_at_ns,
+                                None,
+                                method=ESTIMATION_3D_METHOD
+                            )
+                            logger.debug("!!! estimated velocity: %s", estimated_velocity_ned)
+
+                        if estimated_velocity_ned:
+                            estimated_pos_ned = target_estimator_3d.estimate_based_on_velocity(estimate_at_ns, None, estimated_velocity_ned)
+                        else:
+                            estimated_pos_ned = target_estimator_3d.estimate(
+                                estimate_at_ns,
+                                None,
+                                method=ESTIMATION_3D_METHOD
+                            )
+
                         if estimated_pos_ned is None:
                             logger.warning('3D estimation fallback to: %s, target_estimator_3d has %s items',
                                 target_pos_ned, target_estimator_3d.history_size())
@@ -747,6 +809,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     logger.warning("!!! CLEARING HISTORY")
                     target_estimator_2d.clear_history()
                     target_estimator_3d.clear_history()
+                    locked_track_id = None
 
                 if seen_target:
                     if FOLLOW_TARGET_POSITION_NED:

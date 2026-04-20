@@ -248,16 +248,37 @@ class MockDroneMover:
     def get_telemetry_dict_cached(self) -> dotdict:
         return dotdict(self._current_telemetry)
 
-    async def move_to_target_zenith_async(self, roll_degree: float, pitch_degree: float, thrust: float = 0.0):
-        logger.debug("MockDroneMover.move_to_target_zenith_async(roll=%.2f, pitch=%.2f, thrust=%.3f)",
-                      roll_degree, pitch_degree, thrust)
+    def _resolve_current_telemetry(self, current_telemetry) -> dotdict:
+        if current_telemetry is None:
+            return self.get_telemetry_dict_cached()
+        return dotdict(current_telemetry)
 
-    async def move_to_target_ned(self, target_position_ned):
+    @staticmethod
+    def _yaw_deg_from_telemetry(current_telemetry) -> float:
+        return ((current_telemetry.get("attitude_euler", {}) or {}).get("yaw_deg", 0))
+
+    async def move_to_target_zenith_async(self, roll_degree: float, pitch_degree: float, thrust: float = 0.0, current_telemetry=None):
+        current_telemetry = self._resolve_current_telemetry(current_telemetry)
+        yaw_deg = self._yaw_deg_from_telemetry(current_telemetry)
         logger.debug(
-            "MockDroneMover.move_to_target_ned(north=%.2f, east=%.2f, down=%.2f)",
+            "MockDroneMover.move_to_target_zenith_async(roll=%.2f, pitch=%.2f, thrust=%.3f, yaw=%.2f, telemetry=%s)",
+            roll_degree,
+            pitch_degree,
+            thrust,
+            yaw_deg,
+            current_telemetry,
+        )
+
+    async def move_to_target_ned(self, target_position_ned, current_telemetry=None):
+        current_telemetry = self._resolve_current_telemetry(current_telemetry)
+        yaw_deg = self._yaw_deg_from_telemetry(current_telemetry)
+        logger.debug(
+            "MockDroneMover.move_to_target_ned(north=%.2f, east=%.2f, down=%.2f, yaw=%.2f, telemetry=%s)",
             target_position_ned.north_m,
             target_position_ned.east_m,
             target_position_ned.down_m,
+            yaw_deg,
+            current_telemetry,
         )
 
     async def standstill(self):
@@ -337,6 +358,7 @@ class ReplayQueue:
 # Key codes returned by cv2.waitKeyEx on Linux
 _KEY_RIGHT = 65363
 _KEY_LEFT  = 65361
+_KEY_SPACE = 32
 
 class InteractiveDisplaySink:
     """Frame sink that blocks on each frame until the user presses a key.
@@ -345,7 +367,8 @@ class InteractiveDisplaySink:
     ESC / q      — stop replay
     """
 
-    def __init__(self, replay_queue: ReplayQueue, window_title: str = ""):
+    def __init__(self, replay_queue: ReplayQueue, window_title: str = "", autoplay = False):
+        self._autoplay = autoplay
         self._replay_queue = replay_queue
         self._window_title = window_title or "Debug Drone Controller Replay"
         self._window_name = "debug_replay"
@@ -358,8 +381,12 @@ class InteractiveDisplaySink:
     def process_frame(self, frame):
         cv2.imshow(self._window_name, frame)
         while True:
-            key = cv2.waitKeyEx(0)  # block indefinitely
-            if key == _KEY_RIGHT or key == ord("d"):
+            wait_s = 0 if not self._autoplay else 1
+            key = cv2.waitKeyEx(wait_s)
+            if key == _KEY_SPACE:
+               self._autoplay = not self._autoplay
+
+            if self._autoplay or key == _KEY_RIGHT or key == ord("d"):
                 self._replay_queue.advance()
                 return
             if key == 27 or key == ord("q"):  # ESC or q
@@ -452,6 +479,12 @@ def main():
         type=lambda x: dict(ast.literal_eval(x)),
         default=None,
         help="Extra parameters of config to overwrite",
+    )
+    parser.add_argument(
+        "--autoplay",
+        action='store_true',
+        default=False,
+        help="do NOT wait for user input to advance frames",
     )
     args = parser.parse_args()
 
@@ -602,7 +635,7 @@ def main():
     # ── Set up output display ──────────────────────────────────────────
     output_queue = OverwriteQueue(maxsize=200)
 
-    sink = InteractiveDisplaySink(replay_queue, window_title=f"Debug Controller {log_file}  {video_path}")
+    sink = InteractiveDisplaySink(replay_queue, autoplay=args.autoplay, window_title=f"Debug Controller {log_file}  {video_path}")
 
     output_thread = threading.Thread(
         target=debug_output_thread,

@@ -7,7 +7,7 @@ from enum import Enum
 import numpy as np
 
 from helpers import XY, Rect
-from telemetry_position import PositionNED
+from telemetry_position import PositionNED, VelocityNED
 from interfaces import TargetEstimatorInterface
 
 
@@ -313,6 +313,22 @@ class TargetEstimator3D(TargetEstimatorInterface):
         else:
             return self._estimate_velocity_wls()
 
+    def estimate_velocity(self, at_timestamp_ns: int, fallback: VelocityNED | None = None,
+                 method: VelocityMethod = VelocityMethod.WLS) -> VelocityNED | None:
+        if not self._positions:
+            return fallback
+
+        at_timestamp_ns = int(at_timestamp_ns)
+        self._forget_old(at_timestamp_ns)
+        if not self._positions:
+            return fallback
+
+        if len(self._positions) == 1:
+            return VelocityNED(0, 0, 0)
+
+        vn, ve, vd = self._estimate_velocity(method)
+        return VelocityNED(vn, ve, vd)
+
     def estimate(self, at_timestamp_ns: int, fallback: PositionNED | None = None,
                  method: VelocityMethod = VelocityMethod.WLS) -> PositionNED | None:
         """Estimate target NED position at *at_timestamp_ns*.
@@ -339,6 +355,27 @@ class TargetEstimator3D(TargetEstimatorInterface):
             north_m=newest.north_m + vn * dt,
             east_m=newest.east_m + ve * dt,
             down_m=newest.down_m + vd * dt,
+        )
+
+    def estimate_based_on_velocity(self, at_timestamp_ns: int, fallback: PositionNED | None = None,
+                velocity : VelocityNED = VelocityNED(0, 0, 0)):
+        if not self._positions:
+            return fallback
+
+        at_timestamp_ns = int(at_timestamp_ns)
+        self._forget_old(at_timestamp_ns)
+        if not self._positions:
+            return fallback
+
+        ts, newest = self._positions[-1]
+        if len(self._positions) == 1:
+            return newest
+
+        dt = at_timestamp_ns - ts
+        return PositionNED(
+            north_m=newest.north_m + velocity.north_m_s * dt,
+            east_m=newest.east_m + velocity.east_m_s * dt,
+            down_m=newest.down_m + velocity.down_m_s * dt,
         )
 
     @property

@@ -154,31 +154,25 @@ def draw_detection(frame, detection : Detection, color, line_thickness = 1):
     circle_size = max(1, min(bbox.height, detection.bbox.width) / 4)
     cv2.circle(frame, bbox.center.to_tuple(to = int), circle_size, color, line_thickness, cv2.FILLED)
 
-    text = f"{float(detection.confidence):.2f}"
-    if detection.track_id is not None:
-        text =  f"# {detection.track_id} : {text}"
-
     # confidence label
     draw_text(frame,
-        text,
+        f"{float(detection.confidence):.2f}",
         bbox.min_point + XY(0, -4),
         font_scale = 0.5,
         color = color,
-        # bg_color = shadow_color(color),
         line_width = 1
     )
 
-    # # track ID label
-    # if detection.track_id is not None:
-    #     track_id = str(detection.track_id)
-    #     draw_text(frame,
-    #         track_id,
-    #         bbox.min_point - XY(0, 10),
-    #         font_scale = 0.5,
-    #         color = color,
-    #         bg_color = shadow_color(color),
-    #         line_width = line_thickness
-    #     )
+    # track ID label in green
+    if detection.track_id is not None:
+        draw_text(frame,
+            f"#{detection.track_id}",
+            bbox.min_point + XY(0, -16),
+            font_scale = 0.5,
+            color = NEUTRAL_RECT_COLOR,
+            bg_color = shadow_color(NEUTRAL_RECT_COLOR),
+            line_width = 1
+        )
 
 def draw_move_goal(frame, target_pos : XY, color, line_thickness = 1, aim_point : XY = XY(0.5, 0.5)):
     frame_size = XY(frame.shape[1], frame.shape[0])

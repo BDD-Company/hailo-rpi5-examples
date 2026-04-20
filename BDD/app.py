@@ -22,9 +22,11 @@ from platform_controller import platform_controlling_thread
 
 # from mavsdk.telemetry import EulerAngle
 
+import numpy as np
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
+from bytetrack import BYTETracker
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
 from OverwriteQueue import OverwriteQueue
@@ -48,9 +50,10 @@ DEBUG = False
 # -----------------------------------------------------------------------------------------------
 # Inheritance from the app_callback_class
 class user_app_callback_class(app_callback_class):
-    def __init__(self, detections_queue):
+    def __init__(self, detections_queue, tracker: BYTETracker):
         super().__init__()
         self.detections_queue = detections_queue
+        self.tracker = tracker
 
 
 # -----------------------------------------------------------------------------------------------
@@ -95,6 +98,32 @@ def normalized_frame_id(buffer: Gst.Buffer, frame_meta) -> int:
 
 
 seen_frames = deque(maxlen=10)
+
+_MIN_MATCH_IOU = 0.1
+
+
+def _match_track_to_detection(
+    track_det_bbox: np.ndarray, rects: list
+) -> int | None:
+    """Return index of rect in `rects` with highest IoU against track_det_bbox."""
+    best_idx, best_iou = None, _MIN_MATCH_IOU
+    x1, y1, x2, y2 = track_det_bbox
+    for i, b in enumerate(rects):
+        ix1 = max(x1, b.left_edge)
+        iy1 = max(y1, b.top_edge)
+        ix2 = min(x2, b.right_edge)
+        iy2 = min(y2, b.bottom_edge)
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        area_a = (x2 - x1) * (y2 - y1)
+        area_b = b.width * b.height
+        union = area_a + area_b - inter
+        iou = inter / union if union > 0 else 0.0
+        if iou > best_iou:
+            best_iou = iou
+            best_idx = i
+    return best_idx
+
+USE_TRACKER = False
 
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_callback_class):
@@ -145,34 +174,73 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     #         id(frame), hash(frame.data.tobytes())
     # )
 
-    # Parse the detections
-    detection_count = 0
-    detections_list = []
+    # Extract raw detection data before constructing frozen Detection objects
+    raw_dets = []
     for detection in detections:
-        detection : hailo.HailoDetection = detection
-
-        # DEBUG_dump('detecion: ', detection)
-
-        # label = detection.get_label()
         bbox = detection.get_bbox()
-
-        confidence = detection.get_confidence()
-        # if label == "person":
-        # Get track ID
-        track_id = 0
-        track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-        if len(track) == 1:
-            track_id = track[0].get_id()
-        else:
-            track_id = None
-
-        detection_count += 1
-        detections_list.append(Detection(
-            bbox = Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
-            confidence = confidence,
-            track_id = track_id,
-            # class_id = detection.class_id,
+        raw_dets.append((
+            Rect.from_xyxy(bbox.xmin(), bbox.ymin(), bbox.xmax(), bbox.ymax()),
+            detection.get_confidence(),
         ))
+
+    # Run ByteTracker to assign stable track IDs
+    if raw_dets:
+        dets_array = np.array([
+            [r.left_edge, r.top_edge, r.right_edge, r.bottom_edge, c]
+            for r, c in raw_dets
+        ])
+    else:
+        dets_array = np.empty((0, 5))
+
+    logger.debug(
+        "frame=#%04d ByteTracker input: %d detections %s",
+        frame_id,
+        len(raw_dets),
+        [(round(r.left_edge, 1), round(r.top_edge, 1), round(r.right_edge, 1), round(r.bottom_edge, 1), round(c, 3)) for r, c in raw_dets],
+    )
+
+    track_id_map: dict[int, int] = {}
+    if USE_TRACKER:
+        # BYTETracker is not thread-safe; safe here because GStreamer uses a single streaming thread.
+        active_tracks = user_data.tracker.update(dets_array, frame_id)
+
+        logger.debug(
+            "frame=#%04d ByteTracker output: %d active tracks %s",
+            frame_id,
+            len(active_tracks),
+            [(t.track_id, t.state, round(t.score, 3)) for t in active_tracks],
+        )
+
+        # Build index → track_id map before constructing Detection objects
+        temp_rects = [r for r, _ in raw_dets]
+        for track in active_tracks:
+            idx = _match_track_to_detection(track.det_bbox, temp_rects)
+            logger.debug(
+                "frame=#%04d ByteTracker match: track_id=%d det_bbox=%s → det_idx=%s",
+                frame_id,
+                track.track_id,
+                [round(v, 1) for v in track.det_bbox],
+                idx,
+            )
+            if idx is not None:
+                track_id_map[idx] = track.track_id
+
+        logger.debug(
+            "frame=#%04d ByteTracker track_id_map: %s (unmatched det indices: %s)",
+            frame_id,
+            track_id_map,
+            [i for i in range(len(raw_dets)) if i not in track_id_map],
+        )
+
+    # Construct immutable Detection objects with track_id set at creation time
+    detections_list = [
+        Detection(
+            bbox=rect,
+            confidence=conf,
+            track_id=track_id_map.get(i),
+        )
+        for i, (rect, conf) in enumerate(raw_dets)
+    ]
 
     # if len(detections) != 0:
     user_data.detections_queue.put(
@@ -270,27 +338,17 @@ def main():
     start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
     event = threading.Event()
-    user_data = user_app_callback_class(detections_queue)
-    user_data.use_frame = True
 
     arg_parser = get_default_parser()
     arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
-    app = App(
-        app_callback,
-        user_data,
-        parser=arg_parser,
-        video_output_chunk_length_s=10,
-        video_output_path='./_DEBUG',
-        video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True)
 
     control_config = {
         'confidence_min': 0.4,
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_min': 0.5,
-        'thrust_max': 0.5,
+        'thrust_min': 0.7,
+        'thrust_max': 0.9,
         'thrust_dynamic': False,
         'thrust_proportional_to_target_size' : False,
 
@@ -298,14 +356,15 @@ def main():
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'estimation_3d': True,
-        'estimation_3d_mode': 'wls',
-        'follow_target_position_ned': False,
+        'estimation_3d_method': 'cluster',
+        'estimation_3d_use_initial_velocity' : True,
+
         'estimation_lookahead_frames': 2,
         'estimation_lookahead_dynamic': True,
         'estimation_lookahead_dynamic_sqrt': True,
         'estimation_lookahead_dynamic_frames_near':   1,
-        'estimation_lookahead_dynamic_frames_medium': 2,
-        'estimation_lookahead_dynamic_frames_far':    4, # can't be too big -- estimation will be too FAAR away.
+        'estimation_lookahead_dynamic_frames_medium': 1,
+        'estimation_lookahead_dynamic_frames_far':    1, # can't be too big -- estimation will be too FAAR away.
 
         'pd_coeff_p': 3,
         'pd_coeff_d': 0, #-1, # -1
@@ -333,27 +392,63 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        # 'target_size_m' : XY(1.8, 1.8),             # shahed small
+        'target_size_m' : XY(1.8, 1.8),             # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
-        'target_size_m' : XY(1_000_000, 1_000_000), # SUN
+        # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
         'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
         'inertia_correction_limits': XY(1, 1),
         'inertia_correction_min_speed_ms': 5,
 
         'safe_takeoff_period_ns': 300_000_000,
-        'delay_takeof_until_n_detection_frames' : 20,
+        'delay_takeof_until_n_detection_frames' : 30,
 
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
 
+        'follow_target_position_ned' : False,
+
         # params to go to the drone config ("drone_" prefix is stripped then)
         'drone_use_set_attitude': False,
+        'drone_min_lift_fraction': 0.1,
         'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
         'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
 
-        'DEBUG': DEBUG
+        'DEBUG': DEBUG,
+
+        'bytetrack_track_thresh':   0.3,
+        'bytetrack_det_thresh':     0.35,
+        'bytetrack_match_thresh':   0.3,
+        'bytetrack_track_buffer':   30,
+        'bytetrack_frame_rate':     30,
+        'bytetrack_match_max_dist':    0.2,
+        'bytetrack_recovery_max_dist': None,
+        'bytetrack_nms_thresh':        0.3,
+        'bytetrack_nms_dist_thresh':   0.06,
     }
+
+    bytetracker = BYTETracker(
+        track_thresh=control_config['bytetrack_track_thresh'],
+        det_thresh=control_config['bytetrack_det_thresh'],
+        match_thresh=control_config['bytetrack_match_thresh'],
+        track_buffer=control_config['bytetrack_track_buffer'],
+        frame_rate=control_config['bytetrack_frame_rate'],
+        match_max_dist=control_config.get('bytetrack_match_max_dist'),
+        recovery_max_dist=control_config.get('bytetrack_recovery_max_dist'),
+        nms_thresh=control_config.get('bytetrack_nms_thresh'),
+        nms_dist_thresh=control_config.get('bytetrack_nms_dist_thresh'),
+    )
+    user_data = user_app_callback_class(detections_queue, bytetracker)
+    user_data.use_frame = True
+
+    app = App(
+        app_callback,
+        user_data,
+        parser=arg_parser,
+        video_output_chunk_length_s=10,
+        video_output_path='./_DEBUG',
+        video_filename_base=f"RAW_{start_time_str}",
+        record_videos=True)
 
     logger.info("!!! Config: %s", control_config)
     if DEBUG:

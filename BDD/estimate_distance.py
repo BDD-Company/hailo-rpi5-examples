@@ -7,7 +7,48 @@ from enum import Enum
 import cv2
 import numpy as np
 
-from helpers import XY
+from helpers import XY, Rect
+
+
+def measure_object_size(frame: np.ndarray, bbox: Rect) -> 'XY | None':
+    """Return the normalized (0-1) size of the object inside bbox.
+
+    Uses inverted Otsu threshold on grayscale — reliable for dark objects
+    on bright backgrounds (drone against sky). Returns None on failure;
+    caller should fall back to bbox.size.
+    """
+    if frame is None:
+        return None
+
+    fh, fw = frame.shape[:2]
+
+    if fw == 0 or fh == 0:
+        return None
+
+    x1 = int(np.clip(bbox.p1.x * fw, 0, fw - 1))
+    y1 = int(np.clip(bbox.p1.y * fh, 0, fh - 1))
+    x2 = int(np.clip(bbox.p2.x * fw, 0, fw))
+    y2 = int(np.clip(bbox.p2.y * fh, 0, fh))
+
+    if (x2 - x1) < 4 or (y2 - y1) < 4:
+        return None
+
+    crop = frame[y1:y2, x1:x2]
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+    bbox_px_area = (x2 - x1) * (y2 - y1)
+    area = cv2.contourArea(largest)
+    if area < 0.05 * bbox_px_area or area > 0.90 * bbox_px_area:
+        return None
+
+    _, _, w, h = cv2.boundingRect(largest)
+    return XY(w / fw, h / fh)
 
 
 def measure_object_size(frame: np.ndarray, bbox: 'Rect') -> 'XY | None':
@@ -54,7 +95,7 @@ def measure_object_size(frame: np.ndarray, bbox: 'Rect') -> 'XY | None':
 def estimate_distance(
     target_size_m: XY,
     frame_angular_size_deg: XY,
-    target_frame_size : float
+    target_frame_size : XY
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     Estimate range to a target from known true size and image occupancy.
@@ -71,13 +112,12 @@ def estimate_distance(
         if size_m <= 0 or fov_deg <= 0 or not (0.0 < frac <= 1.0):
             return None
 
-        angular_size_rad = math.radians(fov_deg * frac)
-
-        # Prevent tan(0) or near-zero instability
-        if angular_size_rad <= 0:
+        half_fov_rad = math.radians(fov_deg / 2.0)
+        if half_fov_rad <= 0:
             return None
 
-        return size_m / (2.0 * math.tan(angular_size_rad / 2.0))
+        # Pinhole (rectilinear) projection: pixel position ∝ tan(angle)
+        return size_m / (2.0 * frac * math.tan(half_fov_rad))
 
     dx = one_axis(target_size_m.x, frame_angular_size_deg.x, target_frame_size.x)
     dy = one_axis(target_size_m.y, frame_angular_size_deg.y, target_frame_size.y)
@@ -106,9 +146,9 @@ def estimate_distance_class(
     if d is None:
         return None, None
 
-    if d < max_size * 5:
+    if d < max_size * 2:
         return DistanceClass.NEAR, d
-    if d < max_size * 20:
+    if d < max_size * 10:
         return DistanceClass.MEDIUM, d
     else:
         return DistanceClass.FAR, d
