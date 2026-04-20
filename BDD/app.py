@@ -44,6 +44,7 @@ import logging
 logger = logging.getLogger(__name__)
 global_logger = logger # a hack
 DEBUG = False
+USE_TRACKER = True
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
@@ -123,7 +124,6 @@ def _match_track_to_detection(
             best_idx = i
     return best_idx
 
-USE_TRACKER = False
 
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_callback_class):
@@ -347,7 +347,7 @@ def main():
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_min': 0.5,
+        'thrust_min': 0.55,
         'thrust_max': 0.9,
         'thrust_dynamic': False,
         'thrust_proportional_to_target_size' : False,
@@ -361,13 +361,13 @@ def main():
 
         'estimation_lookahead_frames': 1,
         'estimation_lookahead_dynamic': True,
-        'estimation_lookahead_dynamic_sqrt': False,
-	'estimation_lookahead_dynamic_factor': 0.1,
+        'estimation_lookahead_dynamic_sqrt': True,
+	    'estimation_lookahead_dynamic_factor': 0.1,
         'estimation_lookahead_dynamic_frames_near':   0,
         'estimation_lookahead_dynamic_frames_medium': 0,
         'estimation_lookahead_dynamic_frames_far':    0, # can't be too big -- estimation will be too FAAR away.
 
-        'pd_coeff_p': 3,
+        'pd_coeff_p': 4,
         'pd_coeff_d': 0, #-1, # -1
         'pd_coeff_p_safe_min': 0.6,
         'pd_coeff_p_min' : 0.5,
@@ -393,7 +393,7 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m': XY(x=1.2, y=1.2),            # shahed small
+        'target_size_m': XY(x=1.3, y=1.3),            # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
         # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
@@ -402,7 +402,7 @@ def main():
         'inertia_correction_min_speed_ms': 5,
 
         'safe_takeoff_period_ns': 300_000_000,
-        'delay_takeof_until_n_detection_frames' : 30,
+        'delay_takeof_until_n_detection_frames' : 10,
 
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
@@ -417,11 +417,15 @@ def main():
 
         'DEBUG': DEBUG,
 
-        'bytetrack_track_thresh': 0.2,
-        'bytetrack_det_thresh': 0.2,
-        'bytetrack_match_thresh': 0.3,
-        'bytetrack_track_buffer': 10,
-        'bytetrack_frame_rate': 30
+        'bytetrack_track_thresh':   0.3,
+        'bytetrack_det_thresh':     0.35,
+        'bytetrack_match_thresh':   0.3,
+        'bytetrack_track_buffer':   30,
+        'bytetrack_frame_rate':     30,
+        'bytetrack_match_max_dist':    0.2,
+        'bytetrack_recovery_max_dist': None,
+        'bytetrack_nms_thresh':        0.3,
+        'bytetrack_nms_dist_thresh':   0.06,
     }
 
     bytetracker = BYTETracker(
@@ -430,6 +434,10 @@ def main():
         match_thresh=control_config['bytetrack_match_thresh'],
         track_buffer=control_config['bytetrack_track_buffer'],
         frame_rate=control_config['bytetrack_frame_rate'],
+        match_max_dist=control_config.get('bytetrack_match_max_dist'),
+        recovery_max_dist=control_config.get('bytetrack_recovery_max_dist'),
+        nms_thresh=control_config.get('bytetrack_nms_thresh'),
+        nms_dist_thresh=control_config.get('bytetrack_nms_dist_thresh'),
     )
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True
