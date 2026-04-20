@@ -31,7 +31,7 @@ from debug_app_callback import (
 import app as app_module
 from app import app_callback, user_app_callback_class, seen_frames
 from debug_drone_controller import parse_log, find_files_in_dir, MockMonotonicNs
-from bytetrack import BYTETracker
+from bytetrack import BYTETracker, STrack
 from flight_debugger import VideoReader
 from OverwriteQueue import OverwriteQueue
 
@@ -120,6 +120,8 @@ def render(
         _render_frames(style, track_history, frame_images, frame_ids, width, height, out_path)
     elif output_mode == "video":
         _render_video(style, track_history, frame_images, frame_ids, width, height, out_path)
+    else:
+        raise ValueError(f"Unknown output_mode: {output_mode!r}")
 
 
 def _blank(width: int, height: int) -> np.ndarray:
@@ -286,12 +288,12 @@ def main():
         config_dict = {}
 
     bytetrack_config = {
-        "track_thresh":   config_dict.pop("bytetrack_track_thresh",   0.3),
-        "det_thresh":     config_dict.pop("bytetrack_det_thresh",     0.35),
-        "match_thresh":   config_dict.pop("bytetrack_match_thresh",   0.3),
-        "track_buffer":   config_dict.pop("bytetrack_track_buffer",   30),
-        "frame_rate":     config_dict.pop("bytetrack_frame_rate",     30),
-        "match_max_dist": config_dict.pop("bytetrack_match_max_dist", 0.2),
+        "track_thresh":   config_dict.get("bytetrack_track_thresh",   0.3),
+        "det_thresh":     config_dict.get("bytetrack_det_thresh",     0.35),
+        "match_thresh":   config_dict.get("bytetrack_match_thresh",   0.3),
+        "track_buffer":   config_dict.get("bytetrack_track_buffer",   30),
+        "frame_rate":     config_dict.get("bytetrack_frame_rate",     30),
+        "match_max_dist": config_dict.get("bytetrack_match_max_dist", 0.2),
     }
 
     # Open video
@@ -313,6 +315,7 @@ def main():
     install_mock_patches()
     seen_frames.clear()
 
+    STrack.reset_counter()
     bytetracker = BYTETracker(**bytetrack_config)
     user_data   = user_app_callback_class(OverwriteQueue(maxsize=1), bytetracker)
     user_data.use_frame = True
