@@ -8,6 +8,7 @@ Usage:
         --output video --style boxes --out trajectories.mp4
 """
 
+import argparse
 import sys
 import types
 import time as real_time_module
@@ -234,7 +235,6 @@ def collect_track_history(
 
 
 def parse_args():
-    import argparse
     p = argparse.ArgumentParser(
         description="Visualize BYTETracker trajectories from a recorded flight log.",
     )
