@@ -505,7 +505,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             skipped_detetions = 0
             frame_capture_timestampt_ns = detections_obj.meta.capture_timestamp_ns or None
 
-            telemetry_dict : dict = await drone.get_telemetry_dict()
+            telemetry_dict : dict = drone.get_telemetry_dict_cached()
             if DEBUG and not all(telemetry_dict.values()) and DEBUG_TELEMETRY_DICT:
                 telemetry_dict = DEBUG_TELEMETRY_DICT
                 logger.warning("!!! USING DEBUG TELEMETRY data !!!")
