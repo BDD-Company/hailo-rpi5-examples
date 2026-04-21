@@ -62,6 +62,17 @@ def mavsdk_msg_to_dict(msg):
 
 class DroneMover():
 
+    # Default per-aspect MAVLink stream rates (Hz) requested from PX4.
+    # Anything listed here is attempted with `telemetry.set_rate_*`; failures
+    # are logged and swallowed (PX4 default rate remains in effect for that
+    # aspect). Override via drone config key 'telemetry_rates_hz'.
+    DEFAULT_TELEMETRY_RATES_HZ: dict[str, float] = {
+        "attitude_euler":  100.0,
+        "odometry":         50.0,
+        "imu":             100.0,
+        "landed_state":      5.0,
+    }
+
     def __init__(self, drone_connection_string, config : dict|None = None) -> None:
         super().__init__()
         self.drone = System()
@@ -239,10 +250,60 @@ class DroneMover():
         # await asyncio.sleep(1)
         # logging.debug("offboard mode: %s", await self.offboard.is_active())
 
+        await self._configure_telemetry_rates()
         await self._ensure_telemetry_cache()
         # await self.start_upside_down_monitor()
 
         return
+
+
+    async def _configure_telemetry_rates(self, rates_hz: dict[str, float] | None = None) -> None:
+        """
+        Ask PX4 to publish selected telemetry streams at a specified rate.
+
+        Maps each aspect name to its `telemetry.set_rate_*` method; failures
+        are logged per-aspect and don't abort the other requests. A stream
+        we couldn't bump simply keeps PX4's default rate.
+
+        `rates_hz` defaults to DEFAULT_TELEMETRY_RATES_HZ merged with
+        `self.config['telemetry_rates_hz']` (the latter wins).
+        """
+        effective: dict[str, float] = dict(self.DEFAULT_TELEMETRY_RATES_HZ)
+        effective.update(self.config.get('telemetry_rates_hz', {}) or {})
+        if rates_hz:
+            effective.update(rates_hz)
+
+        tele = self.drone.telemetry
+        setters: dict[str, object] = {
+            "attitude_euler":        getattr(tele, "set_rate_attitude_euler",        None),
+            "attitude_quaternion":   getattr(tele, "set_rate_attitude_quaternion",   None),
+            "imu":                   getattr(tele, "set_rate_imu",                   None),
+            "odometry":              getattr(tele, "set_rate_odometry",              None),
+            "position":              getattr(tele, "set_rate_position",              None),
+            "velocity_ned":          getattr(tele, "set_rate_velocity_ned",          None),
+            "position_velocity_ned": getattr(tele, "set_rate_position_velocity_ned", None),
+            "landed_state":          getattr(tele, "set_rate_landed_state",          None),
+        }
+
+        for aspect, hz in effective.items():
+            if hz is None or hz <= 0:
+                logger.debug("telemetry rate for %s skipped (hz=%s)", aspect, hz)
+                continue
+
+            setter = setters.get(aspect)
+            if setter is None:
+                logger.warning("no set_rate_* for aspect '%s', keeping PX4 default", aspect)
+                continue
+
+            try:
+                await setter(float(hz))
+                logger.info("telemetry '%s' rate set to %.1f Hz", aspect, hz)
+            except Exception as e:
+                # Typical causes: TelemetryError ("COMMAND_DENIED"/"NO_SYSTEM"),
+                # PX4 refuses due to link bandwidth, or aspect unsupported on
+                # this firmware. In all cases, fall back to PX4 default.
+                logger.warning("failed to set '%s' rate to %.1f Hz: %s "
+                               "(keeping PX4 default)", aspect, hz, e)
 
 
     async def _ensure_telemetry_cache(self, aspects: list[str] | None = None):
