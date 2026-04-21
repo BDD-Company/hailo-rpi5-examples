@@ -139,7 +139,7 @@ def make_debug_info_dict(frame_id, telemetry_dict : dict, frame_metadata):
         'captured at': frame_metadata.capture_timestamp_ns,
         'detection delay': detection_delay
     }
-    result['state'] = telemetry_dict.get('landed_state', '')
+    result['state'] = f"{telemetry_dict.get('landed_state', '')} == {telemetry_dict.get('flight_mode', '')}"
 
     return result
 
