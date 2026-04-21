@@ -187,7 +187,14 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     THRUST_MIN      = control_config.pop('thrust_min', 0.5)
     THRUST_TAKEOFF  = control_config.pop('thrust_takeoff', 0.5)
     THRUST_DYNAMIC  = control_config.pop('thrust_dynamic', False)
-    THRUST_PROPORTIONAL_TO_TARGET_SIZE = control_config.pop('thrust_proportional_to_target_size', False)
+
+    THRUST_PROPORTIONAL_TO_DISTANCE = control_config.pop('thrust_proportional_to_distance', False)
+    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF        = control_config.pop('thrust_proportional_to_distance_near_coeff', 1.0)
+    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF      = control_config.pop('thrust_proportional_to_distance_medium_coeff', 1.0)
+    THRUST_PROPORTIONAL_TO_DISTANCE_FAR_COEFF         = control_config.pop('thrust_proportional_to_distance_far_coeff', 1.0)
+    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M = control_config.pop('thrust_proportional_to_distance_medium_distance_m', 15)
+    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M   = control_config.pop('thrust_proportional_to_distance_near_distance_m', 7)
+
 
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
@@ -741,21 +748,26 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                             mode += " RED "
                             #pd_coeff_p
 
-                    if THRUST_PROPORTIONAL_TO_TARGET_SIZE:
-                        if estimated_distance_m < 7:
-                            thrust *= 1.1
+                    if THRUST_PROPORTIONAL_TO_DISTANCE:
+                        if estimated_distance_m > THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M:
+                            thrust *= THRUST_PROPORTIONAL_TO_DISTANCE_FAR_COEFF
+                            # pd_coeff_p *= 1
+                            extra += ' FAR'
+
+                        # MEDIUM
+                        if estimated_distance_m < THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M:
+                            thrust *= THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF
                             pd_coeff_p *= 1.1
+                            extra += ' MEDIUM'
 
-                            if estimated_distance_m < 5:
-                                thrust *= 1.1
-                                pd_coeff_p *= 1.1
+                        # NEAR
+                        if estimated_distance_m < THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M:
+                            thrust *= THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF
+                            pd_coeff_p *= 1.1
+                            extra += ' NEAR'
+                            pass
 
-                            if estimated_distance_m < 3:
-                                thrust *= 1.1
-                                pd_coeff_p *= 1.1
-                                pass
-
-                            extra += f' WE ARE SOOOO CLOSE, BOOSTING thrust to: {thrust}, p to: {pd_coeff_p} '
+                        extra += f' changing thrust to: {thrust}, p to: {pd_coeff_p} '
 
 
                 logger.info("Setting new command regulator coeffs P=%s D=%s", pd_coeff_p, PD_COEFF_D)

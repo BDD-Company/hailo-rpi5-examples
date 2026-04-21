@@ -350,7 +350,12 @@ def main():
         'thrust_min': 0.55,
         'thrust_max': 0.9,
         'thrust_dynamic': False,
-        'thrust_proportional_to_target_size' : False,
+        'thrust_proportional_to_distance' : True,
+        'thrust_proportional_to_distance_far_coeff' : 1,
+        'thrust_proportional_to_distance_medium_distance_m' :  15,
+        'thrust_proportional_to_distance_medium_coeff' : 0.9,
+        'thrust_proportional_to_distance_near_distance_m' : 7,
+        'thrust_proportional_to_distance_near_coeff' : 1.1,
 
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
@@ -408,6 +413,7 @@ def main():
         'aim_point_max_offset': XY(0.5, 0.6),
 
         'follow_target_position_ned' : False,
+
 
         # params to go to the drone config ("drone_" prefix is stripped then)
         'drone_use_set_attitude': False,

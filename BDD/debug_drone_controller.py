@@ -519,7 +519,7 @@ def main():
             'thrust_min': 0.5,
             'thrust_max': 0.5,
             'thrust_dynamic': False,
-            'thrust_proportional_to_target_size': False,
+            'thrust_proportional_to_distance': False,
             'target_lost_fade_per_frame': 0.99,
             'target_estimator_clear_history_after_target_lost_frames': 3,
             'estimation_use_3d': False,
