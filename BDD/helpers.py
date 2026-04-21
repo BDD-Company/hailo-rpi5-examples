@@ -6,6 +6,7 @@ from functools import wraps
 import inspect
 import datetime
 import math
+import sys
 
 import numpy as np
 
@@ -365,7 +366,7 @@ def log_execution_time(logger=logging.debug, threshold = datetime.timedelta(micr
     return wrapper_outer
 
 
-def configure_logging(level=logging.NOTSET, process_prefix=""):
+def configure_logging(level=logging.NOTSET, process_prefix="", log_file_name=""):
     class _ExcludeGrpcCallInitFilter(logging.Filter):
         def filter(self, record):
             return not (record.module == "_call")
@@ -378,7 +379,12 @@ def configure_logging(level=logging.NOTSET, process_prefix=""):
     process_prefix = f"{process_prefix}-" if process_prefix else ""
     logging.basicConfig(level=level,
         format="%(asctime)s.%(msecs)03d [" + process_prefix + "%(threadName)s] @ { %(filename)s:%(lineno)s : %(funcName)20s() } <%(levelname)s> :\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S")
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.FileHandler(log_file_name),
+            logging.StreamHandler(sys.stdout)   # Writes to standard output
+        ]
+    )
 
     exclude_grpc_call_init_filter = _ExcludeGrpcCallInitFilter()
     for handler in logging.getLogger().handlers:
