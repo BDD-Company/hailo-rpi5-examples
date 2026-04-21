@@ -102,7 +102,8 @@ class DroneMover():
             # "health",
             "odometry",
             "landed_state",
-            "imu"
+            "imu",
+            "flight_mode",
             # "attitude_angular_velocity_body",
         ]
         self._telemetry_tasks : dict[str, asyncio.Task] = {}
