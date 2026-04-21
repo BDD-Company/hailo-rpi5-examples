@@ -44,7 +44,7 @@ import logging
 logger = logging.getLogger(__name__)
 global_logger = logger # a hack
 DEBUG = False
-USE_TRACKER = True
+USE_TRACKER = False
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
@@ -347,26 +347,26 @@ def main():
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_min': 0.55,
+        'thrust_min': 0.6,
         'thrust_max': 0.9,
         'thrust_dynamic': False,
-        'thrust_proportional_to_distance' : True,
+        'thrust_proportional_to_distance' : False,
         'thrust_proportional_to_distance_far_coeff' : 1,
-        'thrust_proportional_to_distance_medium_distance_m' :  15,
-        'thrust_proportional_to_distance_medium_coeff' : 0.9,
-        'thrust_proportional_to_distance_near_distance_m' : 7,
-        'thrust_proportional_to_distance_near_coeff' : 1.1,
+        'thrust_proportional_to_distance_medium_distance_m' : 20,
+        'thrust_proportional_to_distance_medium_coeff'      : 0.8,
+        'thrust_proportional_to_distance_near_distance_m'   : 10,
+        'thrust_proportional_to_distance_near_coeff'        : 1.5,
 
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
-        'estimation_3d': True,
+        'estimation_3d': False,
         'estimation_3d_method': 'numpy',
         'estimation_3d_use_initial_velocity' : False,
 
-        'estimation_lookahead_frames': 1,
-        'estimation_lookahead_dynamic': True,
-        'estimation_lookahead_dynamic_sqrt': True,
+        'estimation_lookahead_frames': 3,
+        'estimation_lookahead_dynamic': False,
+        'estimation_lookahead_dynamic_sqrt': False,
 	    'estimation_lookahead_dynamic_factor': 0.1,
         'estimation_lookahead_dynamic_frames_near':   0,
         'estimation_lookahead_dynamic_frames_medium': 0,
