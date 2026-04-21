@@ -67,9 +67,9 @@ class DroneMover():
     # are logged and swallowed (PX4 default rate remains in effect for that
     # aspect). Override via drone config key 'telemetry_rates_hz'.
     DEFAULT_TELEMETRY_RATES_HZ: dict[str, float] = {
-        "attitude_euler":  100.0,
+        "attitude_euler":   50.0,
         "odometry":         50.0,
-        "imu":             100.0,
+        "imu":              50.0,
         "landed_state":      5.0,
     }
 
@@ -272,6 +272,7 @@ class DroneMover():
         effective.update(self.config.get('telemetry_rates_hz', {}) or {})
         if rates_hz:
             effective.update(rates_hz)
+            logger.info("effective telemetry refresh rates: %s", rates_hz)
 
         tele = self.drone.telemetry
         setters: dict[str, object] = {
@@ -287,7 +288,7 @@ class DroneMover():
 
         for aspect, hz in effective.items():
             if hz is None or hz <= 0:
-                logger.debug("telemetry rate for %s skipped (hz=%s)", aspect, hz)
+                logger.warning("telemetry rate for %s skipped (hz=%s)", aspect, hz)
                 continue
 
             setter = setters.get(aspect)
