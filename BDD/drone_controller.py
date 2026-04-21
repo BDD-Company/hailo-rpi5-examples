@@ -332,9 +332,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     #logger.debug("!!! detections_queue: %s (%s items)", detections_queue, detections_queue.qsize())
 
     # debug wrapper to collect executed commands
-    if False: # allow logging of commands send to the drone
-        # drone = debug_collect_call_info(drone, history_max_size=3)
-        pass
+    if True: # allow logging of commands send to the drone
+        drone = debug_collect_call_info(drone, history_max_size=3)
+        # pass
     else:
         # just to keep existing code itact, remove when no longer needed
         drone.clear_command_history = lambda : None
