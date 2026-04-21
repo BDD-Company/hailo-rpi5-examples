@@ -433,6 +433,13 @@ ENDNET
     else
         echo "  No valid networks selected — skipping WiFi config."
     fi
+
+    sudo tee -a "/etc/NetworkManager/conf.d/90-wifi-powersave-off.conf" > /dev/null <<ENDNET
+[connection]
+wifi.powersave=2
+ENDNET
+
+
 }
 
 # configure_px4() {
