@@ -379,7 +379,7 @@ def configure_logging(level=logging.NOTSET, process_prefix="", log_file_name="")
     process_prefix = f"{process_prefix}-" if process_prefix else ""
     logging.basicConfig(level=level,
         format="%(asctime)s.%(msecs)03d [" + process_prefix + "%(threadName)s] @ { %(filename)s:%(lineno)s : %(funcName)20s() } <%(levelname)s> :\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        datefmt="_DEBUG/%Y-%m-%d %H:%M:%S.log",
         handlers=[
             logging.FileHandler(log_file_name),
             logging.StreamHandler(sys.stdout)   # Writes to standard output
