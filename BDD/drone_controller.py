@@ -794,7 +794,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 #         angle_to_target = new_angle_to_target
 
                 debug_info["mode"] = mode
-                if not moving and target_estimator.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES:
+                if not takeoff_time_ns and target_estimator.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES:
                     logger.warning("Delaying takeoff for %s frames (now have %s)", DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES, target_estimator.history_size())
                     pass
                 else:
