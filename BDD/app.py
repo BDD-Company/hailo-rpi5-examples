@@ -315,7 +315,8 @@ def main():
     env_path_str = str(env_file)
     os.environ["HAILO_ENV_FILE"] = env_path_str
 
-    configure_logging(level = logging.DEBUG)
+    start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    configure_logging(level = logging.DEBUG, log_file_name=start_time_str)
     # shushing verbose loggers
     logging.getLogger("picamera2").setLevel(logging.WARNING)
     logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
@@ -335,7 +336,6 @@ def main():
     detections_queue = OverwriteQueue(maxsize=20)
     output_queue = OverwriteQueue(maxsize=200)
 
-    start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
     event = threading.Event()
 
