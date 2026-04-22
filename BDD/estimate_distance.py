@@ -10,18 +10,12 @@ import numpy as np
 from helpers import XY, Rect
 
 
-def measure_object_size(frame: np.ndarray, bbox: Rect) -> 'XY | None':
-    """Return the normalized (0-1) size of the object inside bbox.
-
-    Uses inverted Otsu threshold on grayscale — reliable for dark objects
-    on bright backgrounds (drone against sky). Returns None on failure;
-    caller should fall back to bbox.size.
-    """
+def _extract_largest_object_contour(frame: np.ndarray, bbox: Rect) -> tuple[np.ndarray, int, int, int, int] | None:
+    """Extract largest segmented contour inside bbox using inverted Otsu threshold."""
     if frame is None:
         return None
 
     fh, fw = frame.shape[:2]
-
     if fw == 0 or fh == 0:
         return None
 
@@ -47,8 +41,34 @@ def measure_object_size(frame: np.ndarray, bbox: Rect) -> 'XY | None':
     if area < 0.05 * bbox_px_area or area > 0.90 * bbox_px_area:
         return None
 
+    return largest, x1, y1, fw, fh
+
+
+def measure_object_size(frame: np.ndarray, bbox: Rect) -> 'XY | None':
+    """Return the normalized (0-1) size of the object inside bbox.
+
+    Uses inverted Otsu threshold on grayscale — reliable for dark objects
+    on bright backgrounds (drone against sky). Returns None on failure;
+    caller should fall back to bbox.size.
+    """
+    extracted = _extract_largest_object_contour(frame, bbox)
+    if extracted is None:
+        return None
+
+    largest, _x1, _y1, fw, fh = extracted
     _, _, w, h = cv2.boundingRect(largest)
     return XY(w / fw, h / fh)
+
+
+def measure_object_circle_center(frame: np.ndarray, bbox: Rect) -> 'XY | None':
+    """Return normalized center of the inscribed circle for segmented object in bbox."""
+    extracted = _extract_largest_object_contour(frame, bbox)
+    if extracted is None:
+        return None
+
+    largest, x1, y1, fw, fh = extracted
+    (cx, cy), _radius = cv2.minEnclosingCircle(largest)
+    return XY((x1 + cx) / fw, (y1 + cy) / fh)
 
 
 def estimate_distance(
