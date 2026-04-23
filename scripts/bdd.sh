@@ -25,11 +25,14 @@ set -ex
     export HAILO_MODEL="/home/bdd/models/ball_11n_640_v1.hef" # detects SUN
     #export HAILO_MODEL="/home/bdd/models/2026-04-13_11n_sh_v3.hef" # detects SUN
 
+    [[ -e "${HAILO_MODEL}" ]] || { echo "HAILO_MODEL does not exist: ${HAILO_MODEL}" >&2; exit 1; }
 
-    python \
-        ./BDD/app.py \
-        --hef-path "${HAILO_MODEL}" \
-        -i rpi \
-        "$@"
+    # bind to 3rd core, 2 is bound to px4, effective only IF `isolcpus=2,3` is set in cmdline.txt
+    sudo taskset -c 3 \
+        python \
+            ./BDD/app.py \
+            --hef-path "${HAILO_MODEL}" \
+            -i rpi \
+            "$@"
 
 ) 2>&1 | tee "./_DEBUG/BDD_${start_time}.log"

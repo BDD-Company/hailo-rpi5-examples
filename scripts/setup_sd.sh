@@ -170,7 +170,7 @@ configure_boot() {
 
     # cmdline.txt — must be a single line.
     step "Writing cmdline.txt..."
-    printf 'console=tty1 root=PARTUUID=%s rootfstype=ext4 fsck.repair=yes rootwait elevator=deadline isolcpus=2 quiet splash plymouth.ignore-serial-consoles cfg80211.ieee80211_regdom=PL quiet\n' \
+    printf 'console=tty1 root=PARTUUID=%s rootfstype=ext4 fsck.repair=yes rootwait elevator=deadline isolcpus=2,3 quiet splash plymouth.ignore-serial-consoles cfg80211.ieee80211_regdom=PL quiet\n' \
         "$partuuid" | sudo tee "$BOOTFS/cmdline.txt" > /dev/null
 
     # config.txt — main body.
