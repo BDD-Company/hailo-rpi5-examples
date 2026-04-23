@@ -125,12 +125,46 @@ flash_sd() {
         esac
         sync
         step "Flash complete."
+
+        expand_rootfs "$dev"
     else
         step "No --image specified; skipping flash (assuming $dev already has RPi OS)."
     fi
 
     # 7. Detect partitions and mount.
     mount_partitions "$dev"
+}
+
+# -- Resize rootfs to fill unallocated space ----------------------------------
+# Grows partition 2 (rootfs) to the end of the disk and expands the ext4
+# filesystem to match. Safe to run on a freshly flashed card.
+expand_rootfs() {
+    local dev="$1"
+    local root_part
+    if [[ "$dev" =~ (mmcblk|nvme) ]]; then
+        root_part="${dev}p2"
+    else
+        root_part="${dev}2"
+    fi
+
+    step "Resizing rootfs partition ($root_part) to fill disk..."
+    sudo partprobe "$dev" 2>/dev/null || true
+    sleep 1
+
+    # Grow the partition to the end of the disk. growpart exits 1 when no
+    # resize is needed; parted -s resizepart with 100% always succeeds.
+    if command -v growpart >/dev/null 2>&1; then
+        sudo growpart "$dev" 2 || true
+    else
+        sudo parted -s "$dev" resizepart 2 100%
+    fi
+
+    sudo partprobe "$dev" 2>/dev/null || true
+    sleep 1
+
+    # e2fsck returns 1 when it fixes recoverable errors — not a failure.
+    sudo e2fsck -f -y "$root_part" || true
+    sudo resize2fs "$root_part"
 }
 
 # -- Partition detection and mount ---------------------------------------------
