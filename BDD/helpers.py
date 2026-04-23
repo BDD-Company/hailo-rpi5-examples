@@ -379,7 +379,7 @@ def configure_logging(level=logging.NOTSET, process_prefix="", log_file_name="")
     process_prefix = f"{process_prefix}-" if process_prefix else ""
     logging.basicConfig(level=level,
         format="%(asctime)s.%(msecs)03d [" + process_prefix + "%(threadName)s] @ { %(filename)s:%(lineno)s : %(funcName)20s() } <%(levelname)s> :\t%(message)s",
-        datefmt="_DEBUG/%Y-%m-%d %H:%M:%S.log",
+        datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
             logging.FileHandler(log_file_name),
             logging.StreamHandler(sys.stdout)   # Writes to standard output
@@ -471,7 +471,13 @@ class LoggerWithPrefix(logging.LoggerAdapter):
 
 
 def _safe_repr(value, max_length: int = 160) -> str:
-    text = str(value)
+    if type(value) == float:
+        text = f"{value:.3f}"
+    elif type(value) == dict and len(value) > 3:
+        text = f"dict({len(value)} items)"
+    else:
+        text = str(value)
+
     if len(text) <= max_length:
         return text
     return text[: max_length - 3] + "..."
