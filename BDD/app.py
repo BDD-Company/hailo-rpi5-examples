@@ -282,7 +282,12 @@ class App(GStreamerDetectionApp):
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000_000_000
         return f'''
-            videoconvert \
+            queue name=raw_videoconvert_input_queue \
+                leaky=downstream \
+                max-size-buffers=100 \
+                max-size-bytes=0 \
+                max-size-time=10000000000 \
+            ! videoconvert \
             ! x264enc \
                 key-int-max=30 \
                 bframes=0 \
@@ -291,7 +296,7 @@ class App(GStreamerDetectionApp):
             ! h264parse config-interval=1 \
             ! queue name=raw_video_output_queue \
                 leaky=downstream \
-                max-size-buffers=300 \
+                max-size-buffers=100 \
                 max-size-bytes=0 \
                 max-size-time=10000000000 \
             ! splitmuxsink \
