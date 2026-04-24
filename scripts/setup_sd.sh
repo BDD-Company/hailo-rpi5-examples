@@ -19,6 +19,8 @@
 #                      configure_ssh      — SSH enable, authorized_keys, sshd config
 #                      configure_network  — static IP
 #                      configure_wifi     — WiFi (wpa_supplicant.conf)
+#                      configure_secure_sources    — tmpfs mounts for ephemeral dirs
+#                      configure_no_coredumps — disable coredumps system-wide
 #                      configure_px4      — PX4 autostart systemd service
 #
 # Credentials written to SD:
@@ -476,6 +478,114 @@ ENDNET
 
 }
 
+# -- tmpfs mounts for ephemeral directories ------------------------------------
+# Writes /etc/fstab entries that mount selected paths as tmpfs, so their
+# contents do not survive reboot/poweroff. tmpfs size is per-filesystem, not
+# shared across mounts — each entry below reserves up to its listed size.
+#
+# Threat model: contents of these directories must be unrecoverable from an
+# offline inspection of the SD card. That requires the mount points to exist
+# empty on disk before anything writes to those paths; otherwise writes land
+# on the underlying ext4 and a later tmpfs mount only hides them from a
+# running system, not from a pulled-out card. So we pre-create the mount
+# points here, and wipe their contents if a prior run (or repo clone) left
+# anything behind.
+configure_secure_sources() {
+    local fstab="$ROOTFS/etc/fstab"
+    local marker="# tmpfs ephemeral mounts (setup_sd.sh)"
+
+    [[ ! -f "$fstab" ]] && die "$fstab not found — rootfs not mounted?"
+
+    # Single source of truth for both the wipe loop and the fstab entries.
+    # Each row: <path relative to rootfs root> <tmpfs size>.
+    local mounts=(
+        "home/bdd/hailo-rpi5-examples/BDD      64M"
+        "home/bdd/hailo-rpi5-examples/.git     16M"
+        "home/bdd/hailo-rpi5-examples/scripts  16M"
+        "home/bdd/models                       128M"
+    )
+
+    # Pre-create (or empty) each mount point so nothing can sneak onto the
+    # underlying disk between flash and first tmpfs mount.
+    local entry rel_path size d
+    for entry in "${mounts[@]}"; do
+        read -r rel_path size <<< "$entry"
+        d="$ROOTFS/$rel_path"
+        if [[ -d "$d" ]]; then
+            step "Shredding and wiping existing contents of /$rel_path"
+            # Shred regular files to overwrite their data blocks on ext4, then
+            # remove remaining entries (symlinks, empty dirs, specials).
+            # -n 1 + -z: one random pass + a final zero pass (fast; ext4's
+            # data=ordered writes file contents outside the journal so a
+            # single pass is effective). -f forces write on read-only files.
+            sudo find "$d" -mindepth 1 -type f -exec shred -f -n 1 -z -u {} +
+            sudo find "$d" -mindepth 1 -depth -delete
+        else
+            step "Creating empty mount point /$rel_path"
+            sudo mkdir -p "$d"
+        fi
+    done
+    sudo chown -R 1000:1000 "$ROOTFS/home/bdd"
+
+    if grep -qF "$marker" "$fstab"; then
+        step "tmpfs entries already present in $fstab — skipping fstab edit."
+    else
+        step "Adding tmpfs entries to /etc/fstab..."
+        {
+            printf '\n%s\n' "$marker"
+            for entry in "${mounts[@]}"; do
+                read -r rel_path size <<< "$entry"
+                printf 'tmpfs  /%-44s tmpfs  defaults,nofail,size=%s,mode=0755,uid=1000,gid=1000  0 0\n' \
+                    "$rel_path" "$size"
+            done
+        } | sudo tee -a "$fstab" > /dev/null
+    fi
+
+    step "Linking ~/bdd.sh -> hailo-rpi5-examples/scripts/bdd.sh"
+    sudo ln -sfn hailo-rpi5-examples/scripts/bdd.sh "$ROOTFS/home/bdd/bdd.sh"
+    sudo chown -h 1000:1000 "$ROOTFS/home/bdd/bdd.sh"
+}
+
+
+# -- Disable coredumps ---------------------------------------------------------
+# Coredumps of a crashed process contain its in-memory state, including any
+# sensitive data loaded from tmpfs-backed source directories. A dump lands on
+# persistent ext4 (/var/lib/systemd/coredump or /var/crash) and would survive
+# an SD-card pull, defeating the tmpfs protection.
+#
+# Shut them down at three layers so no path routes a dump to disk:
+#   1. systemd-coredump: Storage=none (drop after capture instead of saving)
+#   2. PAM limits: hard core=0 for every user (ulimit before exec)
+#   3. Kernel sysctl: core_pattern=|/bin/false + suid_dumpable=0
+configure_no_coredumps() {
+    step "Disabling coredumps (systemd + limits + sysctl)..."
+
+    # 1. systemd-coredump drop-in.
+    sudo mkdir -p "$ROOTFS/etc/systemd/coredump.conf.d"
+    sudo tee "$ROOTFS/etc/systemd/coredump.conf.d/disable.conf" > /dev/null <<'ENDSYSTEMD'
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+ENDSYSTEMD
+
+    # 2. PAM limits: hard cap = 0 for every user, including root.
+    sudo mkdir -p "$ROOTFS/etc/security/limits.d"
+    sudo tee "$ROOTFS/etc/security/limits.d/50-disable-coredumps.conf" > /dev/null <<'ENDLIMITS'
+*       hard    core    0
+root    hard    core    0
+ENDLIMITS
+
+    # 3. Kernel-level sysctl. core_pattern piped to /bin/false means the
+    #    kernel has nowhere to write a dump even if a process's rlimit allows
+    #    one. suid_dumpable=0 prevents setuid/setgid processes from dumping.
+    sudo mkdir -p "$ROOTFS/etc/sysctl.d"
+    sudo tee "$ROOTFS/etc/sysctl.d/50-disable-coredumps.conf" > /dev/null <<'ENDSYSCTL'
+kernel.core_pattern=|/bin/false
+fs.suid_dumpable=0
+ENDSYSCTL
+}
+
+
 # configure_px4() {
 #     local rootfs="$1"
 #     local startup_script="$rootfs/home/bdd/px4_startup.sh"
@@ -567,7 +677,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate and resolve --only value (allows partial names without 'configure_' prefix).
-ONLY_FUNCS=(flash_sd configure_boot configure_user configure_ssh configure_network configure_wifi configure_px4)
+ONLY_FUNCS=(flash_sd configure_boot configure_user configure_ssh configure_network configure_wifi configure_secure_sources configure_no_coredumps)
 if [[ -n "$ONLY" ]]; then
     resolved=""
     # 1. Exact match.
@@ -630,10 +740,18 @@ if [[ -n "$ONLY" ]]; then
             mount_partitions "$DEVICE"
             configure_wifi
             ;;
-        configure_px4)
+        configure_secure_sources)
             mount_partitions "$DEVICE"
-            configure_px4
+            configure_secure_sources
             ;;
+        configure_no_coredumps)
+            mount_partitions "$DEVICE"
+            configure_no_coredumps
+            ;;
+        # configure_px4)
+        #     mount_partitions "$DEVICE"
+        #     configure_px4
+        #     ;;
     esac
 else
     flash_sd          "$DEVICE" "$IMAGE"
@@ -642,6 +760,8 @@ else
     configure_ssh
     configure_network "$STATIC_IP" "$GATEWAY"
     configure_wifi    auto
+    configure_secure_sources
+    configure_no_coredumps
     # configure_px4     "$ROOTFS"
 fi
 
@@ -673,9 +793,15 @@ if [[ -n "$ONLY" ]]; then
         configure_wifi)
             echo "  wpa_supplicant.conf updated"
             ;;
-        configure_px4)
-            echo "  px4_autostart.service installed and enabled"
+        configure_secure_sources)
+            echo "  /etc/fstab updated with tmpfs mounts (under 512 MiB total)"
             ;;
+        configure_no_coredumps)
+            echo "  Coredumps disabled (systemd + limits + sysctl)"
+            ;;
+        # configure_px4)
+        #     echo "  px4_autostart.service installed and enabled"
+        #     ;;
     esac
 else
     echo "SD card ready."
