@@ -321,7 +321,7 @@ def main():
     os.environ["HAILO_ENV_FILE"] = env_path_str
 
     start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    configure_logging(level = logging.DEBUG, log_file_name=start_time_str)
+    configure_logging(level = logging.DEBUG, log_file_name=f"BDD_{start_time_str}.log")
     # shushing verbose loggers
     logging.getLogger("picamera2").setLevel(logging.WARNING)
     logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
