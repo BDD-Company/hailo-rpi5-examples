@@ -42,9 +42,9 @@ class _FrameQueuePusher:
         self._stop.set()
         self._thr.join(timeout=timeout)
 
-    def submit(self, frame: np.ndarray):
+    def submit(self, frame_id, frame: np.ndarray):
         try:
-            self._q.put_nowait(frame.copy())
+            self._q.put_nowait((frame_id, frame))
         except queue.Full:
             # Drop (real-time bias)
             pass
@@ -52,9 +52,13 @@ class _FrameQueuePusher:
     def _run(self):
         while not self._stop.is_set():
             try:
-                frame = self._q.get(timeout=0.01)
+                frame_id, frame = self._q.get(timeout=0.01)
             except queue.Empty:
                 continue
+
+            assert type(frame_id) == int
+            assert type(frame) == np.ndarray
+
             appsrc = self._get_appsrc()
             if appsrc is not None:
                 try:
@@ -276,9 +280,9 @@ class RecorderSink(interfaces.FrameSinkInterface):
         self._pusher.start()
         logger.info(f"[RecorderSink] Writing ~{self.segment_ns/1e9:.0f}s MKV segments to {pattern_path}")
 
-    def process_frame(self, frame):
+    def process_frame(self, frame_id, frame):
         _validate_frame(frame, self.w, self.h)
-        self._pusher.submit(frame)
+        self._pusher.submit(frame_id, frame)
 
         # logger.debug("[RecorderSink] %s / %s\tpushed frame %s", self.out_dir, self.filename_base, frame.id)
 
@@ -337,7 +341,7 @@ if __name__ == "__main__":
             # feed both (in your app, just call .submit on the subset you use)
 
             frame = img
-            sink.process_frame(frame)
+            sink.process_frame(frame_id, frame)
             # rtsp.process_frame(frame)
             # rec.process_frame(frame)
 

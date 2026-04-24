@@ -21,6 +21,6 @@ class MultiSink(FrameSinkInterface):
         for s in self.sinks:
             s.stop()
 
-    def process_frame(self, frame):
+    def process_frame(self, frame_id, frame):
         for s in self.sinks:
-            s.process_frame(frame)
+            s.process_frame(frame_id, frame)

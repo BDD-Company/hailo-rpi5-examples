@@ -244,7 +244,7 @@ def draw_predicted_pos(frame, target_pos : XY, from_pos : XY, color, line_thickn
         )
 
 
-def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
+def annotate_frame_with_detection_info(detection_dict) -> np.ndarray|None:
     # output = {
     #                 'detections' : detections_obj,
     #                 'selected' : selected_detection,
@@ -405,6 +405,7 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
 
 def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
 
+    frame_id = None
     frame = None
     try:
         # Get the first frame and figure out image dimensions
@@ -422,12 +423,13 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
                 if detection_dict is None:
                     detection_dict = frame_queue.get()
                 annotated_frame = annotate_frame_with_detection_info(detection_dict)
+                frame_id = -1 if detection_dict is None else detection_dict['detections'].frame_id
 
                 if annotated_frame is not None:
-                    sink.process_frame(annotated_frame)
+                    sink.process_frame(frame_id, annotated_frame)
 
             except:
-                frame_id = -1 if detection_dict is None else detection_dict['detections'].frame_id
+                # frame_id = -1 if detection_dict is None else detection_dict['detections'].frame_id
                 logger.exception("exception while processing frame %d", frame_id, exc_info=True, stack_info=True)
                 break
 

@@ -40,7 +40,7 @@ class OpenCVShowImageSink(FrameSinkInterface):
         self._input_handler = input_handler
 
 
-    def process_frame(self, frame):
+    def process_frame(self, frame_id, frame):
         # current_fps = self._fps_counter.on_frame()
         if frame is None:
             return

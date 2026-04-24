@@ -378,7 +378,7 @@ class InteractiveDisplaySink:
         cv2.setWindowTitle(self._window_name, self._window_title)
         cv2.resizeWindow(self._window_name, frame_size[0], frame_size[1])
 
-    def process_frame(self, frame):
+    def process_frame(self, frame_id, frame):
         cv2.imshow(self._window_name, frame)
         while True:
             wait_s = 0 if not self._autoplay else 1
