@@ -474,12 +474,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 skipped_detetions += 1
                 drone.clear_command_history()
                 if not FOLLOW_TARGET_POSITION_NED:
-                    if skipped_detetions > 20 and skipped_detetions < 30:
-                        await drone.standstill()
-                    elif skipped_detetions > 30:
-                        await drone.idle()
+                    if skipped_detetions > 20:
+                        if not moving and skipped_detetions > 30:
+                            await drone.idle()
+                        else:
+                            await drone.standstill(thrus=THRUST_TAKEOFF - 0.05)
 
-                if skipped_detetions > 4:
+                if skipped_detetions > 10:
                     logger.warning("No frames (%d times), no detections, input queue empty? prev action: %s", skipped_detetions, drone.last_command())
 
                 continue
