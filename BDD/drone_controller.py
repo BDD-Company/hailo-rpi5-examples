@@ -268,6 +268,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
+    ESTIMATION_LOOKAHEAD_DYNAMIC_MAX           = control_config.pop('estimation_lookahead_dynamic_max', 8)
 
     FOLLOW_TARGET_POSITION_NED                 = control_config.pop('follow_target_position_ned', False)
 
@@ -607,7 +608,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     if ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT:
                         estimate_lookeahead_frames = int(math.sqrt(distance)) + 1
 
-                    if ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR:
+                    if ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR is not None:
                         estimate_lookeahead_frames = int(distance * ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR)
 
                     if estimated_distance_class == DistanceClass.FAR:
@@ -616,6 +617,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         estimate_lookeahead_frames += ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM
                     elif estimated_distance_class == DistanceClass.NEAR:
                         estimate_lookeahead_frames += ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
+
+                    estimate_lookeahead_frames = clamp(0, estimate_lookeahead_frames, ESTIMATION_LOOKAHEAD_DYNAMIC_MAX)
 
                 estimate_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * estimate_lookeahead_frames
                 estimate_at_ns = current_frame_timestamp_ns + estimate_delta_ns
