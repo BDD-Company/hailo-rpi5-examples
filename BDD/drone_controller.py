@@ -605,10 +605,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 if ESTIMATION_LOOKAHEAD_DYNAMIC:
                     distance = estimated_distance_m if estimated_distance_m else 1
                     if ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT:
-                        estimate_lookeahead_frames = int(math.sqrt(distance)) + 1
-
-                    if ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR:
-                        estimate_lookeahead_frames = int(distance * ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR)
+                        estimate_lookeahead_frames = math.sqrt(distance)
+                    elif ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR is not None:
+                        estimate_lookeahead_frames = distance * ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR
 
                     if estimated_distance_class == DistanceClass.FAR:
                         estimate_lookeahead_frames += ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR
@@ -617,8 +616,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     elif estimated_distance_class == DistanceClass.NEAR:
                         estimate_lookeahead_frames += ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
 
-                estimate_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * estimate_lookeahead_frames
-                estimate_at_ns = current_frame_timestamp_ns + estimate_delta_ns
+                estimate_delta_ns = int((current_frame_timestamp_ns - prev_frame_timestamp_ns) * estimate_lookeahead_frames)
+                estimate_at_ns = int(current_frame_timestamp_ns + estimate_delta_ns)
                 estimate_mode = ''
                 target_relative_pos_old = target_relative_pos
 
@@ -698,9 +697,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 estimate_mode = target_estimator.describe_prev_estimation() if target_estimator else None
                 if estimate_mode:
-                    mode += f' *{estimate_mode}:{estimate_lookeahead_frames}f '
+                    mode += f' *{estimate_mode}:{estimate_lookeahead_frames:.1f}f '
 
-                    logger.debug("!!! %s estimated new target pos %s (was %s), for +%sms (%d frames)",
+                    logger.debug("!!! %s estimated new target pos %s (was %s), for +%sms (%.1f frames)",
                             estimate_mode,
                             target_relative_pos,
                             target_relative_pos_old,

@@ -373,8 +373,8 @@ def main():
 
         'estimation_lookahead_frames': 3,
         'estimation_lookahead_dynamic': False,
-        'estimation_lookahead_dynamic_sqrt': False,
-	    'estimation_lookahead_dynamic_factor': 0.1,
+        'estimation_lookahead_dynamic_sqrt': True,
+	    'estimation_lookahead_dynamic_factor': None,
         'estimation_lookahead_dynamic_frames_near':   0,
         'estimation_lookahead_dynamic_frames_medium': 0,
         'estimation_lookahead_dynamic_frames_far':    0, # can't be too big -- estimation will be too FAAR away.
