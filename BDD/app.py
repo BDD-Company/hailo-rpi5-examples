@@ -364,13 +364,14 @@ def main():
         'estimation_3d_method': 'numpy',
         'estimation_3d_use_initial_velocity' : False,
 
-        'estimation_lookahead_frames': 3,
-        'estimation_lookahead_dynamic': False,
-        'estimation_lookahead_dynamic_sqrt': False,
-	    'estimation_lookahead_dynamic_factor': 0.1,
-        'estimation_lookahead_dynamic_frames_near':   0,
-        'estimation_lookahead_dynamic_frames_medium': 0,
-        'estimation_lookahead_dynamic_frames_far':    0, # can't be too big -- estimation will be too FAAR away.
+        'estimation_lookahead_frames': 1,
+        'estimation_lookahead_dynamic': True,
+        'estimation_lookahead_dynamic_max' : 5,
+        'estimation_lookahead_dynamic_sqrt': True,
+	    'estimation_lookahead_dynamic_factor': None,
+        'estimation_lookahead_dynamic_frames_near':   1,
+        'estimation_lookahead_dynamic_frames_medium': 2,
+        'estimation_lookahead_dynamic_frames_far':    3, # can't be too big -- estimation will be too FAAR away.
 
         'pd_coeff_p': 4,
         'pd_coeff_d': 0, #-1, # -1
