@@ -21,7 +21,15 @@ from telemetry_position import (
 )
 # from drone_killswitch import kill_on_rc_switch_on_channel
 from helpers import Detection, Detections, MoveCommand, STOP
-from gpiozero import CPUTemperature, Device
+try:
+    from gpiozero import CPUTemperature
+except:
+    class _MockCPUTemperature:
+        def __init__(self):
+            self.temperature = None
+    CPUTemperature = _MockCPUTemperature
+
+
 
 
 from helpers import (
@@ -550,7 +558,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK
             )
             detection = picked if picked is not None else Detection()
-            logger.info(f"!!!!! Temperature: {cpu.temperature}°C")
+            logger.info(f"!!!!! CPU Temperature: {cpu.temperature}°C")
             if detection.confidence >= CONFIDENCE_MIN:
                 if BYTETRACK_TARGET_LOCK and detection.track_id is not None:
                     locked_track_id = detection.track_id
