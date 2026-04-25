@@ -303,13 +303,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     pd_coeff_p_dynamic_stage = None
 
     cpu = CPUTemperature()
-    logger.warning(f"PRE START CPU Temperature: {cpu.temperature}°C")
+    logger.info(f"PRE START CPU Temperature: {cpu.temperature}°C")
 
 
     drone = DroneMover(drone_connection_string, drone_config)
     logger.debug("starting up drone... with %s, config: %s", drone_connection_string, drone_config)
 
-    logger.warning(f"POST START CPU Temperature: {cpu.temperature}°C")
+    logger.info(f"POST START CPU Temperature: {cpu.temperature}°C")
 
     # udp_port = 14560
     # killdrone_thread = threading.Thread(
@@ -552,7 +552,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK
             )
             detection = picked if picked is not None else Detection()
-            logger.warning(f"!!!!! Temperature: {cpu.temperature}°C")
+            logger.info(f"!!!!! CPU Temperature: {cpu.temperature}°C")
             if detection.confidence >= CONFIDENCE_MIN:
                 if BYTETRACK_TARGET_LOCK and detection.track_id is not None:
                     locked_track_id = detection.track_id
