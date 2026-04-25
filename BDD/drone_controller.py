@@ -195,7 +195,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M = control_config.pop('thrust_proportional_to_distance_medium_distance_m', 15)
     THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M   = control_config.pop('thrust_proportional_to_distance_near_distance_m', 7)
 
-
+    TARGET_LOST_RESTORE_TO_LEVEL_FLIGHT_AFTER_FRAMES  = control_config.pop('target_lost_restore_to_level_flight_after_frames', 3)
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
 
@@ -834,7 +834,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     locked_track_id = None
 
                 if seen_target:
-                    if FOLLOW_TARGET_POSITION_NED:
+                    frames_since_lost_target = frame_id - last_seen_target_at_frame
+                    if frames_since_lost_target > TARGET_LOST_RESTORE_TO_LEVEL_FLIGHT_AFTER_FRAMES:
+                        logger.warning("!!!!! Target lost for %u, hovering...", frames_since_lost_target)
+                        await drone.standstill()
+
+                    elif FOLLOW_TARGET_POSITION_NED:
                         if target_position_prev_ned is not None:
                             await drone.move_to_target_ned(target_position_prev_ned, telemetry_dict)
                             moving = True

@@ -363,6 +363,8 @@ def main():
         'thrust_proportional_to_distance_near_coeff'        : 1.5,
 
         'target_lost_fade_per_frame': 0.99,
+        'target_lost_restore_to_level_flight_after_frames' : 20,
+
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'estimation_3d': False,

@@ -20,6 +20,7 @@ logger = logging.getLogger("BDD_drone")
 DEFAULT_TAKEOFF_ALTITUDE_M = 10
 SAFE_TILT_DEG = 180
 IDLE_THRUST = 0.01
+HOVER_THRUST = 0.2
 UPSIDE_DOWN_ANGLE_DEG = 120
 UPSIDE_DOWN_HOLD_S = 1.0
 
@@ -529,7 +530,17 @@ class DroneMover():
         # )
 
     async def standstill(self) -> None:
-        await self.move_to_target_zenith_async(0, 0, IDLE_THRUST * 2)
+        # await self.move_to_target_zenith_async(0, 0, IDLE_THRUST * 2)
+        drone_offboard = debug_collect_call_info(self.drone.offboard)
+        await drone_offboard.set_attitude(
+            Attitude(
+                roll_deg=0,
+                pitch_deg=0,
+                yaw_deg=0,
+                thrust_value=HOVER_THRUST,
+            )
+        )
+        logger.info("!!! executing: %s ", drone_offboard.last_command())
 
 
     async def idle(self):
