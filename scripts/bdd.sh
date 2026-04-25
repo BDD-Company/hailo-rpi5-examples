@@ -12,7 +12,7 @@ set -ex
 (
 #    export G_MESSAGES_DEBUG=all
 #    export GST_TRACERS="latency;stats"
-#    export GST_DEBUG="GST_TRACER:7"
+   export GST_DEBUG=2 #"GST_TRACER:7"
     export DISPLAY=:0
     export HAILO_MODEL="/home/bdd/models/2026-04-07_11n_ball_v2.hef"
     #export HAILO_MODEL="/home/bdd/models/ball_11n_640_v1.hef" # detects SUN
