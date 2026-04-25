@@ -528,8 +528,8 @@ class DroneMover():
         #     )
         # )
 
-    async def standstill(self) -> None:
-        await self.move_to_target_zenith_async(0, 0, IDLE_THRUST * 2)
+    async def standstill(self, thrust = IDLE_THRUST * 2) -> None:
+        await self.move_to_target_zenith_async(0, 0, thrust)
 
 
     async def idle(self):
