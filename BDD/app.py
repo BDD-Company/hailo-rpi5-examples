@@ -444,17 +444,23 @@ def main():
     global USE_TRACKER
     USE_TRACKER = False
 
+    byte_track_config_params = {k.removeprefix('bytetrack_') : v for k, v in control_config.items() if k.startswith('bytetrack_')}
+    for k in byte_track_config_params:
+        control_config.pop('bytetrack_' + k)
+
     bytetracker = BYTETracker(
-        track_thresh=control_config['bytetrack_track_thresh'],
-        det_thresh=control_config['bytetrack_det_thresh'],
-        match_thresh=control_config['bytetrack_match_thresh'],
-        track_buffer=control_config['bytetrack_track_buffer'],
-        frame_rate=control_config['bytetrack_frame_rate'],
-        match_max_dist=control_config.get('bytetrack_match_max_dist'),
-        recovery_max_dist=control_config.get('bytetrack_recovery_max_dist'),
-        nms_thresh=control_config.get('bytetrack_nms_thresh'),
-        nms_dist_thresh=control_config.get('bytetrack_nms_dist_thresh'),
+        **byte_track_config_params
+        # track_thresh=control_config['bytetrack_track_thresh'],
+        # det_thresh=control_config['bytetrack_det_thresh'],
+        # match_thresh=control_config['bytetrack_match_thresh'],
+        # track_buffer=control_config['bytetrack_track_buffer'],
+        # frame_rate=control_config['bytetrack_frame_rate'],
+        # match_max_dist=control_config.get('bytetrack_match_max_dist'),
+        # recovery_max_dist=control_config.get('bytetrack_recovery_max_dist'),
+        # nms_thresh=control_config.get('bytetrack_nms_thresh'),
+        # nms_dist_thresh=control_config.get('bytetrack_nms_dist_thresh'),
     )
+
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True
 
