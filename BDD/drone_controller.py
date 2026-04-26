@@ -502,9 +502,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         # OR operator to take over and land it safely.
                         await drone.standstill(THRUST_HOVER)
 
-                # 17 is arbitrary to reduce log noise
-                if skipped_detetions % 17 == 0:
-                    logger.warning(
+                # 53 is arbitrary to reduce log noise
+                if skipped_detetions % 53 == 0:
+                    logger_log_to = logger.warning
+                    if skipped_detetions > 500:
+                        logger_log_to = logger.error
+
+                    logger_log_to(
                             "No frames (%d times), no detections, input queue empty? prev action: %s",
                             skipped_detetions,
                             drone.last_command()
