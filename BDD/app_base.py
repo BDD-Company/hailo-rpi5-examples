@@ -165,6 +165,7 @@ class GStreamerApp:
         self.pipeline = None
         self.loop = None
         self.threads = []
+        self.shutdown_callbacks = []
         self.error_occurred = False
         self.pipeline_latency = 0  # milliseconds; 0 = use each element's natural minimum latency; if frames are dropped or Gstreamer is stalled, then set to 50
 
@@ -281,9 +282,96 @@ class GStreamerApp:
             self.shutdown()
 
 
+    def _add_buffer_counter_probe(self, element_name, pad_name='src'):
+        """Install a pad probe that increments self.buffer_counters[(element_name, pad_name)]
+        for every buffer that crosses pad_name of element_name. Used to identify where
+        buffers stop flowing in the pipeline when a stall is suspected."""
+        if not hasattr(self, 'buffer_counters'):
+            self.buffer_counters = {}
+        element = self.pipeline.get_by_name(element_name)
+        if element is None:
+            logger.warning("Cannot add buffer counter probe: element %r not found", element_name)
+            return
+        pad = element.get_static_pad(pad_name)
+        if pad is None:
+            logger.warning("Cannot add buffer counter probe: pad %r of %r not found", pad_name, element_name)
+            return
+        key = (element_name, pad_name)
+        self.buffer_counters[key] = 0
+        def _probe_cb(pad, info, _user):
+            self.buffer_counters[key] += 1
+            return Gst.PadProbeReturn.OK
+        pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
+
+    def _log_pipeline_health(self):
+        """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)
+        and current-level-buffers for every named GstQueue. If the deepest probe (last
+        registered) hasn't advanced in a while, dump a dot file for offline inspection."""
+        now = time.monotonic()
+        prev_counts = getattr(self, '_health_prev_counts', {})
+        prev_time = getattr(self, '_health_prev_time', now)
+        elapsed = max(now - prev_time, 1e-6)
+
+        counter_parts = []
+        for key, count in self.buffer_counters.items():
+            delta = count - prev_counts.get(key, 0)
+            elem_name, pad_name = key
+            counter_parts.append(f"{elem_name}:{pad_name}={count}(+{delta},{delta/elapsed:.1f}fps)")
+        logger.info("pipeline buffer counters (over %.2fs): %s", elapsed, " | ".join(counter_parts))
+
+        queue_parts = []
+        it = self.pipeline.iterate_elements()
+        while True:
+            ok, element = it.next()
+            if ok != Gst.IteratorResult.OK:
+                break
+            factory = element.get_factory()
+            if factory is None or factory.get_name() != 'queue':
+                continue
+            qname = element.get_name()
+            buffers = element.get_property('current-level-buffers')
+            max_buffers = element.get_property('max-size-buffers')
+            queue_parts.append(f"{qname}={buffers}/{max_buffers}")
+        logger.info("pipeline queue levels (current/max buffers): %s", " ".join(queue_parts))
+
+        # Stall detection: track the LAST registered probe (the deepest one — typically identity_callback)
+        if self.buffer_counters:
+            tail_key = next(reversed(self.buffer_counters))
+            tail_delta = self.buffer_counters[tail_key] - prev_counts.get(tail_key, 0)
+            stall_ticks = getattr(self, '_health_stall_ticks', 0)
+            if tail_delta == 0 and self.buffer_counters[tail_key] > 0:
+                stall_ticks += 1
+                logger.error(
+                    "STALL: %s:%s has not advanced in %.2fs (%d consecutive ticks). count=%d",
+                    tail_key[0], tail_key[1], elapsed, stall_ticks, self.buffer_counters[tail_key],
+                )
+                if stall_ticks == 1:
+                    # Dump dot once per stall episode so we don't spam files.
+                    Gst.debug_bin_to_dot_file(self.pipeline, Gst.DebugGraphDetails.VERBOSE,
+                                              f"stall_{int(now)}")
+                    logger.error("STALL: dumped pipeline dot to GST_DEBUG_DUMP_DOT_DIR/stall_%d.dot", int(now))
+            else:
+                stall_ticks = 0
+            self._health_stall_ticks = stall_ticks
+
+        self._health_prev_counts = dict(self.buffer_counters)
+        self._health_prev_time = now
+        return True  # keep timeout active
+
+    def add_shutdown_callback(self, callback):
+        """Register a callable invoked at the start of shutdown(), before the pipeline is torn down.
+        Use it to signal worker threads (e.g. push a STOP sentinel into their input queue)
+        so they can exit even if a producer thread (e.g. picamera) is stuck."""
+        self.shutdown_callbacks.append(callback)
+
     def shutdown(self, signum=None, frame=None):
         logger.info("Shutting down... Hit Ctrl-C again to force quit.")
         signal.signal(signal.SIGINT, signal.SIG_DFL)
+        for cb in self.shutdown_callbacks:
+            try:
+                cb()
+            except Exception:
+                logger.exception("Error in shutdown callback %s", cb)
         self.pipeline.set_state(Gst.State.PAUSED)
         GLib.usleep(100000)  # 0.1 second delay
 
@@ -368,8 +456,28 @@ class GStreamerApp:
             display_process = multiprocessing.Process(target=display_user_data_frame, args=(self.user_data,))
             display_process.start()
 
+        # Buffer-counter probes at strategic points in the pipeline. The order matters:
+        # _log_pipeline_health() treats the LAST registered probe as the "deepest" one
+        # for stall detection. So register them upstream → downstream.
+        for elem_name in (
+            'app_source',
+            'inference_wrapper_input_q',
+            'inference_hailonet',
+            'inference_hailofilter',
+            'inference_wrapper_output_q',
+            'identity_callback',
+        ):
+            self._add_buffer_counter_probe(elem_name, 'src')
+        # Periodic pipeline health snapshot (buffer counts, queue levels, stall detection).
+        GLib.timeout_add_seconds(2, self._log_pipeline_health)
+
         if self.source_type == RPI_NAME_I:
-            picam_thread = threading.Thread(target=picamera_thread, args=(self.pipeline, self.video_width, self.video_height, self.video_format))
+            on_picam_failure = lambda: GLib.idle_add(self.shutdown)
+            picam_thread = threading.Thread(
+                target=picamera_thread,
+                args=(self.pipeline, self.video_width, self.video_height, self.video_format),
+                kwargs={'on_failure': on_picam_failure},
+            )
             self.threads.append(picam_thread)
             picam_thread.start()
 
@@ -410,7 +518,7 @@ class GStreamerApp:
                 sys.exit(0)
 
 
-def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 20, picamera_controls_initial = None, picamera_controls_per_frame_callback = None):
+def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 20, picamera_controls_initial = None, picamera_controls_per_frame_callback = None, on_failure=None, capture_timeout_s = 1.0, slow_capture_warn_s = 0.2, alive_log_every_n_frames = 100):
     appsrc = pipeline.get_by_name("app_source")
     appsrc.set_property("is-live", True)
     appsrc.set_property("format", Gst.Format.TIME)
@@ -462,6 +570,8 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
         first_frame_timestamp_ns = 0
         prev_frame_timestamp_ns = 0
         logger.debug("picamera_process started")
+        last_alive_log_monotonic = time.monotonic()
+        last_alive_log_frame_count = 0
         while True:
             # TODO(vnemkov): only set if camera actually supports those:
             # Must set AF params AFTER picam2.start() above, otherwise it doesn't work
@@ -476,7 +586,24 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
                 if picamera_controls:
                     apply_controls(picamera_controls)
 
-            request = picam2.capture_request()
+            capture_started_monotonic = time.monotonic()
+            try:
+                request = picam2.capture_request(wait=capture_timeout_s)
+            except TimeoutError:
+                logger.error(
+                    "picam2.capture_request timed out after %.2fs at frame #%d — camera appears stalled, exiting picamera_thread",
+                    capture_timeout_s, frame_count,
+                )
+                if on_failure is not None:
+                    on_failure()
+                break
+
+            capture_elapsed_s = time.monotonic() - capture_started_monotonic
+            if capture_elapsed_s > slow_capture_warn_s:
+                logger.warning(
+                    "picam2.capture_request took %.3fs (frame #%d) — exceeds %.3fs threshold; camera may be stalling",
+                    capture_elapsed_s, frame_count, slow_capture_warn_s,
+                )
 
             frame_data = None
             frame_meta = None
@@ -490,6 +617,8 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
             # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
             if frame_data is None:
                 logger.error("Failed to capture frame #%s.", frame_count)
+                if on_failure is not None:
+                    on_failure()
                 break
 
             # Convert framontigue data if necessary
@@ -526,8 +655,22 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
                 break
             if ret != Gst.FlowReturn.OK:
                 logger.error("Failed to push buffer: %s", ret)
+                if on_failure is not None:
+                    on_failure()
                 break
             frame_count += 1
+
+            if alive_log_every_n_frames and frame_count % alive_log_every_n_frames == 0:
+                now_monotonic = time.monotonic()
+                window_s = now_monotonic - last_alive_log_monotonic
+                window_frames = frame_count - last_alive_log_frame_count
+                window_fps = window_frames / window_s if window_s > 0 else 0.0
+                logger.info(
+                    "picamera_thread alive: pushed %d frames so far, last %d frames in %.2fs (%.1f fps)",
+                    frame_count, window_frames, window_s, window_fps,
+                )
+                last_alive_log_monotonic = now_monotonic
+                last_alive_log_frame_count = frame_count
 
 
 def disable_qos(pipeline):

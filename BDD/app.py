@@ -28,7 +28,7 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 from bytetrack import BYTETracker
 
-from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
+from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
@@ -517,6 +517,7 @@ def main():
             name = "Drone"
         )
     action_thread.start()
+    app.add_shutdown_callback(lambda: detections_queue.put(STOP))
 
     sink = MultiSink([
         # RtspStreamerSink(30, 8554),
