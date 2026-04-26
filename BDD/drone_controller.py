@@ -480,8 +480,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             logger = global_logger
             # logger.debug("!!! awaiting detection... ")
             try:
-                # Keep the asyncio loop responsive while waiting for a queue item.
-                r : Detections = detections_queue.get(0.01)
+                # OverwriteQueue.get is a synchronous threading.Condition.wait — calling it
+                # directly from this asyncio coroutine would block the event loop and starve
+                # the mavsdk telemetry consumer tasks (50 Hz attitude/odometry/imu streams),
+                # eventually overflowing mavsdk_server's user-callback queue and freezing
+                # cached telemetry. Offload the blocking wait to the default thread executor
+                # so the loop stays free to drain telemetry while we wait.
+                r : Detections = await asyncio.to_thread(detections_queue.get, 0.01)
                 if r is STOP or r is None:
                     logger.info("stopping")
                     break
