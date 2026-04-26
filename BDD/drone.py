@@ -199,6 +199,7 @@ class DroneMover():
         await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
         # it is requirement of PX4 to receive setpoints for at least 1 second before switching to offboard
         await asyncio.sleep(1)
+        await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
 
         logger.debug("Entering Offboard mode...")
         try:
