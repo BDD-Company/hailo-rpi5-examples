@@ -671,6 +671,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 estimate_at_ns = current_frame_timestamp_ns + estimate_delta_ns
                 estimate_mode = ''
                 target_relative_pos_old = target_relative_pos
+                target_center = None
 
                 if ESTIMATION_3D and estimated_distance_m is not None and drone_pose:
                     target_estimator = target_estimator_3d
