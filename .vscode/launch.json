@@ -45,8 +45,9 @@
             // ],
             "args": [
                 "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/BDD_20260418-155222.log",
-                "--video",
-                "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/RAW_20260418-155223_00000.mkv",
+                "--video", "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/RAW_20260418-155223_00000.mkv",
+                "--video", "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/RAW_20260418-155223_00001.mkv",
+                "--video", "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/RAW_20260418-155223_00002.mkv",
                 "--autoplay"
             ],
             "env": {

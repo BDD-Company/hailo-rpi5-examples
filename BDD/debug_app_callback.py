@@ -254,6 +254,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class SingleOrRepeatedPathAction(argparse.Action):
+    """Store one Path as Path, repeated occurrences as list[Path]."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        current = getattr(namespace, self.dest, None)
+        if current is None:
+            setattr(namespace, self.dest, values)
+        elif isinstance(current, list):
+            current.append(values)
+        else:
+            setattr(namespace, self.dest, [current, values])
+
+
 # ===================================================================
 # Mock GStreamer / Hailo objects
 # ===================================================================
@@ -492,7 +505,7 @@ def main():
         help="Path to a log file (.log) or debug directory",
     )
     parser.add_argument(
-        "--video", type=Path, default=None,
+        "--video", type=Path, action=SingleOrRepeatedPathAction, default=None,
         help="Path to video file(s) or directory with video files",
     )
     parser.add_argument(
@@ -565,13 +578,15 @@ def main():
         'follow_target_position_ned': True,
         'estimation_3d': True,
         'estimation_3d_method': 'numpy',
-        'estimation_lookahead_frames': 1,
-        'estimation_lookahead_dynamic': True,
+        'estimation_lookahead_frames': 10,
+        'estimation_lookahead_dynamic': False,
         'estimation_lookahead_dynamic_sqrt': False,
         'estimation_lookahead_dynamic_factor': 0.1,
         'estimation_lookahead_dynamic_frames_near': 0,
         'estimation_lookahead_dynamic_frames_medium': 0,
         'estimation_lookahead_dynamic_frames_far': 0,
+        'optical_methods_to_refine_target_size_and_center' : True,
+        'adjust_aim_point_at_edge_of_frame': True,
     })
 
     if args.params:
