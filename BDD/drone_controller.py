@@ -176,7 +176,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     START_TIME_MS = time.monotonic_ns() / 1000_000
 
     global DEBUG
-    DEBUG           = control_config.pop('DEBUG', False)
+    DEBUG                = control_config.pop('DEBUG', False)
     DEBUG_TELEMETRY_DICT = control_config.pop('debug_telemetry_dict', None)
 
     logger.debug("!!!!! DEBUG state: %s", DEBUG)
@@ -186,6 +186,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     THRUST_MAX      = control_config.pop('thrust_max', 0.5)
     THRUST_MIN      = control_config.pop('thrust_min', 0.5)
     THRUST_TAKEOFF  = control_config.pop('thrust_takeoff', 0.5)
+    THRUST_HOVER    = control_config.pop('thrust_hover', 0.5)
+
     THRUST_DYNAMIC  = control_config.pop('thrust_dynamic', False)
 
     THRUST_PROPORTIONAL_TO_DISTANCE = control_config.pop('thrust_proportional_to_distance', False)
@@ -268,7 +270,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
     ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MAX           = control_config.pop('estimation_lookahead_dynamic_frames_max', 8)
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MAX    = control_config.pop('estimation_lookahead_dynamic_frames_max', 8)
 
     FOLLOW_TARGET_POSITION_NED                 = control_config.pop('follow_target_position_ned', False)
 
@@ -304,7 +306,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     cpu = CPUTemperature()
     logger.info(f"PRE START CPU Temperature: {cpu.temperature}°C")
-
 
     drone = DroneMover(drone_connection_string, drone_config)
     logger.debug("starting up drone... with %s, config: %s", drone_connection_string, drone_config)
@@ -463,27 +464,36 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             # logger.debug("!!! awaiting detection... ")
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
-                r : Detections = detections_queue.get(0.02)
+                r : Detections = detections_queue.get(0.01)
                 if r is STOP or r is None:
                     logger.info("stopping")
                     break
                 detections_obj = r
 
             except Empty:
-                # No detections, not even frame with ID and image
+                # No detections, not even frame with ID
                 skipped_detetions += 1
-                drone.clear_command_history()
-                if not FOLLOW_TARGET_POSITION_NED:
-                    if skipped_detetions > 20:
-                        if not moving and skipped_detetions > 30:
-                            await drone.idle()
-                        else:
-                            await drone.standstill(thrust=THRUST_TAKEOFF - 0.05)
 
-                if skipped_detetions > 10:
-                    logger.warning("No frames (%d times), no detections, input queue empty? prev action: %s", skipped_detetions, drone.last_command())
+                # It is OK to have occasionally no frames from the queue
+                # however, long streaks of no frames could cause a crash.
+                # 30 is arbitrary, with the wait timeout of .01 of detections_queue.get above
+                # that constitutes 0.3 seconds without any commands.
+                if moving and skipped_detetions > 30:
+                    # % 10 is to limit the number of commands sent to drone per second
+                    if skipped_detetions % 10 == 0:
+                        # hover to allow drone to iether recover detection and pursuit
+                        # OR operator to take over and land it safely.
+                        await drone.standstill(THRUST_HOVER)
 
+                # 17 is arbitrary to reduce log noise
+                if skipped_detetions % 17 == 0:
+                    logger.warning(
+                            "No frames (%d times), no detections, input queue empty? prev action: %s",
+                            skipped_detetions,
+                            drone.last_command()
+                    )
                 continue
+
             except:
                 logger.exception("Serious error getting next detection from a queue", exc_info=True)
                 break
@@ -607,9 +617,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 if ESTIMATION_LOOKAHEAD_DYNAMIC:
                     distance = estimated_distance_m if estimated_distance_m else 1
                     if ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT:
-                        estimate_lookeahead_frames = int(math.sqrt(distance)) + 1
-
-                    if ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR is not None:
+                        estimate_lookeahead_frames = int(math.sqrt(distance))
+                    elif ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR is not None:
                         estimate_lookeahead_frames = int(distance * ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR)
 
                     if estimated_distance_class == DistanceClass.FAR:
@@ -886,6 +895,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     'detections' : detections_obj,
                     'aim_point'  : aim_point,
                     'selected' : detection,
+                    'selected_aim_point' : XY(0, 0),
                     'telemetry': debug_info,
                     'selected_detection_projected_pos' : target_relative_pos_uncorrected,
                     # 'target_pos_ned' : target_estimator_3d.latest,

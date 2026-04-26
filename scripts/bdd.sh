@@ -10,14 +10,19 @@ mkdir -p ./_DEBUG/ ||:
 set -ex
 
 (
+    if [[ git status ]];
+    then
+        git -P log -n1 --oneline
+        git -P describe --long --always --dirty ||:
+        git -P diff ||:
+    fi
+
+    export GST_DEBUG=3
 #    export G_MESSAGES_DEBUG=all
 #    export GST_TRACERS="latency;stats"
-   export GST_DEBUG=2 #"GST_TRACER:7"
-    export DISPLAY=:0
-    export HAILO_MODEL="/home/bdd/models/2026-04-07_11n_ball_v2.hef"
-    #export HAILO_MODEL="/home/bdd/models/ball_11n_640_v1.hef" # detects SUN
-    #export HAILO_MODEL="/home/bdd/models/2026-04-13_11n_sh_v3.hef" # detects SUN
 
+    export DISPLAY=:0
+    export HAILO_MODEL="/home/bdd/models/2026-04-22_11n_sh_v5.hef"
 
     python \
         ./BDD/app.py \
