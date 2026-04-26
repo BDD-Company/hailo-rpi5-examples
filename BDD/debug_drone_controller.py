@@ -281,8 +281,8 @@ class MockDroneMover:
             current_telemetry,
         )
 
-    async def standstill(self):
-        logger.debug("MockDroneMover.standstill()")
+    async def standstill(self, thrust):
+        logger.debug(f"MockDroneMover.standstill({thrust})")
 
     async def idle(self):
         logger.debug("MockDroneMover.idle()")
