@@ -21,7 +21,16 @@ from telemetry_position import (
 )
 # from drone_killswitch import kill_on_rc_switch_on_channel
 from helpers import Detection, Detections, MoveCommand, STOP
-from gpiozero import CPUTemperature, Device
+
+try:
+    from gpiozero import CPUTemperature
+except:
+    class _MockCPUTemperature:
+        def __init__(self):
+            self.temperature = '--mocked--'
+
+    CPUTemperature = _MockCPUTemperature
+
 
 
 from helpers import (
