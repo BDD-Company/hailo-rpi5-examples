@@ -575,6 +575,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             frame_id = detections_obj.frame_id
             target_estimator = None
             target_center = None
+            target_size = None
 
             picked = _pick_target_detection(
                 detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK
