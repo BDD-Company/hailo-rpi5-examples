@@ -376,6 +376,11 @@ def main():
         'estimation_lookahead_dynamic_frames_medium': 2,
         'estimation_lookahead_dynamic_frames_far':    3, # can't be too big -- estimation will be too FAAR away.
 
+        'optical_methods_to_refine_target_size_and_center': True,
+        'adjust_aim_point_at_edge_of_frame': True,
+        'adjust_aim_point_at_edge_of_frame_threshold': 0.01,
+        'adjust_aim_point_at_edge_of_frame_max_size': 0.25, # w*h, e.g. w=0.5, h=0.5, size=0.25
+
         'pd_coeff_p': 4,
         'pd_coeff_d': 0, #-1, # -1
         'pd_coeff_p_safe_min': 0.6,

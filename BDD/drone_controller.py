@@ -11,7 +11,7 @@ from drone import DroneMover
 from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
 from telemetry_position import PositionNED, VelocityNED
-from estimate_distance import estimate_distance_class, DistanceClass, measure_object_size
+from estimate_distance import estimate_distance_class, DistanceClass, OpticalObjectInfo
 from telemetry_position import (
     # get_position_ned,
     # get_orientation_quaternion,
@@ -224,6 +224,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     PD_COEFF_P_MIN  = control_config.pop('pd_coeff_p_min', 0.5)
     PD_COEFF_P_MAX  = control_config.pop('pd_coeff_p_max', 5)
 
+    OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = control_config.pop('optical_methods_to_refine_target_size_and_center', False)
+    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = control_config.pop('adjust_aim_point_at_edge_of_frame', False)
+    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD = control_config.pop('adjust_aim_point_at_edge_of_frame_threshold', 0.01)
+    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_MAX_SIZE = control_config.pop('adjust_aim_point_at_edge_of_frame_max_size', 0.3)
+
 
     # Normalized target size thresholds for dynamic P profile:
     # s = 0.0 means target is at or below PD_COEFF_P_MIN_TARGET_SIZE
@@ -425,6 +430,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
         )
 
     def pd_coeff_p_for_target_size(target_size):
+        if isinstance(target_size, XY):
+            target_size = target_size.x * target_size.y
+
         def compute_p(target_size):
             # avoid tipping over on hallucinations while close to the ground
             if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
@@ -575,18 +583,39 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             if detection.confidence >= CONFIDENCE_MIN:
                 if BYTETRACK_TARGET_LOCK and detection.track_id is not None:
                     locked_track_id = detection.track_id
+
                 seen_target = True
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
 
-                # on very small sizes box margin added by detector is greater than real object size.
-                if detection.bbox.area() < 0.002:
-                    object_corrected_size = measure_object_size(detections_obj.frame, detection.bbox) or detection.bbox.size
-                else:
-                    object_corrected_size = detection.bbox.size
+                target_size = detection.bbox.size
+                target_center = detection.bbox.center
 
-                logger.debug(f"!!! {TARGET_SIZE_M}, {FRAME_ANGLUAR_SIZE_DEG}, {detection.bbox.size}, {object_corrected_size}")
-                estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, object_corrected_size)
+                if OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER:
+                    optical_object_info = OpticalObjectInfo(detections_obj.frame, detection.bbox)
+                    target_size = optical_object_info.object_size() or target_size
+                    target_center = optical_object_info.object_circle_center() or target_center
+
+                if ADJUST_AIM_POINT_AT_EDGE_OF_FRAME and \
+                        target_size.x * target_size.y < ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_MAX_SIZE:
+
+                    # bbox coord are in [0..1] range here
+                    min_p : XY = detection.bbox.min_point
+                    max_p : XY = detection.bbox.max_point
+
+                    if min_p.x <= ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD:
+                        target_center.x = max(0, min_p.x) + ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD
+                    elif max_p.x >= 1 - ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD:
+                        target_center.x = min(1, max_p.x) - ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD
+
+                    if min_p.y <= ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD:
+                        target_center.y = max(0, min_p.y) + ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD
+                    elif max_p.y >= 1 - ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD:
+                        target_center.y = min(1, max_p.y) - ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD
+
+
+                logger.debug(f"!!! {TARGET_SIZE_M}, {FRAME_ANGLUAR_SIZE_DEG}, visual size: {target_size}/{detection.bbox.size}, visual center: {target_center}/{detection.bbox.center}")
+                estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, target_size)
 
                 logger.debug(f"!!! RAW estimated_distance: {estimated_distance_class} {estimated_distance_m}")
 
@@ -608,11 +637,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 mode = 'follow'
 
-                # distance_to_center = detection.bbox.center.distance_to(center)
-                target_size = detection.bbox.area()
-                pd_coeff_p = pd_coeff_p_for_target_size(target_size)
+                # target_size = target_size #detection.bbox.area()
+                pd_coeff_p = pd_coeff_p_for_target_size(target_size.x * target_size.y)
 
-                target_relative_pos = AIM_POINT - detection.bbox.center
+                target_relative_pos = AIM_POINT - target_center
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
 
                 # TODO maybe use frame capture time?
@@ -651,8 +679,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         # _quat = get_orientation_quaternion(telemetry_dict)
                         # _drone_pos = get_position_ned(telemetry_dict)
                         target_pos_ned = project_camera_to_ned(
-                            detection.bbox.center.x,
-                            detection.bbox.center.y,
+                            target_center.x,
+                            target_center.y,
                             AIM_POINT.x,
                             AIM_POINT.y,
                             FRAME_ANGLUAR_SIZE_DEG.x,
@@ -809,7 +837,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 logger.debug("angle to target: %s", angle_to_target)
 
-                mode += f'size: {target_size:.3}, estimated distance: ({estimated_distance_class} @ {estimated_distance_m:.1f}m), p: {pd_coeff_p * 1.0 : .3} '
+                mode += f'size: {target_size}, estimated distance: ({estimated_distance_class} @ {estimated_distance_m:.1f}m), p: {pd_coeff_p * 1.0 : .3} '
 
                 # while still taking off, avoid dangerous moves
                 # if flight_time_ns < SAFE_TAKEOFF_PERIOD_NS:
@@ -904,7 +932,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     'detections' : detections_obj,
                     'aim_point'  : aim_point,
                     'selected' : detection,
-                    'selected_aim_point' : XY(0, 0),
+                    'selected_aim_point' : target_center,
                     'telemetry': debug_info,
                     'selected_detection_projected_pos' : target_relative_pos_uncorrected,
                     # 'target_pos_ned' : target_estimator_3d.latest,
