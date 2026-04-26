@@ -153,7 +153,8 @@ def INFERENCE_PIPELINE(
     scheduler_timeout_ms=None,
     scheduler_priority=None,
     vdevice_group_id=1,
-    multi_process_service=None
+    multi_process_service=None,
+    internal_leaky='no',
 ):
     """
     Creates a GStreamer pipeline string for inference and post-processing using a user-provided shared object file.
@@ -199,23 +200,29 @@ def INFERENCE_PIPELINE(
         f'force-writable=true '
     )
 
+    # When this pipeline is wrapped by hailocropper / hailoaggregator (the typical case),
+    # NONE of these queues may drop buffers: the aggregator pairs sink_0 (bypass) with sink_1
+    # (this branch) by per-buffer offset, so dropping a buffer here orphans the matching bypass
+    # buffer and the aggregator deadlocks. internal_leaky='no' propagates backpressure all the way
+    # back through the cropper to inference_wrapper_input_q, which IS leaky=downstream and sheds
+    # the oldest camera frame instead — keeping both branches in lockstep.
     inference_pipeline = (
-        f'{QUEUE(name=f"{name}_scale_q")} ! '
+        f'{QUEUE(name=f"{name}_scale_q", leaky=internal_leaky)} ! '
         f'videoscale name={name}_videoscale n-threads=2 qos=false ! '
-        f'{QUEUE(name=f"{name}_convert_q")} ! '
+        f'{QUEUE(name=f"{name}_convert_q", leaky=internal_leaky)} ! '
         f'video/x-raw, pixel-aspect-ratio=1/1 ! '
         f'videoconvert name={name}_videoconvert n-threads=2 ! '
-        f'{QUEUE(name=f"{name}_hailonet_q")} ! '
+        f'{QUEUE(name=f"{name}_hailonet_q", leaky=internal_leaky)} ! '
         f'{hailonet_str} ! '
     )
 
     if post_process_so:
         inference_pipeline += (
-            f'{QUEUE(name=f"{name}_hailofilter_q")} ! '
+            f'{QUEUE(name=f"{name}_hailofilter_q", leaky=internal_leaky)} ! '
             f'hailofilter name={name}_hailofilter so-path={post_process_so} {config_str} {function_name_str} qos=false ! '
         )
 
-    inference_pipeline += f'{QUEUE(name=f"{name}_output_q")} '
+    inference_pipeline += f'{QUEUE(name=f"{name}_output_q", leaky=internal_leaky)} '
 
     return inference_pipeline
 
@@ -228,7 +235,13 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=2, name='
 
     Args:
         inner_pipeline (str): The inner pipeline string to be wrapped.
-        bypass_max_size_buffers (int, optional): The maximum number of buffers for the bypass queue. Defaults to 20.
+        bypass_max_size_buffers (int, optional): The maximum number of buffers for the bypass queue. Defaults to 2.
+            This queue MUST be non-leaky: hailoaggregator pairs sink_0 (bypass) with sink_1 (inference)
+            by buffer; if a leaky queue drops the bypass buffer the aggregator is waiting for, the two
+            streams desync and the aggregator stops emitting forever. With leaky=no, hitting the cap
+            backpressures the cropper, which backpressures the input queue (which is leaky=downstream
+            and sheds the oldest camera frame instead). Worst-case added latency is
+            (bypass_max_size_buffers - 1) * frame_interval — keep this number small for low latency.
         name (str, optional): The prefix name for the pipeline elements. Defaults to 'inference_wrapper'.
 
     Returns:
@@ -243,7 +256,7 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=2, name='
         f'{QUEUE(name=f"{name}_input_q")} ! '
         f'hailocropper name={name}_crop so-path={whole_buffer_crop_so} function-name=create_crops use-letterbox=true resize-method=inter-area internal-offset=true '
         f'hailoaggregator name={name}_agg '
-        f'{name}_crop. ! {QUEUE(max_size_buffers=bypass_max_size_buffers, name=f"{name}_bypass_q")} ! {name}_agg.sink_0 '
+        f'{name}_crop. ! {QUEUE(max_size_buffers=bypass_max_size_buffers, leaky="no", name=f"{name}_bypass_q")} ! {name}_agg.sink_0 '
         f'{name}_crop. ! {inner_pipeline} ! {name}_agg.sink_1 '
         f'{name}_agg. ! {QUEUE(name=f"{name}_output_q")} '
     )
