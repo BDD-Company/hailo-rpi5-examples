@@ -196,10 +196,9 @@ class DroneMover():
 
         await arm()
 
-
-        await asyncio.sleep(1) # TODO(vnemkov): maybe remove?
-
         await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
+        # it is requirement of PX4 to receive setpoints for at least 1 second before switching to offboard
+        await asyncio.sleep(1)
 
         logger.debug("Entering Offboard mode...")
         try:
@@ -529,7 +528,15 @@ class DroneMover():
         # )
 
     async def standstill(self, thrust = IDLE_THRUST * 2) -> None:
-        await self.move_to_target_zenith_async(0, 0, thrust)
+        # await self.move_to_target_zenith_async(0, 0, thrust)
+        await self.drone.offboard.set_attitude(
+            Attitude(
+                roll_deg=0,
+                pitch_deg=0,
+                yaw_deg=0,
+                thrust_value=thrust,
+            )
+        )
 
 
     async def idle(self):

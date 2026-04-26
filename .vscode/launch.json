@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Py: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
             "name": "debug_drone_controller.py",
             "type": "debugpy",
             "request": "launch",
@@ -17,10 +24,11 @@
                 "--autoplay"
             ],
             "env": {
-                "QT_QPA_PLATFORM" : "xcb" // attempt to fix inverted color of image in OpenCV
-                , "QT_XCB_GL_INTEGRATION": "None"
-                , "LIBGL_ALWAYS_SOFTWARE" : "1"
-                , "QSG_RENDER_LOOP" : "basic"
+                "QT_QPA_PLATFORM": "xcb" // attempt to fix inverted color of image in OpenCV
+                ,
+                "QT_XCB_GL_INTEGRATION": "None",
+                "LIBGL_ALWAYS_SOFTWARE": "1",
+                "QSG_RENDER_LOOP": "basic"
             }
         },
         {
@@ -41,15 +49,14 @@
                 "/media/Pets/BDD/_BACKUPS/2026-04-18/_DEBUG_02/RAW_20260418-155223_00000.mkv",
                 "--autoplay"
             ],
-
             "env": {
-                "QT_QPA_PLATFORM" : "xcb" // attempt to fix inverted color of image in OpenCV
-                , "QT_XCB_GL_INTEGRATION": "None"
-                , "LIBGL_ALWAYS_SOFTWARE" : "1"
-                , "QSG_RENDER_LOOP" : "basic"
+                "QT_QPA_PLATFORM": "xcb" // attempt to fix inverted color of image in OpenCV
+                ,
+                "QT_XCB_GL_INTEGRATION": "None",
+                "LIBGL_ALWAYS_SOFTWARE": "1",
+                "QSG_RENDER_LOOP": "basic"
             }
-
-        }
+        },
         // {
         //     "name": "pytest test_DetectionsAggregator.py",
         //     "type": "debugpy",

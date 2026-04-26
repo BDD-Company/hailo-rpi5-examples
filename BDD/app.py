@@ -347,20 +347,23 @@ def main():
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_min': 0.6,
+        'thrust_hover' : 0.5,
+
+        'thrust_min': 0.55,
         'thrust_max': 0.9,
+
         'thrust_dynamic': False,
-        'thrust_proportional_to_distance' : False,
+        'thrust_proportional_to_distance' : True,
         'thrust_proportional_to_distance_far_coeff' : 1,
         'thrust_proportional_to_distance_medium_distance_m' : 20,
-        'thrust_proportional_to_distance_medium_coeff'      : 0.8,
+        'thrust_proportional_to_distance_medium_coeff'      : 0.9,
         'thrust_proportional_to_distance_near_distance_m'   : 10,
-        'thrust_proportional_to_distance_near_coeff'        : 1.5,
+        'thrust_proportional_to_distance_near_coeff'        : 1.2,
 
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
-        'estimation_3d': False,
+        'estimation_3d': True,
         'estimation_3d_method': 'numpy',
         'estimation_3d_use_initial_velocity' : False,
 
@@ -399,7 +402,7 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m': XY(x=1.3, y=1.3),            # shahed small
+        'target_size_m': XY(1.2, 1.2),            # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
         # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
@@ -414,7 +417,6 @@ def main():
         'aim_point_max_offset': XY(0.5, 0.6),
 
         'follow_target_position_ned' : False,
-
 
         # params to go to the drone config ("drone_" prefix is stripped then)
         'drone_use_set_attitude': False,
@@ -434,6 +436,8 @@ def main():
         'bytetrack_nms_thresh':        0.3,
         'bytetrack_nms_dist_thresh':   0.06,
     }
+    global USE_TRACKER
+    USE_TRACKER = False
 
     bytetracker = BYTETracker(
         track_thresh=control_config['bytetrack_track_thresh'],
