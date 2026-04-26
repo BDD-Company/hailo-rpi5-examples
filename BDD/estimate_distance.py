@@ -43,6 +43,14 @@ def _extract_largest_object_contour(frame: np.ndarray, bbox: Rect) -> tuple[np.n
 
     return largest, x1, y1, fw, fh
 
+def measure_object_size_from_contour(contour) -> 'XY | None':
+    if contour is None:
+        return None
+
+    largest, _x1, _y1, fw, fh = contour
+    _, _, w, h = cv2.boundingRect(largest)
+    return XY(w / fw, h / fh)
+
 
 def measure_object_size(frame: np.ndarray, bbox: Rect) -> 'XY | None':
     """Return the normalized (0-1) size of the object inside bbox.
@@ -51,24 +59,37 @@ def measure_object_size(frame: np.ndarray, bbox: Rect) -> 'XY | None':
     on bright backgrounds (drone against sky). Returns None on failure;
     caller should fall back to bbox.size.
     """
-    extracted = _extract_largest_object_contour(frame, bbox)
-    if extracted is None:
+    return measure_object_size_from_contour(_extract_largest_object_contour(frame, bbox))
+
+
+def measure_object_circle_center_from_contour(contour) -> 'XY | None':
+    if contour is None:
         return None
 
-    largest, _x1, _y1, fw, fh = extracted
-    _, _, w, h = cv2.boundingRect(largest)
-    return XY(w / fw, h / fh)
-
-
-def measure_object_circle_center(frame: np.ndarray, bbox: Rect) -> 'XY | None':
-    """Return normalized center of the inscribed circle for segmented object in bbox."""
-    extracted = _extract_largest_object_contour(frame, bbox)
-    if extracted is None:
-        return None
-
-    largest, x1, y1, fw, fh = extracted
+    largest, x1, y1, fw, fh = contour
     (cx, cy), _radius = cv2.minEnclosingCircle(largest)
     return XY((x1 + cx) / fw, (y1 + cy) / fh)
+
+
+def measure_object_circle_center(frame: np.ndarray, bbox: Rect, contour = None) -> 'XY | None':
+    """Return normalized center of the inscribed circle for segmented object in bbox."""
+    return measure_object_circle_center_from_contour(_extract_largest_object_contour(frame, bbox))
+
+
+class OpticalObjectInfo:
+    """
+    Detailed object info based on pixes from the frame
+    """
+
+    def __init__(self, frame: np.ndarray, bbox: Rect):
+        self._countour = _extract_largest_object_contour(frame, bbox)
+
+    def object_circle_center(self):
+        return measure_object_circle_center_from_contour(self._countour)
+
+    def object_size(self):
+        return measure_object_size_from_contour(self._countour)
+
 
 
 def estimate_distance(
