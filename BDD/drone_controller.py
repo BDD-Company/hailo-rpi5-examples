@@ -574,6 +574,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             target_position_ned = None
             frame_id = detections_obj.frame_id
             target_estimator = None
+            target_center = None
 
             picked = _pick_target_detection(
                 detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK
@@ -671,7 +672,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 estimate_at_ns = current_frame_timestamp_ns + estimate_delta_ns
                 estimate_mode = ''
                 target_relative_pos_old = target_relative_pos
-                target_center = None
 
                 if ESTIMATION_3D and estimated_distance_m is not None and drone_pose:
                     target_estimator = target_estimator_3d
