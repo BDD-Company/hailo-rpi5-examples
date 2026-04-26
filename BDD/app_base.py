@@ -186,6 +186,9 @@ class GStreamerApp:
         if self.options_menu.dump_dot:
             # pass
             os.environ["GST_DEBUG_DUMP_DOT_DIR"] = "/home/bdd/hailo-rpi5-examples/_DEBUG/pipeline/" #os.getcwd()
+        # Ensure stall-detection dot dumps land somewhere even without --dump-dot.
+        os.environ.setdefault("GST_DEBUG_DUMP_DOT_DIR", "/home/bdd/hailo-rpi5-examples/_DEBUG/pipeline/")
+        os.makedirs(os.environ["GST_DEBUG_DUMP_DOT_DIR"], exist_ok=True)
 
         self.webrtc_frames_queue = None  # for appsink & GUI mode
 
@@ -245,6 +248,21 @@ class GStreamerApp:
 
             self.error_occurred = (err, debug)
             self.shutdown()
+        elif t == Gst.MessageType.WARNING:
+            err, debug = message.parse_warning()
+            src_name = message.src.get_name() if message.src else '?'
+            logger.warning("GStreamer warning from %s: %s : %s", src_name, err, debug)
+        elif t == Gst.MessageType.INFO:
+            err, debug = message.parse_info()
+            src_name = message.src.get_name() if message.src else '?'
+            logger.info("GStreamer info from %s: %s : %s", src_name, err, debug)
+        elif t == Gst.MessageType.STATE_CHANGED:
+            if message.src is self.pipeline:
+                old, new, pending = message.parse_state_changed()
+                logger.info("pipeline state %s -> %s (pending %s)", old.value_nick, new.value_nick, pending.value_nick)
+        elif t == Gst.MessageType.STREAM_STATUS:
+            status_type, owner = message.parse_stream_status()
+            logger.debug("stream-status %s on %s", status_type.value_nick, owner.get_name() if owner else '?')
         # QOS
         elif t == Gst.MessageType.QOS:
             # Handle QoS message here
