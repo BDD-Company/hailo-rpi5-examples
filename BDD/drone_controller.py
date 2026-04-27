@@ -815,18 +815,17 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                             # pd_coeff_p *= 1
                             extra += ' FAR'
 
-                        # MEDIUM
-                        if estimated_distance_m < THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M:
-                            thrust *= THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF
-                            pd_coeff_p *= 1.1
-                            extra += ' MEDIUM'
-
                         # NEAR
                         if estimated_distance_m < THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M:
                             thrust *= THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF
                             pd_coeff_p *= 1.1
                             extra += ' NEAR'
                             pass
+                        # MEDIUM
+                        elif estimated_distance_m < THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M:
+                            thrust *= THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF
+                            pd_coeff_p *= 1.1
+                            extra += ' MEDIUM'
 
                         extra += f' changing thrust to: {thrust}, p to: {pd_coeff_p} '
 
