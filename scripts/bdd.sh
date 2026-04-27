@@ -7,6 +7,16 @@ readonly start_time=$(date +%Y%m%d-%H%M%S)
 # make sure that log dir exists
 mkdir -p ./_DEBUG/ ||:
 
+function kill_resource_holder()
+{
+    local resource="$1"
+    for p in $(fuser -v ${resource} 2>&1 | tail -n-1 | awk '{print $3}');
+    do
+        echo ${p} holds ${resource} killing it...
+        kill -9 ${p} ||:
+    done
+}
+
 set -ex
 
 (
@@ -17,7 +27,9 @@ set -ex
         git -P diff ||:
     fi
 
-    export GST_DEBUG=3
+    kill_resource_holder "/dev/hailo0"
+    kill_resource_holder "/dev/video*"
+
 #    export G_MESSAGES_DEBUG=all
 #    export GST_TRACERS="latency;stats"
 
