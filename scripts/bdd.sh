@@ -10,7 +10,7 @@ mkdir -p ./_DEBUG/ ||:
 set -ex
 
 (
-    if [[ git status ]];
+    if git status ;
     then
         git -P log -n1 --oneline
         git -P describe --long --always --dirty ||:
