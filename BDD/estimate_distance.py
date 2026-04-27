@@ -67,7 +67,23 @@ def measure_object_circle_center(frame: np.ndarray, bbox: Rect) -> 'XY | None':
         return None
 
     largest, x1, y1, fw, fh = extracted
-    (cx, cy), _radius = cv2.minEnclosingCircle(largest)
+    x, y, w, h = cv2.boundingRect(largest)
+    if w < 2 or h < 2:
+        return None
+
+    # Build filled-object mask in contour-local ROI and find the farthest
+    # interior point from boundary; this is the inscribed-circle center.
+    roi_mask = np.zeros((h, w), dtype=np.uint8)
+    shifted = largest - np.array([[[x, y]]], dtype=largest.dtype)
+    cv2.drawContours(roi_mask, [shifted], -1, 255, thickness=cv2.FILLED)
+
+    dist = cv2.distanceTransform(roi_mask, cv2.DIST_L2, 5)
+    _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(dist)
+    if max_val <= 0:
+        return None
+
+    cx = x + float(max_loc[0])
+    cy = y + float(max_loc[1])
     return XY((x1 + cx) / fw, (y1 + cy) / fh)
 
 
