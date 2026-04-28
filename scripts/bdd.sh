@@ -32,6 +32,9 @@ set -ex
 
 #    export G_MESSAGES_DEBUG=all
 #    export GST_TRACERS="latency;stats"
+#   export GST_DEBUG='*:INFO'
+    export GST_DEBUG=3
+    export LIBCAMERA_LOG_LEVELS=1
 
     export DISPLAY=:0
     export HAILO_MODEL="/home/bdd/models/2026-04-22_11n_sh_v5.hef"
