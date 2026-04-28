@@ -9,8 +9,9 @@ from helpers import XY
 from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator
 from platform_mover import PlatformMover
-from helpers import Detection, Detections, MoveCommand, STOP
+from helpers import Detection, Detections, MoveCommand, STOP, StereoDetections
 from estimate_distance import estimate_distance_class, DistanceClass
+from stereo_distance import StereoCalibration, stereo_distance, match_stereo_detections
 
 
 from helpers import (
@@ -93,6 +94,19 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     # SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
 
     PLATFORM_INITIAL_POS = control_config.pop('platform_initiali_pos', XY(0, 0))
+
+    CALIBRATION_FILE = control_config.pop('calibration_file', None)
+    stereo_calib: StereoCalibration | None = None
+    if CALIBRATION_FILE:
+        try:
+            stereo_calib = StereoCalibration.load(CALIBRATION_FILE)
+            logger.info("Loaded stereo calibration from %s (focal=%.1f baseline=%.3fm)",
+                        CALIBRATION_FILE, stereo_calib.focal_px, stereo_calib.baseline_m)
+        except FileNotFoundError:
+            raise SystemExit(
+                f"Stereo mode requires calibration file. Run with --mode calibrate first. "
+                f"(looked for: {CALIBRATION_FILE})"
+            )
 
     if len(control_config) > 0:
         logger.warning("Unknonw/unused config parameters: %s", control_config)
@@ -205,11 +219,16 @@ async def platform_controlling_thread_async(platform_connection_string, platform
             # logger.debug("!!! awaiting detection... ")
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
-                r : Detections = detections_queue.get(0.01)
+                r = detections_queue.get(0.01)
                 if r is STOP:
                     logger.info("stopping")
                     break
-                detections_obj = r
+                if isinstance(r, StereoDetections):
+                    detections_obj = r.left
+                    stereo_right   = r.right
+                else:
+                    detections_obj = r
+                    stereo_right   = None
 
             except Empty:
                 # No detections, not even frame with ID and image
@@ -283,7 +302,28 @@ async def platform_controlling_thread_async(platform_connection_string, platform
                 seen_target = True
                 delay_between_detections_ns = update_timestamps_on_detection()
 
-                estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
+                estimated_distance = None
+                if stereo_calib is not None and stereo_right is not None:
+                    frame_w, frame_h = stereo_calib.image_size
+                    pairs = match_stereo_detections(
+                        [detection],
+                        [d for d in stereo_right.detections if d.confidence >= MIN_CONFIDENCE],
+                    )
+                    if pairs:
+                        _, right_det = pairs[0]
+                        d_m = stereo_distance(detection, right_det, stereo_calib, frame_w, frame_h)
+                        if d_m is not None:
+                            max_size = max(TARGET_SIZE_M.x, TARGET_SIZE_M.y)
+                            if d_m < max_size * 5:
+                                dc = DistanceClass.NEAR
+                            elif d_m < max_size * 20:
+                                dc = DistanceClass.MEDIUM
+                            else:
+                                dc = DistanceClass.FAR
+                            estimated_distance = (dc, d_m)
+
+                if estimated_distance is None:
+                    estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
                 # logger.debug("!!! Detection: %s", detection)
 
                 # drone_attitude = telemetry_dict.get('attitude_euler', 0)
