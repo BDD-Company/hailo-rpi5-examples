@@ -25,8 +25,6 @@ from hailo_apps.hailo_app_python.core.common.defines import DETECTION_APP_TITLE,
 from pipelines import (
     SOURCE_PIPELINE,
     INFERENCE_PIPELINE,
-    INFERENCE_PIPELINE_WRAPPER,
-    TRACKER_PIPELINE,
     USER_CALLBACK_PIPELINE,
     DISPLAY_PIPELINE
 )
@@ -74,6 +72,10 @@ except ImportError:
 import logging
 
 logger = logging.getLogger("GSTApp")
+
+DIAG_LOG_EVERY = 120
+DIAG_STALL_WARN_AFTER_S = 2.5
+DIAG_STALL_WARN_INTERVAL_S = 20.0
 
 
 
@@ -187,6 +189,13 @@ class GStreamerApp:
             os.environ["GST_DEBUG_DUMP_DOT_DIR"] = "/home/bdd/hailo-rpi5-examples/_DEBUG/pipeline/" #os.getcwd()
 
         self.webrtc_frames_queue = None  # for appsink & GUI mode
+        self.display_sink = None  # optional DisplaySink: GLib-thread OpenCV window
+        self._diag_lock = threading.Lock()
+        self._diag_nodes = {}
+
+    def set_display_sink(self, sink):
+        """Register DisplaySink so run() can drive OpenCV on the GLib main thread."""
+        self.display_sink = sink
 
     def appsink_callback(self, appsink):
         """
@@ -339,6 +348,70 @@ class GStreamerApp:
         Gst.debug_bin_to_dot_file(self.pipeline, Gst.DebugGraphDetails.VERBOSE, "/home/bdd/hailo-rpi5-examples/_DEBUG/pipeline")
         return False
 
+    def _attach_diag_probe(self, element_name: str, pad_name: str, label: str):
+        element = self.pipeline.get_by_name(element_name)
+        if element is None:
+            logger.warning("diag_probe: element '%s' not found (label=%s)", element_name, label)
+            return
+        pad = element.get_static_pad(pad_name)
+        if pad is None:
+            logger.warning("diag_probe: pad '%s' missing on '%s' (label=%s)", pad_name, element_name, label)
+            return
+        with self._diag_lock:
+            self._diag_nodes[label] = {
+                "count": 0,
+                "last_seen": 0.0,
+                "last_warn": 0.0,
+            }
+        pad.add_probe(Gst.PadProbeType.BUFFER, self._diag_pad_probe_cb, label)
+        logger.info("diag_probe: attached %s to %s:%s", label, element_name, pad_name)
+
+    def _diag_pad_probe_cb(self, pad, info, label):
+        buffer = info.get_buffer()
+        if buffer is None:
+            return Gst.PadProbeReturn.OK
+        now = time.monotonic()
+        with self._diag_lock:
+            node = self._diag_nodes.get(label)
+            if node is None:
+                return Gst.PadProbeReturn.OK
+            node["count"] += 1
+            node["last_seen"] = now
+            count = node["count"]
+        if count % DIAG_LOG_EVERY == 0:
+            logger.info("diag_probe[%s]: seen %d buffers", label, count)
+        return Gst.PadProbeReturn.OK
+
+    def _diag_probe_watchdog_tick(self):
+        now = time.monotonic()
+        with self._diag_lock:
+            items = list(self._diag_nodes.items())
+        for label, node in items:
+            count = node["count"]
+            last_seen = node["last_seen"]
+            if count == 0 or last_seen <= 0.0:
+                continue
+            idle = now - last_seen
+            if idle < DIAG_STALL_WARN_AFTER_S:
+                continue
+            if now - node["last_warn"] < DIAG_STALL_WARN_INTERVAL_S:
+                continue
+            with self._diag_lock:
+                node_live = self._diag_nodes.get(label)
+                if node_live is None:
+                    continue
+                if now - node_live["last_warn"] < DIAG_STALL_WARN_INTERVAL_S:
+                    continue
+                node_live["last_warn"] = now
+                count_live = node_live["count"]
+            logger.warning(
+                "diag_probe[%s]: no buffers for %.1fs (count=%d)",
+                label,
+                idle,
+                count_live,
+            )
+        return bool(getattr(self.user_data, "running", True))
+
 
     def run(self):
         # Add a watch for messages on the pipeline's bus
@@ -355,6 +428,10 @@ class GStreamerApp:
             else:
                 identity_pad = identity.get_static_pad("src")
                 identity_pad.add_probe(Gst.PadProbeType.BUFFER, self.app_callback, self.user_data)
+                self._attach_diag_probe("inference_hailonet", "sink", "hailonet_in")
+                self._attach_diag_probe("inference_hailofilter", "src", "hailofilter_out")
+                self._attach_diag_probe("identity_callback", "src", "identity_out")
+                GLib.timeout_add_seconds(1, self._diag_probe_watchdog_tick)
 
         hailo_display = self.pipeline.get_by_name("hailo_display")
         if hailo_display is None and not getattr(self.options_menu, 'ui', False):
@@ -369,7 +446,30 @@ class GStreamerApp:
             display_process.start()
 
         if self.source_type == RPI_NAME_I:
-            picam_thread = threading.Thread(target=picamera_thread, args=(self.pipeline, self.video_width, self.video_height, self.video_format))
+            camera_num = getattr(self.options_menu, 'rpi_camera_num', 0)
+            colour_gains = getattr(self.options_menu, 'rpi_colour_gains', None)
+            if colour_gains:
+                red_gain, blue_gain = (float(x) for x in colour_gains.split(",", 1))
+                picamera_controls_initial = {
+                    "AwbEnable": False,
+                    "ColourGains": (red_gain, blue_gain),
+                }
+            else:
+                awb_mode_name = getattr(self.options_menu, 'rpi_awb_mode', 'Auto')
+                awb_mode = getattr(picamera_controls.AwbModeEnum, awb_mode_name)
+                picamera_controls_initial = {
+                    "AwbEnable": True,
+                    "AwbMode": awb_mode,
+                }
+            picam_thread = threading.Thread(
+                target=picamera_thread,
+                args=(self.pipeline, self.video_width, self.video_height, self.video_format),
+                kwargs={
+                    "target_fps": self.frame_rate,
+                    "camera_num": camera_num,
+                    "picamera_controls_initial": picamera_controls_initial,
+                },
+            )
             self.threads.append(picam_thread)
             picam_thread.start()
 
@@ -387,8 +487,15 @@ class GStreamerApp:
         if self.options_menu.dump_dot:
             GLib.timeout_add_seconds(3, self.dump_dot_file)
 
+        if getattr(self, "display_sink", None) is not None:
+            self.display_sink.install_glib_tick()
+
         # Run the GLib event loop
         self.loop.run()
+
+        if getattr(self, "display_sink", None) is not None:
+            self.display_sink.dispose_after_main_loop()
+            self.display_sink = None
 
         # Clean up
         try:
@@ -410,16 +517,29 @@ class GStreamerApp:
                 sys.exit(0)
 
 
-def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 30, picamera_controls_initial = None, picamera_controls_per_frame_callback = None):
+def picamera_thread(
+    pipeline,
+    video_width,
+    video_height,
+    video_format,
+    picamera_config=None,
+    target_fps=30,
+    picamera_controls_initial=None,
+    picamera_controls_per_frame_callback=None,
+    camera_num=0,
+):
     appsrc = pipeline.get_by_name("app_source")
     appsrc.set_property("is-live", True)
     appsrc.set_property("format", Gst.Format.TIME)
     logger.debug("appsrc properties: %s", appsrc)
     # Initialize Picamera2
 
-    camera_model = Picamera2.global_camera_info()[0]['Model']
+    camera_infos = Picamera2.global_camera_info()
+    cam_index = max(0, min(camera_num, len(camera_infos) - 1))
+    camera_model = camera_infos[cam_index]['Model']
+    logger.info("Picamera2 opening camera_num=%d (index=%d), model=%s", camera_num, cam_index, camera_model)
 
-    with Picamera2(tuning=f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}_noir.json") as picam2:
+    with Picamera2(camera_num=cam_index, tuning=f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}.json") as picam2:
         if picamera_config is None:
             # Default configuration
             main = {'size': (1280, 720), 'format': 'RGB888'}
@@ -433,15 +553,16 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
 
         def apply_controls(controls_dict : dict):
             # TODO: creck that control is supported first
+            logger.info("Picamera2 controls: %s", controls_dict)
             picam2.set_controls(controls_dict)
 
         if picamera_controls_initial is not None:
             apply_controls(picamera_controls_initial)
 
         # Update GStreamer caps based on 'lores' stream
-        lores_stream = config['lores']
-        format_str = 'RGB' if lores_stream['format'] == 'RGB888' else video_format
-        width, height = lores_stream['size']
+        active_stream = config['lores']
+        format_str = 'RGB' if active_stream['format'] == 'RGB888' else video_format
+        width, height = active_stream['size']
         logger.debug("Picamera2 configuration: width=%s, height=%s, format=%s", width, height, format_str)
         appsrc.set_property(
             "caps",
@@ -462,72 +583,142 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
         first_frame_timestamp_ns = 0
         prev_frame_timestamp_ns = 0
         logger.debug("picamera_process started")
-        while True:
-            # TODO(vnemkov): only set if camera actually supports those:
-            # Must set AF params AFTER picam2.start() above, otherwise it doesn't work
-#            apply_controls({
-#                "AfMode": picamera_controls.AfModeEnum.Manual,
-#                "AfRange": controls.AfRangeEnum.Full,
-#                "LensPosition": 6,
-#            })
+        # Without a finite wait, capture_request() blocks forever if the ISP stalls
+        # (symptom: platform thread logs "No frames" while this thread is stuck).
+        _CAPTURE_WAIT_SEC = 5.0
+        _CAPTURE_TIMEOUT_ABORT = 12  # ~1 minute of consecutive timeouts before exit
+        consecutive_capture_timeouts = 0
 
-            if picamera_controls_per_frame_callback is not None:
-                picamera_controls = picamera_controls_per_frame_callback(frame_count)
-                if picamera_controls:
-                    apply_controls(picamera_controls)
+        stop_watch = threading.Event()
+        last_tick = [time.monotonic()]
+        last_stall_log = [0.0]
 
-            request = picam2.capture_request()
+        def _picamera_watchdog():
+            while not stop_watch.wait(5.0):
+                idle = time.monotonic() - last_tick[0]
+                if idle < 12.0:
+                    continue
+                now = time.monotonic()
+                if now - last_stall_log[0] < 20.0:
+                    continue
+                last_stall_log[0] = now
+                logger.error(
+                    "picamera_thread: no loop progress for %.0fs — likely stuck in "
+                    "capture_request or appsrc push-buffer (downstream pipeline not pulling?)",
+                    idle,
+                )
 
-            frame_data = None
-            frame_meta = None
-            frame_timestamp_ns = 0
-            try:
-                frame_data = request.make_array("lores")
-                frame_meta = request.get_metadata()
-            finally:
-                request.release()
+        wdog = threading.Thread(target=_picamera_watchdog, daemon=True, name="picamera_watchdog")
+        wdog.start()
+        try:
+            while True:
+                last_tick[0] = time.monotonic()
 
-            # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
-            if frame_data is None:
-                logger.error("Failed to capture frame #%s.", frame_count)
-                break
+                if picamera_controls_per_frame_callback is not None:
+                    picamera_controls = picamera_controls_per_frame_callback(frame_count)
+                    if picamera_controls:
+                        apply_controls(picamera_controls)
 
-            # Convert framontigue data if necessary
-            frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-            frame = np.asarray(frame)
+                try:
+                    request = picam2.capture_request(wait=_CAPTURE_WAIT_SEC)
+                    consecutive_capture_timeouts = 0
+                except TimeoutError:
+                    consecutive_capture_timeouts += 1
+                    logger.warning(
+                        "picam2.capture_request(wait=%.1fs) timed out on frame #%d (%d/%d) — ISP not delivering; retrying",
+                        _CAPTURE_WAIT_SEC,
+                        frame_count,
+                        consecutive_capture_timeouts,
+                        _CAPTURE_TIMEOUT_ABORT,
+                    )
+                    if consecutive_capture_timeouts >= _CAPTURE_TIMEOUT_ABORT:
+                        logger.error(
+                            "picamera2: too many consecutive capture timeouts — stopping picamera_thread"
+                        )
+                        break
+                    continue
+                except Exception:
+                    logger.error(
+                        "picam2.capture_request() raised exception on frame #%d — camera ISP stalled, likely CPU overload",
+                        frame_count,
+                        exc_info=True,
+                    )
+                    break
 
-            # Create Gst.Buffer by wrapping the frame data
-            buffer = Gst.Buffer.new_wrapped(frame.tobytes())
+                frame_data = None
+                frame_meta = None
+                frame_timestamp_ns = 0
+                try:
+                    frame_data = request.make_array("lores")
+                    frame_meta = request.get_metadata()
+                    if frame_count % 60 == 0 and frame_meta is not None:
+                        logger.info(
+                            "Picamera2 metadata: ColourGains=%s ColourTemperature=%s AwbLocked=%s",
+                            frame_meta.get("ColourGains"),
+                            frame_meta.get("ColourTemperature"),
+                            frame_meta.get("AwbLocked"),
+                        )
+                finally:
+                    request.release()
 
-            # Set buffer PTS and duration
-            # buffer_duration = Gst.util_uint64_scale_int(1, Gst.SECOND, target_fps)
+                if frame_data is None:
+                    logger.error("Failed to capture frame #%d.", frame_count)
+                    break
 
-            if frame_meta is not None:
-                sensor_timestamp_ns = frame_meta.get("SensorTimestamp", None)
-                if sensor_timestamp_ns is not None:
-                    if first_frame_timestamp_ns == 0:
-                        first_frame_timestamp_ns = sensor_timestamp_ns
-                    frame_timestamp_ns = sensor_timestamp_ns - first_frame_timestamp_ns
-                    # logging.debug("frame #%d\ttimestamp from sensor: %s, frame timestamp: %s", frame_count, sensor_timestamp_ns, frame_timestamp_ns)
+                # Picamera2 returns lores in the configured stream format.
+                # RGB888 already matches the appsrc caps; swapping channels here
+                # makes the displayed frame look pink/blue.
+                if active_stream['format'] == 'RGB888':
+                    frame = np.ascontiguousarray(frame_data)
+                else:
+                    frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
 
-                buffer.pts = frame_timestamp_ns
-                buffer.dts = frame_timestamp_ns
-                buffer.duration = Gst.CLOCK_TIME_NONE ## ?
+                # Create Gst.Buffer by wrapping the frame data
+                buffer = Gst.Buffer.new_wrapped(frame.tobytes())
 
-                buffer.add_reference_timestamp_meta(sensor_timestamp_caps, sensor_timestamp_ns, Gst.CLOCK_TIME_NONE)
-                buffer.add_reference_timestamp_meta(unix_timestamp_caps, time.monotonic_ns(), Gst.CLOCK_TIME_NONE)
-                buffer.add_reference_timestamp_meta(frame_id_caps, frame_count, Gst.CLOCK_TIME_NONE)
+                # Set buffer PTS and duration
+                # buffer_duration = Gst.util_uint64_scale_int(1, Gst.SECOND, target_fps)
 
-                buffer.offset = frame_count
+                if frame_meta is not None:
+                    sensor_timestamp_ns = frame_meta.get("SensorTimestamp", None)
+                    if sensor_timestamp_ns is not None:
+                        if first_frame_timestamp_ns == 0:
+                            first_frame_timestamp_ns = sensor_timestamp_ns
+                        frame_timestamp_ns = sensor_timestamp_ns - first_frame_timestamp_ns
+                        # logging.debug("frame #%d\ttimestamp from sensor: %s, frame timestamp: %s", frame_count, sensor_timestamp_ns, frame_timestamp_ns)
 
-            # Push the buffer to appsrc
-            ret = appsrc.emit('push-buffer', buffer)
-            if ret == Gst.FlowReturn.FLUSHING:
-                break
-            if ret != Gst.FlowReturn.OK:
-                logger.error("Failed to push buffer: %s", ret)
-                break
-            frame_count += 1
+                    buffer.pts = frame_timestamp_ns
+                    buffer.dts = frame_timestamp_ns
+                    buffer.duration = Gst.CLOCK_TIME_NONE ## ?
+
+                    buffer.add_reference_timestamp_meta(sensor_timestamp_caps, sensor_timestamp_ns, Gst.CLOCK_TIME_NONE)
+                    buffer.add_reference_timestamp_meta(unix_timestamp_caps, time.monotonic_ns(), Gst.CLOCK_TIME_NONE)
+                    buffer.add_reference_timestamp_meta(frame_id_caps, frame_count, Gst.CLOCK_TIME_NONE)
+
+                    buffer.offset = frame_count
+
+                # Push the buffer to appsrc
+                t_push = time.monotonic()
+                ret = appsrc.emit('push-buffer', buffer)
+                push_dt = time.monotonic() - t_push
+                if push_dt > 1.0:
+                    logger.warning(
+                        "appsrc push-buffer took %.2fs on frame #%d — downstream pipeline slow or blocked",
+                        push_dt,
+                        frame_count,
+                    )
+
+                if ret == Gst.FlowReturn.FLUSHING:
+                    logger.warning("appsrc push-buffer returned FLUSHING on frame #%d — pipeline is shutting down, stopping picamera_thread", frame_count)
+                    break
+                if ret != Gst.FlowReturn.OK:
+                    logger.error("Failed to push buffer on frame #%d: %s", frame_count, ret)
+                    break
+                frame_count += 1
+                if frame_count % 300 == 0:
+                    logger.info("picamera_thread: pushed %d frames", frame_count)
+        finally:
+            stop_watch.set()
 
 
 def disable_qos(pipeline):
@@ -644,24 +835,8 @@ class GStreamerDetectionApp(GStreamerApp):
             post_function_name=self.post_function_name,
             batch_size=self.batch_size,
             config_json=self.labels_json,
-            additional_params=self.thresholds_str)
-        detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
-
-        tracker_pipeline = ''
-        if False:
-            tracker_pipeline = TRACKER_PIPELINE(
-                class_id=1,
-                keep_past_metadata='false',
-                qos='false',
-                # attempt to remove outdated detections
-                keep_tracked_frames=0,
-                keep_lost_frames=0, # Lost tracks dropped immediately, no shadow frames =0
-                keep_new_frames=1, # Unconfirmed new tracks discarded faster with =1
-                iou_thr=0.6,
-                kalman_dist_thr=0.6
-            )
-            tracker_pipeline = f'{tracker_pipeline} ! '
-
+            additional_params=self.thresholds_str
+        )
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
         if self.source_type == 'rpi':
             # production case == video from camera, use custom pipeline
@@ -672,8 +847,7 @@ class GStreamerDetectionApp(GStreamerApp):
 
         pipeline_string = (
             f'{source_pipeline} ! '
-            f'{detection_pipeline_wrapper} ! '
-            f'{tracker_pipeline} '
+            f'{detection_pipeline} ! '
             f'{user_callback_pipeline} ! '
             f'{display_pipeline}'
         )

@@ -17,7 +17,7 @@ class OpenCVShowImageSink(FrameSinkInterface):
         self._input_handler = input_handler
         # self._fps_counter = FPSCounter()
         self._fps_hint = fps_hint
-        self._frame_queue = queue.Queue()
+        self._frame_queue = queue.Queue(maxsize=4)
         self._display_thread = None
 
 
@@ -25,7 +25,8 @@ class OpenCVShowImageSink(FrameSinkInterface):
         self._display_thread = threading.Thread(
             target=self.__display_thread_func,
             args=(frame_size, ),
-            name="DISLAY"
+            name="DISPLAY",
+            daemon=True,
         )
         self._display_thread.start()
 
@@ -41,17 +42,27 @@ class OpenCVShowImageSink(FrameSinkInterface):
 
 
     def process_frame(self, frame):
-        # current_fps = self._fps_counter.on_frame()
         if frame is None:
             return
 
-        self._frame_queue.put(frame)
+        # Non-blocking put: drop oldest frame if queue is full, then add new one
+        try:
+            self._frame_queue.put_nowait(frame)
+        except queue.Full:
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._frame_queue.put_nowait(frame)
+            except queue.Full:
+                pass
 
 
     def __display_thread_func(self, frame_size):
         cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.setWindowTitle(self._window_name, self._window_title)
-        cv2.resizeWindow(self._window_name, frame_size[0], frame_size[0])
+        cv2.resizeWindow(self._window_name, frame_size[0], frame_size[1])
         # cv2.setWindowProperty(self._window_name, cv2.CV_WND_PROP_FULLSCREEN, cv2.CV_WINDOW_FULLSCREEN)
         frame_id = -1
         while True:

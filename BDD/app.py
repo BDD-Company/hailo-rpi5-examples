@@ -28,13 +28,13 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 from bytetrack import BYTETracker
 
-from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
+from helpers import FrameMetadata, Rect, XY, Detection, Detections, MoveCommand, STOP
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from stereo_pairer import StereoPairer
-from video_sink_gstreamer import RecorderSink
+from video_sink_gstreamer import RecorderSink, WaylandDisplaySink
 from video_sink_multi import MultiSink
-from opencv_show_image_sink import OpenCVShowImageSink
+from pipelines import DISPLAY_PIPELINE
 
 
 # logging and debugging stuff
@@ -50,6 +50,11 @@ DEBUG = False
 # User-defined class to be used in the callback function
 # -----------------------------------------------------------------------------------------------
 # Inheritance from the app_callback_class
+PROBE_ENQUEUE_LOG_EVERY = 300
+PROBE_STALL_WARN_AFTER_S = 2.5
+PROBE_STALL_WARN_INTERVAL_S = 20.0
+
+
 class user_app_callback_class(app_callback_class):
     def __init__(self, sink, tracker: BYTETracker, camera_id: str = 'mono'):
         super().__init__()
@@ -57,6 +62,41 @@ class user_app_callback_class(app_callback_class):
         self.tracker = tracker
         self.camera_id = camera_id
         self.seen_frames = deque(maxlen=10)
+        self._probe_lock = threading.Lock()
+        self._probe_seen = 0
+        self._probe_enqueued = 0
+        self._last_enqueue_mono = 0.0
+        self._last_stall_warn_mono = 0.0
+        self._watch_stop = threading.Event()
+        self._probe_watchdog = threading.Thread(
+            target=self._probe_watchdog_loop,
+            name=f"app_callback_probe_watchdog_{camera_id}",
+            daemon=True,
+        )
+        self._probe_watchdog.start()
+
+    def _probe_watchdog_loop(self):
+        while not self._watch_stop.wait(2.0):
+            if not self.running:
+                break
+            with self._probe_lock:
+                last_enq = self._last_enqueue_mono
+                enq = self._probe_enqueued
+                seen = self._probe_seen
+            if enq == 0 or last_enq <= 0.0:
+                continue
+            idle = time.monotonic() - last_enq
+            if idle < PROBE_STALL_WARN_AFTER_S:
+                continue
+            now = time.monotonic()
+            if now - self._last_stall_warn_mono < PROBE_STALL_WARN_INTERVAL_S:
+                continue
+            self._last_stall_warn_mono = now
+            logger.warning(
+                "app_callback[%s]: no detection enqueue for %.1fs (probe_seen=%d enqueued=%d) — "
+                "pipeline may stall before identity callback or duplicate-only traffic",
+                self.camera_id, idle, seen, enq,
+            )
 
 
 # -----------------------------------------------------------------------------------------------
@@ -134,6 +174,8 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
     # Using the user_data to count the number of frames
     user_data.increment()
+    with user_data._probe_lock:
+        user_data._probe_seen += 1
 
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
@@ -226,6 +268,18 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     else:
         user_data.sink.put(detections_obj)
 
+    now_mono = time.monotonic()
+    with user_data._probe_lock:
+        user_data._probe_enqueued += 1
+        user_data._last_enqueue_mono = now_mono
+        enq_n = user_data._probe_enqueued
+    if enq_n % PROBE_ENQUEUE_LOG_EVERY == 0:
+        delay_ms = (detection_end_timestamp_ns - detection_start_timestamp_ns) / 1_000_000
+        logger.info(
+            "app_callback[%s]: enqueued %d frames (frame_id=%s pipeline_delay_ms=%.1f)",
+            user_data.camera_id, enq_n, frame_id, delay_ms,
+        )
+
     return Gst.PadProbeReturn.OK
 
 
@@ -249,6 +303,11 @@ class App(GStreamerDetectionApp):
 
 
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
+        if getattr(self.options_menu, "display", False):
+            # Main pipeline display is disabled in --display mode.
+            # Debug frames are shown via WaylandDisplaySink from debug_output_thread.
+            return "fakesink"
+
         if not self.record_videos:
             return "fakesink"
 
@@ -260,7 +319,12 @@ class App(GStreamerDetectionApp):
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000_000_000
         return f'''
-            videoconvert \
+            queue name=raw_input_isolator \
+                leaky=downstream \
+                max-size-buffers=4 \
+                max-size-bytes=0 \
+                max-size-time=0 \
+            ! videoconvert \
             ! x264enc \
                 key-int-max=30 \
                 bframes=0 \
@@ -271,7 +335,6 @@ class App(GStreamerDetectionApp):
                 leaky=downstream \
                 max-size-buffers=300 \
                 max-size-bytes=0 \
-                max-size-time=10000000000 \
             ! splitmuxsink \
                 muxer-factory=matroskamux \
                 muxer-properties="properties,streamable=true" \
@@ -424,7 +487,7 @@ def main():
         logger.error('')
 
     detections_queue = OverwriteQueue(maxsize=20)
-    output_queue = OverwriteQueue(maxsize=200)
+    output_queue = OverwriteQueue(maxsize=4)
 
     start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -445,6 +508,19 @@ def main():
                             help='Stereo baseline in metres (used during calibration)')
     arg_parser.add_argument('--board-size', type=str, default='9x6',
                             help='Chessboard inner corners WxH (e.g. 9x6)')
+    arg_parser.add_argument('--display', action='store_true', default=False, help='Show debug video on screen')
+    arg_parser.add_argument('--rpi-camera-num', type=int, default=0, help='Picamera2 camera index (default: 0)')
+    arg_parser.add_argument(
+        '--rpi-awb-mode',
+        choices=["Auto", "Daylight", "Cloudy", "Indoor", "Tungsten", "Fluorescent", "Incandescent"],
+        default="Auto",
+        help='Picamera2 auto white balance mode used when --rpi-colour-gains is empty',
+    )
+    arg_parser.add_argument(
+        '--rpi-colour-gains',
+        default='1.65,2.1',
+        help='Manual Picamera2 red,blue colour gains. Use empty value to enable AWB mode.',
+    )
 
     args_parsed, _ = arg_parser.parse_known_args()
     run_mode = args_parsed.mode
@@ -464,7 +540,7 @@ def main():
         'thrust_dynamic': False,
         'thrust_proportional_to_target_size' : False,
 
-        'target_lost_fade_per_frame': 0.99,
+        'target_lost_fade_per_frame': 0.3,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'estimation_3d': True,
@@ -501,7 +577,7 @@ def main():
         'pd_coeff_p_dynamic_stage_2_ratio': 1,
         'pd_coeff_p_dynamic_stage_3_ratio': 1,
 
-        'frame_angular_size_deg' : XY(107, 85),
+        'frame_angular_size_deg' : XY(46, 31),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
         'target_size_m' : XY(1.8, 1.8),             # shahed small
@@ -525,6 +601,13 @@ def main():
         'drone_min_lift_fraction': 0.1,
         'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
         'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+
+        # platform PD controller (valya rewrite)
+        'move_scale':           0.15,  # P-gain at centre  (small error  → no oscillation)
+        'move_scale_max':       1.80,  # P-gain at distance (large error  → fast catch-up)
+        'move_scale_ramp_dist': 0.30,  # normalised error at which max gain is fully reached
+        'd_coeff':              0.8,   # D-gain: gentle damping, must not dominate P near zero
+        'dead_zone_normalized': 0.01,  # stop sending commands when within 3% of frame centre
 
         'DEBUG': DEBUG,
 
@@ -560,10 +643,11 @@ def main():
         app_callback,
         user_data,
         parser=arg_parser,
-        video_output_chunk_length_s=10,
+        video_output_chunk_length_s=5,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=(run_mode != 'stereo'),
+        # x264enc in main pipeline overloads CPU on Pi5; debug_*.mkv via RecorderSink is enough.
+        record_videos=False,
         stereo_mode=(run_mode == 'stereo'),
         video_source_right=args_parsed.input_right,
         user_data_right=user_data_right,
@@ -583,8 +667,9 @@ def main():
                 '/dev/ttyUSB0',
                 dict(
                     speed_adjustments=XY(1, -1),
-                    # speed=0, #
-                    # acceleration=0
+                    speed=100,
+                    acceleration=100,
+                    minimal_move=XY(0.1, 0.1),
                     ),
                 detections_queue),
             kwargs = dict(
@@ -614,15 +699,18 @@ def main():
         )
     action_thread.start()
 
-    sink = MultiSink([
-        # RtspStreamerSink(30, 8554),
-        RecorderSink(30,
-            "./_DEBUG",
-            segment_seconds=10,
-            filename_base=f"debug_{start_time_str}",
-        ),
-        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
-    ])
+    if app.options_menu.display:
+        # Single display window through waylandsink with debug overlay frames.
+        debug_sinks = [WaylandDisplaySink(fps_hint=30, sync=False)]
+    else:
+        debug_sinks = [
+            RecorderSink(30,
+                "./_DEBUG",
+                segment_seconds=2,
+                filename_base=f"debug_{start_time_str}",
+            ),
+        ]
+    sink = MultiSink(debug_sinks)
 
     output_thread = threading.Thread(
         target = debug_output_thread,
@@ -656,7 +744,14 @@ def main():
     #             )
     #         )
 
-    app.run(event)
+    try:
+        app.run(event)
+    except SystemExit:
+        pass
+    finally:
+        output_queue.put(None)  # sentinel — stop debug_output_thread
+        output_thread.join(timeout=15)
+
     print("Done !!!")
     detections_queue.put(STOP)
     action_thread.join()

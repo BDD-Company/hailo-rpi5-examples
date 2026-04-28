@@ -6,11 +6,8 @@ from queue import Empty, Queue
 
 from helpers import XY
 
-from CommandRegulator import CommandRegulator
-from TargetEstimator import TargetEstimator
 from platform_mover import PlatformMover
 from helpers import Detection, Detections, MoveCommand, STOP, StereoDetections
-from estimate_distance import estimate_distance_class, DistanceClass
 from stereo_distance import StereoCalibration, stereo_distance, match_stereo_detections
 
 
@@ -35,65 +32,28 @@ def platform_controlling_thread(*args, **kwargs):
 
 
 async def platform_controlling_thread_async(platform_connection_string, platform_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None):
-    # will owerwrite logger here many times, make sure that rest of the systems are not affected
     global global_logger
     logger = global_logger
 
     START_TIME_MS = time.monotonic_ns() / 1000_000
-    DEBUG           = control_config.pop('debug', False)
-
-    MIN_CONFIDENCE  = control_config.pop('confidence_min', 0.1)
-    # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
-    # MAX_THRUST      = control_config.pop('thrust_max', 0.5)
-    # MIN_THRUST      = control_config.pop('thrust_min', 0.4)
-    FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
-
-    PD_COEFF_P      = control_config.pop('pd_coeff_p', 12)
-    PD_COEFF_D      = control_config.pop('pd_coeff_d', 1)
-
-    PD_COEFF_P_DYNAMIC = control_config.pop('pd_coeff_p_dynamic', False)
-    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pop('pd_coeff_p_dynamic_use_piecewise', False)
-    PD_COEFF_P_MIN_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_min_target_size', 0.003)
-    PD_COEFF_P_MAX_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_max_target_size', 0.005)
-    PD_COEFF_P_MIN  = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
-    PD_COEFF_P_MAX  = control_config.pop('pd_coeff_p_dynamic_max', 2)
-
-    # Normalized target size thresholds for dynamic P profile:
-    # s = 0.0 means target is at or below PD_COEFF_P_MIN_TARGET_SIZE
-    # s = 1.0 means target is at or above PD_COEFF_P_MAX_TARGET_SIZE
-    #
-    # Below STAGE_1_THRESHOLD:
-    #   target is considered small / far, P grows quickly from minimum.
-    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pop('pd_coeff_p_dynamic_stage_1_threshold', 0.2)
-
-    # Between STAGE_1_THRESHOLD and STAGE_2_THRESHOLD:
-    #   target is in the working mid-range, P continues growing up to maximum.
-    # Above STAGE_2_THRESHOLD:
-    #   target is considered large / near, P starts decreasing to avoid overshoot
-    #   and overly aggressive control close to the target.
-    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pop('pd_coeff_p_dynamic_stage_2_threshold', 0.6)
-
-    # Relative P ratios inside [PD_COEFF_P_MIN, PD_COEFF_P_MAX]:
-    #
-    # Ratio reached at STAGE_1_THRESHOLD.
-    # Example: 0.60 means that by s = 0.2, P reaches 60% of the full range
-    # between PD_COEFF_P_MIN and PD_COEFF_P_MAX.
-    PD_COEFF_P_STAGE_1_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_1_ratio', 0.60)
-
-    # Ratio reached at STAGE_2_THRESHOLD.
-    # Usually 1.00, meaning the maximum P is reached in the mid-range.
-    PD_COEFF_P_STAGE_2_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_2_ratio', 1.00)
-
-    # Ratio used when target is very large / very near (s -> 1.0).
-    # This reduces P near the target to make control softer and reduce oscillation.
-    PD_COEFF_P_STAGE_3_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_3_ratio', 0.35)
-
-    TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
+    MIN_CONFIDENCE       = control_config.pop('confidence_min', 0.1)
+    MOVE_CONFIDENCE      = control_config.pop('confidence_move', MIN_CONFIDENCE)
+    FADE_COEFF           = control_config.pop('target_lost_fade_per_frame', 0.5)
     FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
-
-    # SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
-
-    PLATFORM_INITIAL_POS = control_config.pop('platform_initiali_pos', XY(0, 0))
+    # P-gain at centre (small error) — keeps oscillation away
+    MOVE_SCALE_MIN         = control_config.pop('move_scale', 0.3)
+    # P-gain at large error — enables fast catch-up; equals MOVE_SCALE_MIN if not set
+    MOVE_SCALE_MAX         = control_config.pop('move_scale_max', MOVE_SCALE_MIN)
+    # normalised error distance at which MOVE_SCALE_MAX is fully reached (linear ramp)
+    MOVE_SCALE_RAMP_DIST   = control_config.pop('move_scale_ramp_dist', 0.3)
+    # D-gain: multiplier for error derivative (e[n] - e[n-1]); dampens oscillation
+    # positive value reduces command when approaching target, resists overshoot
+    D_COEFF                = control_config.pop('d_coeff', 0.0)
+    # sign of each axis: set -1 to flip that axis direction
+    # x: +1 = pan right when target is right; y: +1 = tilt down when target is below
+    AXIS_SIGNS             = control_config.pop('axis_signs', XY(1.0, 1.0))
+    # normalised distance from center [0..0.5] below which we stop sending move commands
+    DEAD_ZONE              = control_config.pop('dead_zone_normalized', 0.02)
 
     CALIBRATION_FILE = control_config.pop('calibration_file', None)
     stereo_calib: StereoCalibration | None = None
@@ -108,115 +68,59 @@ async def platform_controlling_thread_async(platform_connection_string, platform
                 f"(looked for: {CALIBRATION_FILE})"
             )
 
-    if len(control_config) > 0:
-        logger.warning("Unknonw/unused config parameters: %s", control_config)
+    for _key in list(control_config):
+        control_config.pop(_key)
 
-    center = XY(0.5, 0.5)
-    distance_r = 0.1
-    distance_r *= distance_r
+    center = XY(0.0, 0.0)
     seen_target = False
 
+    SPEED_ADJUSTMENTS = platform_config.get('speed_adjustments', XY(1.0, 1.0))
+
     platform = PlatformMover(destination=platform_connection_string, **platform_config)
-    logger.debug("starting up platform at pos %s", PLATFORM_INITIAL_POS)
+    # Disable hardware position polling: current_pos() reads are unreliable and block the loop.
+    platform.adjustable_speed = False
+    logger.info("homing to 0,0…")
+    platform.move_to(center)
 
-    platform.move_to(PLATFORM_INITIAL_POS)
+    # Wait until the platform physically arrives at 0,0 (or timeout).
+    _HOME_TOLERANCE_DEG = 2.0   # degrees — "close enough"
+    _HOME_TIMEOUT_S     = 15.0
+    _t0 = time.monotonic()
+    _home = center.clone()
+    while True:
+        await asyncio.sleep(0.15)
+        cur = platform.current_pos()
+        dist = cur.distance_to(_home)
+        logger.debug("homing… pos=%s  dist=%.1f°", cur, dist)
+        if dist <= _HOME_TOLERANCE_DEG:
+            logger.info("homed at %s (dist=%.1f°)", cur, dist)
+            break
+        if time.monotonic() - _t0 > _HOME_TIMEOUT_S:
+            logger.warning("homing timeout %.1fs, pos=%s — continuing anyway", _HOME_TIMEOUT_S, cur)
+            break
 
-    logger.info("platform started %s", platform_config)
+    # current_pos() returns cached/stale value DURING movement.
+    # Capture it now (at rest) so move_relative compensation works:
+    #   move_relative(dx, dy) → new_pos = current_pos() + dx,dy
+    # Passing (desired_pos - stale_pos) gives new_pos = desired_pos.
+    stale_pos = platform.current_pos()        
+    logger.info("platform ready — stale_pos=%s config=%s", stale_pos, platform_config)
 
     if signal_event_when_ready:
         signal_event_when_ready.set()
 
-    #logger.debug("!!! detections_queue: %s (%s items)", detections_queue, detections_queue.qsize())
-
-    # debug wrapper to collect executed commands
     platform = debug_collect_call_info(platform, history_max_size=3)
 
-    moving = False
-    flight_time_ns = 0
-    takeoff_time_ns = None
-    prev_angle_to_target = XY()
     skipped_detetions = 0
-    prev_detection_timestamp_ns = time.monotonic_ns()
-    current_detection_timestamp_ns = 0
-    prev_frame_timestamp_ns = time.monotonic_ns()
-    current_frame_timestamp_ns = time.monotonic_ns()
-
-    # NOTE: HUGE age to avoid purging prev positions, since it doesn't work as expected RN
-    target_estimator = TargetEstimator(max_target_position_age_nanoseconds=500_000_000_000)
-
-    def update_timestamps():
-        nonlocal prev_frame_timestamp_ns
-        nonlocal current_frame_timestamp_ns
-        new_frame_timestamp = time.monotonic_ns()
-        prev_frame_timestamp_ns = current_frame_timestamp_ns
-        current_frame_timestamp_ns = new_frame_timestamp
-
-    def update_timestamps_on_detection():
-        nonlocal prev_detection_timestamp_ns
-        nonlocal current_detection_timestamp_ns
-
-        new_detection_timestamp = current_frame_timestamp_ns
-        prev_detection_timestamp_ns = current_detection_timestamp_ns
-        current_detection_timestamp_ns = new_detection_timestamp
-
-        return current_detection_timestamp_ns - prev_detection_timestamp_ns
-
-    def piecewise_p_ratio(s: float) -> float:
-        s = max(0.0, min(1.0, s))
-
-        if s < PD_COEFF_P_STAGE_1_THRESHOLD:
-            return PD_COEFF_P_STAGE_1_RATIO * (s / PD_COEFF_P_STAGE_1_THRESHOLD)
-
-        if s < PD_COEFF_P_STAGE_2_THRESHOLD:
-            return PD_COEFF_P_STAGE_1_RATIO + (
-                (PD_COEFF_P_STAGE_2_RATIO - PD_COEFF_P_STAGE_1_RATIO)
-                * ((s - PD_COEFF_P_STAGE_1_THRESHOLD) / (PD_COEFF_P_STAGE_2_THRESHOLD - PD_COEFF_P_STAGE_1_THRESHOLD))
-            )
-
-        return PD_COEFF_P_STAGE_2_RATIO + (
-            (PD_COEFF_P_STAGE_3_RATIO - PD_COEFF_P_STAGE_2_RATIO)
-            * ((s - PD_COEFF_P_STAGE_2_THRESHOLD) / (1.0 - PD_COEFF_P_STAGE_2_THRESHOLD))
-        )
-
-    def pd_coeff_p_for_target_size(target_size):
-        # avoid tipping over on hallucinations while close to the ground
-        if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
-            logger.warning("Initial stage of flight, reducing P to %s", PD_COEFF_P_MIN)
-            return PD_COEFF_P_MIN
-
-        if not PD_COEFF_P_DYNAMIC:
-            return PD_COEFF_P
-
-        min_size = PD_COEFF_P_MIN_TARGET_SIZE
-        max_size = PD_COEFF_P_MAX_TARGET_SIZE
-
-        if max_size <= min_size:
-            logger.warning("Invalid target size range: min=%s max=%s", min_size, max_size)
-            return PD_COEFF_P_MIN
-
-        s = (target_size - min_size) / (max_size - min_size)
-        s = max(0.0, min(1.0, s))
-
-        if PD_COEFF_P_DYNAMIC_USE_PIECEWISE:
-            ratio = piecewise_p_ratio(s)
-            return PD_COEFF_P_MIN + ratio * (PD_COEFF_P_MAX - PD_COEFF_P_MIN)
-
-        result = PD_COEFF_P_MIN + s * (PD_COEFF_P_MAX - PD_COEFF_P_MIN)
-
-        deviance_coeff = 1 # could be 2
-        return min(PD_COEFF_P_MAX * deviance_coeff, max(PD_COEFF_P_MIN / deviance_coeff, result))
-
-    command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
+    prev_target_relative_pos = None 
+    prev_angle_to_target = XY(0, 0)
 
     while True:
         try:
             detections_obj = Detections(-1)
-            distance_to_center : float = float('NaN')
             angle_to_target = XY()
-            move_command = MoveCommand()
 
             logger = global_logger
-            # logger.debug("!!! awaiting detection... ")
             try:
                 # Keep the asyncio loop responsive while waiting for a queue item.
                 r = detections_queue.get(0.01)
@@ -233,207 +137,145 @@ async def platform_controlling_thread_async(platform_connection_string, platform
             except Empty:
                 # No detections, not even frame with ID and image
                 skipped_detetions += 1
-                # platform.clear_command_history()
-                # if skipped_detetions > 20 and skipped_detetions < 30:
-                #     await platform.standstill()
-                # elif skipped_detetions > 30:
-                #     await platform.stop()
-
                 logger.warning("No frames (%d times), no detections, input queue empty? LAST ACTION: %s", skipped_detetions, platform.last_command())
                 continue
             except:
                 logger.exception("Serious error getting next detection from a queue", exc_info=True)
                 break
 
-            update_timestamps()
-            logger.debug("!!!")
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
 
-            # if DEBUG:
-            #     # NOTE: injecting fake detections to debug
-            #     import math
-            #     __tmp_delta_confidence = math.sin(detections_obj.frame_id / 100) / 10
-            #     __tmp_delta_x = math.sin(detections_obj.frame_id / 100) / 4
-            #     __tmp_delta_y = math.cos(detections_obj.frame_id / 100) / 4
-            #     detections_obj.detections.append(
-            #                 Detection(
-            #                     bbox = Rect.from_xywh(0.2 + __tmp_delta_x, 0.2 + __tmp_delta_y, 0.05, 0.05),
-            #                     confidence = 0.3 + __tmp_delta_confidence,
-            #                     track_id = 1
-            #                 )
-            #     )
-
-            logger.debug("!!! GOT DETECTIONS, objects detected: %s (%s), detection delay: %sms, total delay: %sms",
-                    len(detections_obj.detections),
-                    detections_obj.detections,
-                    (detections_obj.meta.detection_end_timestamp_ns - detections_obj.meta.detection_start_timestamp_ns) / 1000_000,
-                    (detections_obj.meta.detection_end_timestamp_ns - detections_obj.meta.capture_timestamp_ns) / 1000_000
-                )
+            logger.debug("GOT DETECTIONS: %d objects, detect delay: %.1fms, total delay: %.1fms",
+                len(detections_obj.detections),
+                (detections_obj.meta.detection_end_timestamp_ns - detections_obj.meta.detection_start_timestamp_ns) / 1e6,
+                (detections_obj.meta.detection_end_timestamp_ns - detections_obj.meta.capture_timestamp_ns) / 1e6,
+            )
             skipped_detetions = 0
-            frame_capture_timestampt_ns = detections_obj.meta.capture_timestamp_ns or None
-
-            # telemetry_dict = await drone.get_telemetry_dict()
-            # logger.debug("telemetry: %s", telemetry_dict)
-            debug_info = {}
-
-            ## Check if take off
-            if takeoff_time_ns == None:
-                if moving:
-                    takeoff_time_ns = time.monotonic_ns()
-                    # logger.info("!!! IN AIR: %s", takeoff_time_ns)
-            else:
-                flight_time_ns = time.monotonic_ns() - takeoff_time_ns
-                # logger.info("!!! flight time: %ss", flight_time_ns / 1000_000_000)
-
-            debug_info['start_time_ms'] = START_TIME_MS
-            debug_info['flight_time_ms'] = flight_time_ns / 1000_000
+            debug_info = {'start_time_ms': START_TIME_MS}
 
             detections, frame = detections_obj.detections, detections_obj.frame
-            detection = None
 
-            # filter out accidential Nones
             detections = [d for d in detections if d is not None]
-            # detections.sort(reverse=True, key = lambda d : d.track_id)
-            detections.sort(reverse=True, key = lambda d : d.confidence)
+            detections.sort(reverse=True, key=lambda d: d.confidence)
             target_relative_pos = None
 
-            detection = detections[0] if len(detections) > 0 else Detection()
-            if detection.confidence >= MIN_CONFIDENCE:
-                seen_target = True
-                delay_between_detections_ns = update_timestamps_on_detection()
+            detection = detections[0] if detections else Detection()
 
-                estimated_distance = None
-                if stereo_calib is not None and stereo_right is not None:
-                    frame_w, frame_h = stereo_calib.image_size
-                    pairs = match_stereo_detections(
-                        [detection],
-                        [d for d in stereo_right.detections if d.confidence >= MIN_CONFIDENCE],
-                    )
-                    if pairs:
-                        _, right_det = pairs[0]
-                        d_m = stereo_distance(detection, right_det, stereo_calib, frame_w, frame_h)
-                        if d_m is not None:
-                            max_size = max(TARGET_SIZE_M.x, TARGET_SIZE_M.y)
-                            if d_m < max_size * 5:
-                                dc = DistanceClass.NEAR
-                            elif d_m < max_size * 20:
-                                dc = DistanceClass.MEDIUM
-                            else:
-                                dc = DistanceClass.FAR
-                            estimated_distance = (dc, d_m)
-
-                if estimated_distance is None:
-                    estimated_distance = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, detection.bbox.size)
-                # logger.debug("!!! Detection: %s", detection)
-
-                # drone_attitude = telemetry_dict.get('attitude_euler', 0)
-                # drone_pitch = drone_attitude['pitch_deg']
-                # drone_roll = drone_attitude['roll_deg']
-                # logger.debug("drone attitude: %s", drone_attitude)
-                mode = 'follow'
-
-                distance_to_center = detection.bbox.center.distance_to(center)
-                target_size = detection.bbox.area()
-                pd_coeff_p = pd_coeff_p_for_target_size(target_size)
-                # if flight_time_ns >= 1_500_000_000:
-                    # pd_coeff_p = PD_COEFF_P_MAX
-
-                target_relative_pos = center - detection.bbox.center
-                logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
-
-                # TODO maybe use frame capture time?
-                target_estimator.add_target_pos(
-                    target_relative_pos,
-                    # estimation is too fra off, when using frame capture time.
-                    current_frame_timestamp_ns #frame_capture_timestampt_ns if frame_capture_timestampt_ns else current_frame_timestamp_ns
+            # Stereo distance: when a calibration is loaded and we received a stereo
+            # pair this frame, look up the matching right detection by IoU and
+            # compute disparity-based distance. Used for diagnostics only — control
+            # logic below does not yet depend on it.
+            stereo_distance_m: float | None = None
+            if (
+                stereo_calib is not None
+                and stereo_right is not None
+                and detection.confidence >= MIN_CONFIDENCE
+            ):
+                pairs = match_stereo_detections(
+                    [detection],
+                    [d for d in stereo_right.detections if d.confidence >= MIN_CONFIDENCE],
                 )
+                if pairs:
+                    _, right_det = pairs[0]
+                    frame_w, frame_h = stereo_calib.image_size
+                    stereo_distance_m = stereo_distance(
+                        detection, right_det, stereo_calib, frame_w, frame_h,
+                    )
 
-                if True and target_estimator.history_size() >= 2:
-                    # estimate target based on previous positions
-                    mode = 'follow* '
-
-                    number_of_frames_to_estimate_pos = 2
-                    # if estimated_distance is not None:
-                    #     estimated_distance_class, estimated_distance_meters = estimated_distance
-                    #     if estimated_distance_class == DistanceClass.FAR:
-                    #         number_of_frames_to_estimate_pos = 10
-                    #     elif estimated_distance_class == DistanceClass.MEDIUM:
-                    #         number_of_frames_to_estimate_pos = 5
-                    #     elif estimated_distance_class == DistanceClass.NEAR:
-                    #         number_of_frames_to_estimate_pos = 2
-
-                    estimation_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * number_of_frames_to_estimate_pos
-                    target_relative_pos_old = target_relative_pos
-                    target_relative_pos = target_estimator.estimate_target_pos(current_frame_timestamp_ns + estimation_delta_ns, target_relative_pos)
-                    logger.debug("!!! estimated new target pos %s (was %s), for +%sms (%d frames)",
-                            target_relative_pos,
-                            target_relative_pos_old,
-                            estimation_delta_ns / 1000_000,
-                            number_of_frames_to_estimate_pos)
-
-                # command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)
-                target_relative_pos_pd = target_relative_pos
-                if target_relative_pos is not None:
-                    logger.debug("!!! target before PD: %s", target_relative_pos)
-                    target_relative_pos_pd = command_regulator.next_command(target_relative_pos, delay_between_detections_ns / 1000_000)
-                    logger.debug("!!! target after PD: %s", target_relative_pos)
-
-                angle_to_target  = target_relative_pos_pd.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG)
+            # Movement gate must use confidence_move; confidence_min can be stricter for analytics/debug.
+            if detection.confidence >= MOVE_CONFIDENCE:
+                seen_target = True
+                # offset from frame centre to target, normalised [−0.5, 0.5]
+                # positive x → target is to the right  → pan right
+                # positive y → target is below center  → tilt down
+                target_relative_pos = detection.bbox.center - center
+                # D-term: derivative of error (change since last frame)
+                # reduces command when approaching target, resists overshoot.
+                # Clamped so D-contribution never exceeds the P-contribution
+                # (prevents D from dominating and causing reverse oscillation near zero).
+                d_error = (target_relative_pos - prev_target_relative_pos
+                           if prev_target_relative_pos is not None else XY())
+                prev_target_relative_pos = target_relative_pos.clone()
+                d_contrib_x = d_error.x * D_COEFF
+                d_contrib_y = d_error.y * D_COEFF
+                # clamp: |D| ≤ |P| so D can damp but not reverse the direction
+                if target_relative_pos.x != 0:
+                    d_contrib_x = max(-abs(target_relative_pos.x), min(abs(target_relative_pos.x), d_contrib_x))
+                if target_relative_pos.y != 0:
+                    d_contrib_y = max(-abs(target_relative_pos.y), min(abs(target_relative_pos.y), d_contrib_y))
+                pd_error = XY(target_relative_pos.x + d_contrib_x,
+                              target_relative_pos.y + d_contrib_y)
+                # dynamic P-gain: scale linearly from MOVE_SCALE_MIN (near centre)
+                # to MOVE_SCALE_MAX (when error >= MOVE_SCALE_RAMP_DIST)
+                error_dist = max(abs(target_relative_pos.x), abs(target_relative_pos.y))
+                t = min(error_dist / MOVE_SCALE_RAMP_DIST, 1.0) if MOVE_SCALE_RAMP_DIST > 0 else 1.0
+                move_scale = MOVE_SCALE_MIN + (MOVE_SCALE_MAX - MOVE_SCALE_MIN) * t
+                # convert PD-corrected offset → degrees
+                angle_to_target = pd_error.multiplied_by_XY(FRAME_ANGLUAR_SIZE_DEG) * move_scale
                 prev_angle_to_target = angle_to_target
 
-                logger.debug("angle to target: %s", angle_to_target)
-
-                mode += f'size: {target_size:.3}, estimated distance: {estimated_distance}, p: {pd_coeff_p * 1.0 : .3} '
-
-                # await drone.move_to_target_zenith_async(roll_degree=-45, pitch_degree=0, thrust=thrust)
-                platform.move_relative(angle_to_target)
-                debug_info["mode"] = mode
-
-                moving = True
-                if takeoff_time_ns == None:
-                    takeoff_time_ns = time.monotonic_ns()
-                    # logger.info("!!! IN AIR since: %s", takeoff_time_ns)
-
+                in_dead_zone = (abs(target_relative_pos.x) < DEAD_ZONE and
+                                abs(target_relative_pos.y) < DEAD_ZONE)
+                if detection.confidence < MOVE_CONFIDENCE:
+                    logger.debug(
+                        "target seen but below move threshold: conf=%.3f < move_conf=%.3f",
+                        detection.confidence,
+                        MOVE_CONFIDENCE,
+                    )
+                    debug_info["mode"] = (
+                        f"track(wait_conf) conf={detection.confidence:.2f} "
+                        f"size={detection.bbox.area():.3f}"
+                    )
+                elif not in_dead_zone:
+                    # PD-controller: each frame move by PD-corrected angular error.
+                    # move_relative does:  new_pos = current_pos() + delta * speed_adjustments
+                    delta = angle_to_target.multiplied_by_XY(AXIS_SIGNS)
+                    logger.debug("target offset: %s  d_err: %s  angle: %s  delta: %s  scale: %.3f",
+                                 target_relative_pos, d_error, angle_to_target, delta, move_scale)
+                    platform.move_relative(delta.x, delta.y)
+                    debug_info["mode"] = f"follow  size={detection.bbox.area():.3f}"
+                else:
+                    logger.debug("target offset: %s  IN DEAD ZONE (< %.3f), not moving",
+                                 target_relative_pos, DEAD_ZONE)
+                    debug_info["mode"] = f"follow(locked)  size={detection.bbox.area():.3f}"
             else:
+                if detections:
+                    logger.debug(
+                        "top detection below move threshold: conf=%.3f < move_conf=%.3f (min_conf=%.3f)",
+                        detection.confidence,
+                        MOVE_CONFIDENCE,
+                        MIN_CONFIDENCE,
+                    )
+                prev_target_relative_pos = None  # reset D-term when target lost
                 if seen_target:
                     prev_angle_to_target *= FADE_COEFF
-                    platform.move_relative(prev_angle_to_target)
-                    # Just t visualize the point we are moving to
+                    delta = prev_angle_to_target.multiplied_by_XY(AXIS_SIGNS)
+                    platform.move_relative(delta.x, delta.y)
                     target_relative_pos = prev_angle_to_target.divided_by_XY(FRAME_ANGLUAR_SIZE_DEG)
-                    # await drone.standstill()
-                    moving = False
                     debug_info["mode"] = "hover"
                 else:
                     debug_info["mode"] = "idle"
-                    if detections_obj.frame_id % 30 == 0:
-                        moving = False
-                        # await platform.idle()
+
+            if stereo_distance_m is not None:
+                debug_info["stereo_distance_m"] = stereo_distance_m
 
             last_command = platform.last_command() or '<<== NO ==>>'
             debug_info["action"] = last_command
-            mode = debug_info.get('mode', '')
-            logger.info("MODE: %s, ACTION: %s", mode, last_command)
-
-            debug_info['extra'] = (
-                f"stage1_thr={PD_COEFF_P_STAGE_1_THRESHOLD:.3f} "
-                f"stage2_thr={PD_COEFF_P_STAGE_2_THRESHOLD:.3f} "
-                f"stage1_r={PD_COEFF_P_STAGE_1_RATIO:.2f} "
-                f"stage2_r={PD_COEFF_P_STAGE_2_RATIO:.2f} "
-                f"stage3_r={PD_COEFF_P_STAGE_3_RATIO:.2f} "
-                f"p_min={PD_COEFF_P_MIN:.2f} "
-                f"p_max={PD_COEFF_P_MAX:.2f}"
+            logger.info(
+                "MODE: %s  ACTION: %s%s",
+                debug_info.get('mode', ''),
+                last_command,
+                f"  dist={stereo_distance_m:.2f}m" if stereo_distance_m is not None else "",
             )
 
-            # -1 means that there was no frame and no detections
             if output_queue is not None:
-                output = {
-                    'detections' : detections_obj,
-                    'selected' : detection,
+                output_queue.put({
+                    'detections': detections_obj,
+                    'selected': detection,
                     'telemetry': debug_info,
-                    'selected_detection_projected_pos' : target_relative_pos,
-                    'move_goal' : target_relative_pos
-                }
-                output_queue.put(output)
+                    'selected_detection_projected_pos': target_relative_pos,
+                    'move_goal': target_relative_pos,
+                })
 
         except:
-            logging.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, move_command, exc_info=True)
+            logging.exception("Got exception: %s", detections_obj, exc_info=True)
