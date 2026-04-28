@@ -1,14 +1,8 @@
 #! /usr/bin/env bash
 
-cd ./hailo-rpi5-examples/
-. ./setup_env.sh
+readonly SESSION_NAME="bdd-app"
 
-readonly start_time=$(date +%Y%m%d-%H%M%S)
-# make sure that log dir exists
-mkdir -p ./_DEBUG/ ||:
-
-function kill_resource_holder()
-{
+kill_resource_holder() {
     local resource="$1"
     for p in $(fuser -v ${resource} 2>&1 | tail -n-1 | awk '{print $3}');
     do
@@ -17,35 +11,67 @@ function kill_resource_holder()
     done
 }
 
-set -ex
-
-(
-    if git status ;
-    then
-        git -P log -n1 --oneline
-        git -P describe --long --always --dirty ||:
-        git -P diff ||:
+if [[ -z "$TMUX" ]]; then
+    # --- Bootstrap: not yet inside tmux ---
+    if ! command -v tmux >/dev/null; then
+        echo "tmux is required. Install with: sudo apt install -y tmux" >&2
+        exit 1
     fi
 
+    # Kill any prior session; tmux sends SIGHUP to its children, which should
+    # take down the previous python app and release /dev/hailo0, /dev/video*.
+    tmux kill-session -t "$SESSION_NAME" 2>/dev/null ||:
+    sleep 1
+
+    # Defense in depth: if anything didn't die cleanly, force-free the devices
+    # before the new run starts.
     kill_resource_holder "/dev/hailo0"
     kill_resource_holder "/dev/video*"
+
+    # Re-exec self inside a fresh detached tmux session, then attach.
+    quoted=$(printf '%q ' "$0" "$@")
+    tmux new-session -d -s "$SESSION_NAME" "$quoted"
+
+    if [[ -t 1 ]]; then
+        exec tmux attach -t "$SESSION_NAME"
+    else
+        echo "Started detached in tmux session '$SESSION_NAME'."
+        echo "Attach: tmux attach -t $SESSION_NAME"
+        exit 0
+    fi
+fi
+
+# --- Inner: running inside tmux ---
+cd ./hailo-rpi5-examples/
+. ./setup_env.sh
+
+readonly start_time=$(date +%Y%m%d-%H%M%S)
+mkdir -p ./_DEBUG/ ||:
+
+# Mirror stdout/stderr to log file while still showing live in the tmux pane.
+exec > >(tee "./_DEBUG/BDD_${start_time}.log") 2>&1
+
+set -ex
+
+if git status ;
+then
+    git -P log -n1 --oneline
+    git -P describe --long --always --dirty ||:
+    git -P diff ||:
+fi
 
 #    export G_MESSAGES_DEBUG=all
 #    export GST_TRACERS="latency;stats"
 #   export GST_DEBUG='*:INFO'
-    export GST_DEBUG=3
-    export LIBCAMERA_LOG_LEVELS=1
+export GST_DEBUG=3
+export LIBCAMERA_LOG_LEVELS=1
 
-    export DISPLAY=:0
-    export HAILO_MODEL="/home/bdd/models/2026-04-22_11n_sh_v5.hef"
+export DISPLAY=:0
+export HAILO_MODEL="/home/bdd/models/2026-04-22_11n_sh_v5.hef"
 
-    python \
-        ./BDD/app.py \
-        --hef-path "${HAILO_MODEL}" \
-        -i rpi \
-        "$@"
-
-) &> "./_DEBUG/BDD_${start_time}.log" &
-
-tail -f "./_DEBUG/BDD_${start_time}.log"
+python \
+    ./BDD/app.py \
+    --hef-path "${HAILO_MODEL}" \
+    -i rpi \
+    "$@"
 
