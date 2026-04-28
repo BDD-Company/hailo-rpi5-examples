@@ -824,7 +824,7 @@ class GStreamerDetectionApp(GStreamerApp):
             tracker_pipeline = f'{tracker_pipeline} ! '
 
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
-        if self.source_type == 'rpi':
+        if True: #self.source_type == 'rpi':
             # production case == video from camera, use custom pipeline
             display_pipeline = self.get_output_pipeline_string(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
         else:
