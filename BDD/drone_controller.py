@@ -193,7 +193,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
 
     THRUST_MAX      = control_config.pop('thrust_max', 0.5)
-    THRUST_MIN      = control_config.pop('thrust_min', 0.5)
+    THRUST_MIN      = control_config.pop('thrust_min', 0.4)
+    THRUST_CRUISE      = control_config.pop('thrust_cruise', 0.4)
     THRUST_TAKEOFF  = control_config.pop('thrust_takeoff', 0.5)
     THRUST_HOVER    = control_config.pop('thrust_hover', 0.5)
 
@@ -475,7 +476,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             distance_to_center : float = float('NaN')
             angle_to_target = XY()
             move_command = MoveCommand()
-            thrust = THRUST_MIN
+            thrust = THRUST_CRUISE
 
             logger = global_logger
             # logger.debug("!!! awaiting detection... ")
@@ -790,7 +791,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 # Note target_relative_pos is already offset from AIM_POINT
                 distance_to_center = target_relative_pos.distance_to(XY(0, 0))
-                thrust = THRUST_MIN
+                thrust = THRUST_CRUISE
                 if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
                     thrust = THRUST_TAKEOFF
                     logger.warning('takeoff low thrust mode: %s', thrust)
