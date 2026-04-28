@@ -347,9 +347,10 @@ def main():
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_hover' : 0.5,
+        'thrust_cruise' : 0.55,
+        'thrust_hover' : 0.4,
 
-        'thrust_min': 0.55,
+        'thrust_min': 0.4,
         'thrust_max': 0.9,
 
         'thrust_dynamic': False,
@@ -358,7 +359,7 @@ def main():
         'thrust_proportional_to_distance_medium_distance_m' : 20,
         'thrust_proportional_to_distance_medium_coeff'      : 0.9,
         'thrust_proportional_to_distance_near_distance_m'   : 10,
-        'thrust_proportional_to_distance_near_coeff'        : 1.2,
+        'thrust_proportional_to_distance_near_coeff'        : 1.1,
 
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
@@ -370,11 +371,11 @@ def main():
         'estimation_lookahead_frames': 1,
         'estimation_lookahead_dynamic': True,
         'estimation_lookahead_dynamic_frames_max' : 5,
-        'estimation_lookahead_dynamic_sqrt': True,
-        'estimation_lookahead_dynamic_factor': None,
-        'estimation_lookahead_dynamic_frames_near':   1,
-        'estimation_lookahead_dynamic_frames_medium': 2,
-        'estimation_lookahead_dynamic_frames_far':    3, # can't be too big -- estimation will be too FAAR away.
+        'estimation_lookahead_dynamic_sqrt': False,
+        'estimation_lookahead_dynamic_factor': 0.1,
+        'estimation_lookahead_dynamic_frames_near':   0,
+        'estimation_lookahead_dynamic_frames_medium': 0,
+        'estimation_lookahead_dynamic_frames_far':    0, # can't be too big -- estimation will be too FAAR away.
 
         'optical_methods_to_refine_target_size_and_center': True,
         'adjust_aim_point_at_edge_of_frame': True,
