@@ -910,12 +910,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         # Just t visualize the point we are moving to
                         target_relative_pos = prev_angle_to_target.divided_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                         # await drone.standstill()
-                        moving = False
+                        # moving = False
                         debug_info["mode"] = "hover"
                 else:
                     debug_info["mode"] = "idle"
                     if not FOLLOW_TARGET_POSITION_NED and detections_obj.frame_id % 30 == 0:
-                        moving = False
+                        # moving = False
                         await drone.idle()
 
             last_command = drone.last_command() or '<<== NO ==>>'
