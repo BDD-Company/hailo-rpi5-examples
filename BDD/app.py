@@ -31,6 +31,7 @@ from bytetrack import BYTETracker
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
+from stereo_pairer import StereoPairer
 from video_sink_gstreamer import RecorderSink
 from video_sink_multi import MultiSink
 from opencv_show_image_sink import OpenCVShowImageSink
@@ -50,10 +51,12 @@ DEBUG = False
 # -----------------------------------------------------------------------------------------------
 # Inheritance from the app_callback_class
 class user_app_callback_class(app_callback_class):
-    def __init__(self, detections_queue, tracker: BYTETracker):
+    def __init__(self, sink, tracker: BYTETracker, camera_id: str = 'mono'):
         super().__init__()
-        self.detections_queue = detections_queue
+        self.sink = sink
         self.tracker = tracker
+        self.camera_id = camera_id
+        self.seen_frames = deque(maxlen=10)
 
 
 # -----------------------------------------------------------------------------------------------
@@ -96,8 +99,6 @@ def normalized_frame_id(buffer: Gst.Buffer, frame_meta) -> int:
 
     return time.monotonic_ns()
 
-
-seen_frames = deque(maxlen=10)
 
 _MIN_MATCH_IOU = 0.1
 
@@ -149,10 +150,10 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     if sensor_timestamp_ns == 0:
         sensor_timestamp_ns = detection_start_timestamp_ns
 
-    if frame_id in seen_frames:
+    if frame_id in user_data.seen_frames:
         # logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s", frame_id)
         return Gst.PadProbeReturn.OK
-    seen_frames.append(frame_id)
+    user_data.seen_frames.append(frame_id)
 
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
     frame = None
@@ -211,28 +212,36 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         for i, (rect, conf) in enumerate(raw_dets)
     ]
 
-    # if len(detections) != 0:
-    user_data.detections_queue.put(
-        Detections(
-            frame_id,
-            frame,
-            detections_list,
-            meta = FrameMetadata(
-                capture_timestamp_ns=sensor_timestamp_ns,
-                detection_start_timestamp_ns = detection_start_timestamp_ns,
-                detection_end_timestamp_ns=detection_end_timestamp_ns)
-        )
+    detections_obj = Detections(
+        frame_id,
+        frame,
+        detections_list,
+        meta = FrameMetadata(
+            capture_timestamp_ns=sensor_timestamp_ns,
+            detection_start_timestamp_ns = detection_start_timestamp_ns,
+            detection_end_timestamp_ns=detection_end_timestamp_ns)
     )
+    if isinstance(user_data.sink, StereoPairer):
+        user_data.sink.put(user_data.camera_id, detections_obj)
+    else:
+        user_data.sink.put(detections_obj)
 
     return Gst.PadProbeReturn.OK
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None,
+                 video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True,
+                 stereo_mode=False, video_source_right=None, user_data_right=None):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
+        # Stereo state must be set before super().__init__ — create_pipeline()
+        # runs there and reads these via get_pipeline_string().
+        self.stereo_mode = stereo_mode
+        self._video_source_right = video_source_right
+        self._user_data_right = user_data_right
         super().__init__(app_callback, user_data, parser)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
@@ -270,12 +279,125 @@ class App(GStreamerDetectionApp):
                 location="{self.video_output_directory}/{video_file_name}"
         '''
 
+    def get_pipeline_string(self):
+        if not self.stereo_mode:
+            return super().get_pipeline_string()
+
+        from pipelines import (
+            SOURCE_PIPELINE, INFERENCE_PIPELINE, INFERENCE_PIPELINE_WRAPPER,
+            USER_CALLBACK_PIPELINE,
+        )
+        if self._video_source_right is None:
+            raise RuntimeError("stereo_mode=True but video_source_right is None")
+
+        def _branch(camera_id, video_source):
+            src = SOURCE_PIPELINE(
+                video_source=video_source,
+                video_width=self.video_width,
+                video_height=self.video_height,
+                frame_rate=self.frame_rate,
+                sync=self.sync,
+                name=camera_id,
+            )
+            inf = INFERENCE_PIPELINE(
+                hef_path=self.hef_path,
+                post_process_so=self.post_process_so,
+                post_function_name=self.post_function_name,
+                batch_size=self.batch_size,
+                config_json=self.labels_json,
+                additional_params=self.thresholds_str,
+                name=f'{camera_id}_inf',
+                vdevice_group_id=1,
+            )
+            wrapper = INFERENCE_PIPELINE_WRAPPER(inf, name=f'{camera_id}_wrapper')
+            # Left callback is named 'identity_callback' so the parent App.run()
+            # auto-attaches the left probe. Right is attached manually below.
+            cb_name = 'identity_callback' if camera_id == 'left' else f'{camera_id}_cb'
+            cb = USER_CALLBACK_PIPELINE(name=cb_name)
+            return f'{src} ! {wrapper} ! {cb} ! fakesink sync=false'
+
+        left_branch  = _branch('left',  self.video_source)
+        right_branch = _branch('right', self._video_source_right)
+        return f'{left_branch}\n{right_branch}'
+
     def run(self, wait_event_before_starting=None):
         if wait_event_before_starting:
             wait_event_before_starting.wait()
         logger.info("!!! Starting the application (and generating frames with detections)")
 
+        if self.stereo_mode and self._user_data_right is not None:
+            right_elem = self.pipeline.get_by_name('right_cb')
+            if right_elem is None:
+                raise RuntimeError("Stereo pipeline missing 'right_cb' identity element")
+            right_elem.get_static_pad('src').add_probe(
+                Gst.PadProbeType.BUFFER, self.app_callback, self._user_data_right,
+            )
+
         super().run()
+
+
+def _run_calibration_or_verify(args):
+    """Standalone calibration/verification mode — runs a minimal two-source GStreamer
+    pipeline (no inference) and feeds raw frame pairs into FramePairer."""
+    from stereo_calibration import (
+        FramePairer, run_calibration_mode, run_verify_mode, load_calibration,
+    )
+    from pipelines import SOURCE_PIPELINE, USER_CALLBACK_PIPELINE
+
+    if args.input_right is None:
+        raise SystemExit("--input-right is required for calibration modes")
+
+    board_w, board_h = (int(x) for x in args.board_size.split('x'))
+    pairer = FramePairer(max_gap_ns=33_000_000)
+
+    left_src  = SOURCE_PIPELINE(video_source=args.input,       name='left_cal')
+    right_src = SOURCE_PIPELINE(video_source=args.input_right, name='right_cal')
+    left_cb   = USER_CALLBACK_PIPELINE(name='left_cal_cb')
+    right_cb  = USER_CALLBACK_PIPELINE(name='right_cal_cb')
+    pipeline_str = (
+        f'{left_src}  ! {left_cb}  ! fakesink sync=false\n'
+        f'{right_src} ! {right_cb} ! fakesink sync=false'
+    )
+
+    Gst.init(None)
+    pipeline = Gst.parse_launch(pipeline_str)
+
+    def _make_cal_probe(camera_id):
+        def _cb(pad, info, _user_data):
+            buf = info.get_buffer()
+            if buf is None:
+                return Gst.PadProbeReturn.OK
+            fmt, w, h = get_caps_from_pad(pad)
+            frame = get_numpy_from_buffer(buf, fmt, w, h)
+            ts = buf.pts if buf.pts != Gst.CLOCK_TIME_NONE else time.monotonic_ns()
+            pairer.put(camera_id, frame, timestamp_ns=ts)
+            return Gst.PadProbeReturn.OK
+        return _cb
+
+    for side in ('left', 'right'):
+        elem = pipeline.get_by_name(f'{side}_cal_cb')
+        elem.get_static_pad('src').add_probe(
+            Gst.PadProbeType.BUFFER, _make_cal_probe(side), None,
+        )
+
+    pipeline.set_state(Gst.State.PLAYING)
+    try:
+        if args.mode == 'calibrate':
+            run_calibration_mode(
+                pairer=pairer,
+                baseline_m=args.baseline_m,
+                output_path=args.calibration_file,
+                board_size=(board_w, board_h),
+                min_pairs=20,
+            )
+        else:  # verify-calibration
+            calib = load_calibration(args.calibration_file)
+            pair = pairer.wait_for_pair(timeout_s=5.0)
+            if pair is None:
+                raise SystemExit("No frame pair received within 5 seconds")
+            run_verify_mode(calib, pair[0], pair[1])
+    finally:
+        pipeline.set_state(Gst.State.NULL)
 
 
 def main():
@@ -310,6 +432,27 @@ def main():
 
     arg_parser = get_default_parser()
     arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
+    arg_parser.add_argument(
+        '--mode', type=str,
+        choices=['mono', 'stereo', 'calibrate', 'verify-calibration'],
+        default='mono',
+    )
+    arg_parser.add_argument('--input-right', type=str, default=None,
+                            help='Right camera source for stereo/calibrate modes')
+    arg_parser.add_argument('--calibration-file', type=str, default='calibration.npz',
+                            help='Path to stereo calibration file')
+    arg_parser.add_argument('--baseline-m', type=float, default=0.12,
+                            help='Stereo baseline in metres (used during calibration)')
+    arg_parser.add_argument('--board-size', type=str, default='9x6',
+                            help='Chessboard inner corners WxH (e.g. 9x6)')
+
+    args_parsed, _ = arg_parser.parse_known_args()
+    run_mode = args_parsed.mode
+
+    # Calibrate / verify-calibration modes are standalone — no tracker, no controller.
+    if run_mode in ('calibrate', 'verify-calibration'):
+        _run_calibration_or_verify(args_parsed)
+        return
 
     control_config = {
         'confidence_min': 0.4,
@@ -392,15 +535,26 @@ def main():
         'bytetrack_frame_rate':   30,
     }
 
-    bytetracker = BYTETracker(
-        track_thresh=control_config['bytetrack_track_thresh'],
-        det_thresh=control_config['bytetrack_det_thresh'],
-        match_thresh=control_config['bytetrack_match_thresh'],
-        track_buffer=control_config['bytetrack_track_buffer'],
-        frame_rate=control_config['bytetrack_frame_rate'],
-    )
-    user_data = user_app_callback_class(detections_queue, bytetracker)
-    user_data.use_frame = True
+    def _make_tracker():
+        return BYTETracker(
+            track_thresh=control_config['bytetrack_track_thresh'],
+            det_thresh=control_config['bytetrack_det_thresh'],
+            match_thresh=control_config['bytetrack_match_thresh'],
+            track_buffer=control_config['bytetrack_track_buffer'],
+            frame_rate=control_config['bytetrack_frame_rate'],
+        )
+
+    user_data_right = None
+    if run_mode == 'stereo':
+        stereo_pairer = StereoPairer(output_queue=detections_queue)
+        user_data       = user_app_callback_class(stereo_pairer, _make_tracker(), camera_id='left')
+        user_data_right = user_app_callback_class(stereo_pairer, _make_tracker(), camera_id='right')
+        user_data.use_frame       = True
+        user_data_right.use_frame = True
+        control_config['calibration_file'] = args_parsed.calibration_file
+    else:
+        user_data = user_app_callback_class(detections_queue, _make_tracker())
+        user_data.use_frame = True
 
     app = App(
         app_callback,
@@ -409,7 +563,11 @@ def main():
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True)
+        record_videos=(run_mode != 'stereo'),
+        stereo_mode=(run_mode == 'stereo'),
+        video_source_right=args_parsed.input_right,
+        user_data_right=user_data_right,
+    )
 
     logger.info("!!! Config: %s", control_config)
     if DEBUG:
