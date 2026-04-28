@@ -187,20 +187,20 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     global DEBUG
     DEBUG                = control_config.pop('DEBUG', False)
     DEBUG_TELEMETRY_DICT = control_config.pop('debug_telemetry_dict', None)
-
     logger.debug("!!!!! DEBUG state: %s", DEBUG)
+
     CONFIDENCE_MIN  = control_config.pop('confidence_min', 0.1)
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
 
     THRUST_MAX      = control_config.pop('thrust_max', 0.5)
     THRUST_MIN      = control_config.pop('thrust_min', 0.4)
-    THRUST_CRUISE      = control_config.pop('thrust_cruise', 0.4)
+    THRUST_CRUISE   = control_config.pop('thrust_cruise', 0.4)
     THRUST_TAKEOFF  = control_config.pop('thrust_takeoff', 0.5)
     THRUST_HOVER    = control_config.pop('thrust_hover', 0.5)
 
     THRUST_DYNAMIC  = control_config.pop('thrust_dynamic', False)
 
-    THRUST_PROPORTIONAL_TO_DISTANCE = control_config.pop('thrust_proportional_to_distance', False)
+    THRUST_PROPORTIONAL_TO_DISTANCE                   = control_config.pop('thrust_proportional_to_distance', False)
     THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF        = control_config.pop('thrust_proportional_to_distance_near_coeff', 1.0)
     THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF      = control_config.pop('thrust_proportional_to_distance_medium_coeff', 1.0)
     THRUST_PROPORTIONAL_TO_DISTANCE_FAR_COEFF         = control_config.pop('thrust_proportional_to_distance_far_coeff', 1.0)
@@ -211,19 +211,19 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
 
-    PD_COEFF_P      = control_config.pop('pd_coeff_p', 1)
-    PD_COEFF_D      = control_config.pop('pd_coeff_d', 0)
+    PD_COEFF_P                      = control_config.pop('pd_coeff_p', 1)
+    PD_COEFF_D                      = control_config.pop('pd_coeff_d', 0)
 
-    PD_COEFF_P_DYNAMIC = control_config.pop('pd_coeff_p_dynamic', False)
+    PD_COEFF_P_DYNAMIC               = control_config.pop('pd_coeff_p_dynamic', False)
     PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pop('pd_coeff_p_dynamic_use_piecewise', False)
-    PD_COEFF_P_MIN_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_min_target_size', 0.003)
-    PD_COEFF_P_MAX_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_max_target_size', 0.005)
-    PD_COEFF_P_DYNAMIC_MIN  = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
-    PD_COEFF_P_DYNAMIC_MAX  = control_config.pop('pd_coeff_p_dynamic_max', 2)
+    PD_COEFF_P_MIN_TARGET_SIZE       = control_config.pop('pd_coeff_p_dynamic_min_target_size', 0.003)
+    PD_COEFF_P_MAX_TARGET_SIZE       = control_config.pop('pd_coeff_p_dynamic_max_target_size', 0.005)
+    PD_COEFF_P_DYNAMIC_MIN           = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
+    PD_COEFF_P_DYNAMIC_MAX           = control_config.pop('pd_coeff_p_dynamic_max', 2)
 
-    PD_COEFF_P_SAFE_MIN  = control_config.pop('pd_coeff_p_safe_min', 0.5)
-    PD_COEFF_P_MIN  = control_config.pop('pd_coeff_p_min', 0.5)
-    PD_COEFF_P_MAX  = control_config.pop('pd_coeff_p_max', 5)
+    PD_COEFF_P_SAFE_MIN              = control_config.pop('pd_coeff_p_safe_min', 0.5)
+    PD_COEFF_P_MIN                   = control_config.pop('pd_coeff_p_min', 0.5)
+    PD_COEFF_P_MAX                   = control_config.pop('pd_coeff_p_max', 5)
 
     OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = control_config.pop('optical_methods_to_refine_target_size_and_center', False)
     ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = control_config.pop('adjust_aim_point_at_edge_of_frame', False)
@@ -668,7 +668,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     if ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT:
                         estimate_lookeahead_frames = int(math.sqrt(distance))
                     elif ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR is not None:
-                        estimate_lookeahead_frames = int(distance * ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR)
+                        estimate_lookeahead_frames = distance * ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR
 
                     if estimated_distance_class == DistanceClass.FAR:
                         estimate_lookeahead_frames += ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR
@@ -677,9 +677,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     elif estimated_distance_class == DistanceClass.NEAR:
                         estimate_lookeahead_frames += ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR
 
-                    estimate_lookeahead_frames = clamp(0, estimate_lookeahead_frames, ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MAX)
+                    estimate_lookeahead_frames = int(clamp(0, estimate_lookeahead_frames, ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MAX)) * 1.0
 
-                estimate_delta_ns = (current_frame_timestamp_ns - prev_frame_timestamp_ns) * estimate_lookeahead_frames
+                estimate_delta_ns = int((current_frame_timestamp_ns - prev_frame_timestamp_ns) * estimate_lookeahead_frames)
                 estimate_at_ns = current_frame_timestamp_ns + estimate_delta_ns
                 estimate_mode = ''
                 target_relative_pos_old = target_relative_pos
@@ -760,14 +760,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 estimate_mode = target_estimator.describe_prev_estimation() if target_estimator else None
                 if estimate_mode:
-                    mode += f' *{estimate_mode}:{estimate_lookeahead_frames}f '
+                    mode += f' *{estimate_mode}:{estimate_lookeahead_frames/1.0:.2f}f '
 
-                    logger.debug("!!! %s estimated new target pos %s (was %s), for +%sms (%d frames)",
+                    logger.debug("!!! %s estimated new target pos %s (was %s), for +%sms (%.2f frames)",
                             estimate_mode,
                             target_relative_pos,
                             target_relative_pos_old,
                             estimate_delta_ns / 1000_000,
-                            estimate_lookeahead_frames)
+                            estimate_lookeahead_frames/1.0 # just to force it to be float
+                        )
 
                 target_relative_pos_uncorrected = target_relative_pos
                 # Inertia correction: feedforward from actual velocity in FRD frame
