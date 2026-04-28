@@ -447,12 +447,27 @@ class GStreamerApp:
 
         if self.source_type == RPI_NAME_I:
             camera_num = getattr(self.options_menu, 'rpi_camera_num', 0)
+            colour_gains = getattr(self.options_menu, 'rpi_colour_gains', None)
+            if colour_gains:
+                red_gain, blue_gain = (float(x) for x in colour_gains.split(",", 1))
+                picamera_controls_initial = {
+                    "AwbEnable": False,
+                    "ColourGains": (red_gain, blue_gain),
+                }
+            else:
+                awb_mode_name = getattr(self.options_menu, 'rpi_awb_mode', 'Auto')
+                awb_mode = getattr(picamera_controls.AwbModeEnum, awb_mode_name)
+                picamera_controls_initial = {
+                    "AwbEnable": True,
+                    "AwbMode": awb_mode,
+                }
             picam_thread = threading.Thread(
                 target=picamera_thread,
                 args=(self.pipeline, self.video_width, self.video_height, self.video_format),
                 kwargs={
                     "target_fps": self.frame_rate,
                     "camera_num": camera_num,
+                    "picamera_controls_initial": picamera_controls_initial,
                 },
             )
             self.threads.append(picam_thread)
@@ -524,7 +539,7 @@ def picamera_thread(
     camera_model = camera_infos[cam_index]['Model']
     logger.info("Picamera2 opening camera_num=%d (index=%d), model=%s", camera_num, cam_index, camera_model)
 
-    with Picamera2(camera_num=cam_index, tuning=f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}_noir.json") as picam2:
+    with Picamera2(camera_num=cam_index, tuning=f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}.json") as picam2:
         if picamera_config is None:
             # Default configuration
             main = {'size': (1280, 720), 'format': 'RGB888'}
@@ -538,6 +553,7 @@ def picamera_thread(
 
         def apply_controls(controls_dict : dict):
             # TODO: creck that control is supported first
+            logger.info("Picamera2 controls: %s", controls_dict)
             picam2.set_controls(controls_dict)
 
         if picamera_controls_initial is not None:
@@ -635,6 +651,13 @@ def picamera_thread(
                 try:
                     frame_data = request.make_array("lores")
                     frame_meta = request.get_metadata()
+                    if frame_count % 60 == 0 and frame_meta is not None:
+                        logger.info(
+                            "Picamera2 metadata: ColourGains=%s ColourTemperature=%s AwbLocked=%s",
+                            frame_meta.get("ColourGains"),
+                            frame_meta.get("ColourTemperature"),
+                            frame_meta.get("AwbLocked"),
+                        )
                 finally:
                     request.release()
 
@@ -642,9 +665,13 @@ def picamera_thread(
                     logger.error("Failed to capture frame #%d.", frame_count)
                     break
 
-                # Convert framontigue data if necessary
-                frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-                frame = np.asarray(frame)
+                # Picamera2 returns lores in the configured stream format.
+                # RGB888 already matches the appsrc caps; swapping channels here
+                # makes the displayed frame look pink/blue.
+                if active_stream['format'] == 'RGB888':
+                    frame = np.ascontiguousarray(frame_data)
+                else:
+                    frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
 
                 # Create Gst.Buffer by wrapping the frame data
                 buffer = Gst.Buffer.new_wrapped(frame.tobytes())

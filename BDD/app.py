@@ -344,6 +344,17 @@ def main():
     arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
     arg_parser.add_argument('--display', action='store_true', default=False, help='Show debug video on screen')
     arg_parser.add_argument('--rpi-camera-num', type=int, default=0, help='Picamera2 camera index (default: 0)')
+    arg_parser.add_argument(
+        '--rpi-awb-mode',
+        choices=["Auto", "Daylight", "Cloudy", "Indoor", "Tungsten", "Fluorescent", "Incandescent"],
+        default="Auto",
+        help='Picamera2 auto white balance mode used when --rpi-colour-gains is empty',
+    )
+    arg_parser.add_argument(
+        '--rpi-colour-gains',
+        default='1.65,2.1',
+        help='Manual Picamera2 red,blue colour gains. Use empty value to enable AWB mode.',
+    )
     app = App(
         app_callback,
         user_data,

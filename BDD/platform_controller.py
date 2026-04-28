@@ -57,7 +57,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     for _key in list(control_config):
         control_config.pop(_key)
 
-    center = XY(0.5, 0.5)
+    center = XY(0.0, 0.0)
     seen_target = False
 
     SPEED_ADJUSTMENTS = platform_config.get('speed_adjustments', XY(1.0, 1.0))
@@ -66,13 +66,13 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     # Disable hardware position polling: current_pos() reads are unreliable and block the loop.
     platform.adjustable_speed = False
     logger.info("homing to 0,0…")
-    platform.move_to_center()
+    platform.move_to(center)
 
     # Wait until the platform physically arrives at 0,0 (or timeout).
-    _HOME_TOLERANCE_DEG = 5.0   # degrees — "close enough"
+    _HOME_TOLERANCE_DEG = 2.0   # degrees — "close enough"
     _HOME_TIMEOUT_S     = 15.0
     _t0 = time.monotonic()
-    _home = XY(0, 0)
+    _home = center.clone()
     while True:
         await asyncio.sleep(0.15)
         cur = platform.current_pos()
