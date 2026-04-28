@@ -162,7 +162,7 @@ def estimate_distance_class(
     if d is None:
         return None, None
 
-    if d < max_size * 2:
+    if d < max_size * 3:
         return DistanceClass.NEAR, d
     if d < max_size * 10:
         return DistanceClass.MEDIUM, d

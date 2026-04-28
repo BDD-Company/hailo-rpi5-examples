@@ -347,7 +347,7 @@ def main():
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_cruise' : 0.55,
+        'thrust_cruise' : 0.53,
         'thrust_hover' : 0.4,
 
         'thrust_min': 0.4,
