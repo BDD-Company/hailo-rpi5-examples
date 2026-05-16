@@ -171,8 +171,8 @@ class GStreamerApp:
 
         # Set Hailo parameters; these parameters should be set based on the model used
         self.batch_size = 1
-        self.video_width = 1280
-        self.video_height = 720
+        self.video_width = 640
+        self.video_height = 640
         self.video_format = HAILO_RGB_VIDEO_FORMAT
         self.hef_path = None
         self.app_callback = None
@@ -318,6 +318,29 @@ class GStreamerApp:
         self.buffer_counters[key] = 0
         def _probe_cb(pad, info, _user):
             self.buffer_counters[key] += 1
+            return Gst.PadProbeReturn.OK
+        pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
+
+    def _install_detection_start_probe(self, element_name='inference_wrapper_input_q', pad_name='sink'):
+        """Stamp `timestamp/x-unix` reference meta with time.monotonic_ns() on each buffer
+        entering the detection portion of the pipeline. The user callback reads it back as
+        detection_start to compute detection-only latency.
+
+        No-op when the meta is already present — the picamera2/appsrc producer attaches it
+        upstream, so this only fills in the libcamerasrc path where nothing else does."""
+        element = self.pipeline.get_by_name(element_name)
+        if element is None:
+            logger.warning("Cannot install detection-start probe: element %r not found", element_name)
+            return
+        pad = element.get_static_pad(pad_name)
+        if pad is None:
+            logger.warning("Cannot install detection-start probe: pad %r of %r not found", pad_name, element_name)
+            return
+        unix_ts_caps = Gst.Caps.from_string("timestamp/x-unix")
+        def _probe_cb(pad, info, _user):
+            buf = info.get_buffer()
+            if buf is not None and buf.get_reference_timestamp_meta(unix_ts_caps) is None:
+                buf.add_reference_timestamp_meta(unix_ts_caps, time.monotonic_ns(), Gst.CLOCK_TIME_NONE)
             return Gst.PadProbeReturn.OK
         pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
 
@@ -486,6 +509,12 @@ class GStreamerApp:
             'identity_callback',
         ):
             self._add_buffer_counter_probe(elem_name, 'src')
+
+        if self.source_type == 'libcamera':
+            # Stamp detection-start timestamp on buffers entering the inference wrapper.
+            # libcamerasrc path has nobody to attach this upstream; picamera2 path already does.
+            self._install_detection_start_probe()
+
         # Periodic pipeline health snapshot (buffer counts, queue levels, stall detection).
         GLib.timeout_add_seconds(2, self._log_pipeline_health)
 

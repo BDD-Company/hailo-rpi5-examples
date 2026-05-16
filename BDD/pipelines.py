@@ -102,7 +102,7 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
     elif source_type == 'libcamera':
         framerate = int(force_framerate if force_framerate is not None else frame_rate)
         source_element = (
-            f'libcamerasrc name={name} ! '
+            f'libcamerasrc name={name} exposure-time-mode=manual exposure-time=8000 ! '
             f'video/x-raw, format=NV12, width={video_width}, height={video_height}, framerate={framerate}/1 ! '
         )
     elif source_type == 'ximage':
@@ -122,10 +122,13 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
     # Set up the fps caps.
     # If sync is True, constrain the rate with the given frame_rate.
     # Otherwise, pass through (no framerate limitation).
+    # Always pin format/size so caps queries can't intersect upstream Bayer/etc.
+    # back through libcamerasrc during negotiation.
+    base_caps = f"video/x-raw, format={video_format}, width={video_width}, height={video_height}"
     if sync:
-        fps_caps = f"video/x-raw, framerate={frame_rate}/1"
+        fps_caps = f"{base_caps}, framerate={frame_rate}/1"
     else:
-        fps_caps = "video/x-raw"
+        fps_caps = base_caps
 
     source_pipeline = (
         f'{source_element} '
