@@ -152,9 +152,23 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         sensor_timestamp_ns = detection_start_timestamp_ns
 
     if frame_id in seen_frames:
-        # logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s", frame_id)
+        logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s", frame_id)
         return Gst.PadProbeReturn.OK
+
     seen_frames.append(frame_id)
+
+    if True:
+        pipeline_clock = pad.get_parent_element().get_clock()
+        base_time      = pad.get_parent_element().get_base_time()
+        now_running    = pipeline_clock.get_time() - base_time
+        end_to_end_ns  = now_running - buffer.pts
+
+        sensor_timestamp_ns = buffer.pts
+        detection_start_timestamp_ns = buffer.pts
+        detection_end_timestamp_ns = now_running
+
+        logger.info("!!!!!!!!!!!!!!!!!!!!!!! e2e delay: %ums", int(end_to_end_ns / 1_000_000))
+
 
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
     frame = None
@@ -192,12 +206,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     else:
         dets_array = np.empty((0, 5))
 
-    logger.debug(
-        "frame=#%04d ByteTracker input: %d detections %s",
-        frame_id,
-        len(raw_dets),
-        [(round(r.left_edge, 1), round(r.top_edge, 1), round(r.right_edge, 1), round(r.bottom_edge, 1), round(c, 3)) for r, c in raw_dets],
-    )
+    # logger.debug(
+    #     "frame=#%04d ByteTracker input: %d detections %s",
+    #     frame_id,
+    #     len(raw_dets),
+    #     [(round(r.left_edge, 1), round(r.top_edge, 1), round(r.right_edge, 1), round(r.bottom_edge, 1), round(c, 3)) for r, c in raw_dets],
+    # )
 
     track_id_map: dict[int, int] = {}
     if USE_TRACKER:
@@ -412,9 +426,11 @@ def main():
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
         # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
-        'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
-        'inertia_correction_limits': XY(1, 1),
-        'inertia_correction_min_speed_ms': 5,
+        # Inertia correction is in another branch and not used since telemetry data is weird sometimes,
+        # leading to completely invalid corrections.
+        # 'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
+        # 'inertia_correction_limits': XY(1, 1),
+        # 'inertia_correction_min_speed_ms': 5,
 
         'safe_takeoff_period_ns': 300_000_000,
         'delay_takeof_until_n_detection_frames' : 10,
@@ -424,11 +440,18 @@ def main():
 
         'follow_target_position_ned' : False,
 
-        # params to go to the drone config ("drone_" prefix is stripped then)
-        'drone_use_set_attitude': False,
-        'drone_min_lift_fraction': 0.1,
-        'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
-        'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+        'drone' : {
+            'connection_string' : 'udpout://192.168.0.3:14540', # direct comm with drone, slow to start, fails to connect on client restart
+            # 'connection_string' : 'udp://:14550', # mavlink-rounterd
+            'config' : {
+                'upside_down_angle_deg': 130,
+                'upside_down_hold_s': 0.2,
+                'use_set_attitude': False,
+                'min_lift_fraction': 0.1,
+                'lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
+                'lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+            }
+        },
 
         'DEBUG': DEBUG,
 
@@ -499,15 +522,12 @@ def main():
             )
         )
     else:
-
+        drone_params = control_config.pop('drone')
         action_thread = threading.Thread(
             target = drone_controlling_thread,
             args = (
-                'udp://:14550',
-                {
-                    'upside_down_angle_deg': 130,
-                    'upside_down_hold_s': 0.2,
-                },
+                drone_params.pop('connection_string'), #'udp://10.41.10.2:14540',
+                drone_params.pop('config'),
                 detections_queue
             ),
             kwargs= dict(

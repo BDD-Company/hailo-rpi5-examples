@@ -303,10 +303,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
         logger.warning("follow_target_position_ned requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True
 
-    DRONE_CONFIG_PREFIX = 'drone_'
-    for drone_config_key in [k for k in control_config.keys() if k.startswith(DRONE_CONFIG_PREFIX)]:
-        drone_config_key_stripped = drone_config_key.removeprefix(DRONE_CONFIG_PREFIX)
-        drone_config[drone_config_key_stripped]=control_config.pop(drone_config_key)
+    # DRONE_CONFIG_PREFIX = 'drone_'
+    # for drone_config_key in [k for k in control_config.keys() if k.startswith(DRONE_CONFIG_PREFIX)]:
+    #     drone_config_key_stripped = drone_config_key.removeprefix(DRONE_CONFIG_PREFIX)
+    #     drone_config[drone_config_key_stripped]=control_config.pop(drone_config_key)
 
     if len(control_config) > 0:
         logger.warning("Unknonw/unused config parameters: %s", control_config)
@@ -592,7 +592,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             )
             detection = picked if picked is not None else Detection()
             logger.info(f"!!!!! CPU Temperature: {cpu.temperature}°C")
+
             if detection.confidence >= CONFIDENCE_MIN:
+            #     await drone.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=0.2, current_telemetry=telemetry_dict)
+            # elif True:
+            #     await drone.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=0.01, current_telemetry=telemetry_dict)
+
                 if BYTETRACK_TARGET_LOCK and detection.track_id is not None:
                     locked_track_id = detection.track_id
 
