@@ -4,7 +4,7 @@ import asyncio
 # import nest_asyncio
 import dataclasses
 from enum import Enum
-from math import nan, cos, radians, acos, degrees, copysign
+from math import nan, cos, radians, acos, atan2, degrees, copysign, hypot
 import time
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate, OffboardError
@@ -94,6 +94,24 @@ class DroneMover():
         self.drone_connection_string = drone_connection_string
         self.aborted = False
         self.upside_down_state = False
+
+        # Belly-down yaw assist.
+        # This airframe is a quadro whose body (forward/nose axis) is normal to
+        # the rotor plane, so "belly-down" means the nose points at the ground.
+        # Yaw spins the craft about the body-down (rotor-normal) axis, which can
+        # only swing the nose within the body forward-right plane. Once the body
+        # is tilted enough that gravity has a component in that plane, we drive a
+        # proportional yaw rate to align the nose with the estimated earth-down
+        # direction (taken from the accelerometer). Turn off via 'belly_down_yaw'.
+        self.belly_down_yaw = self.config.get('belly_down_yaw', True)
+        # Yaw rate (deg/s) commanded per degree of nose-vs-down heading error.
+        self.belly_down_yaw_kp = self.config.get('belly_down_yaw_kp', 1.5)
+        # Clamp on the commanded yaw rate (deg/s).
+        self.belly_down_yaw_max_rate_deg_s = self.config.get('belly_down_yaw_max_rate_deg_s', 90.0)
+        # Minimum gravity magnitude (m/s²) in the forward-right plane before the
+        # assist engages; below this the nose is ~aligned with the rotor axis and
+        # yaw can't tilt it toward the ground, so the heading error is just noise.
+        self.belly_down_min_horizontal_g_mss = self.config.get('belly_down_min_horizontal_g_mss', 2.0)
 
         # Telemetry aspects to keep cached; edit this list to add/remove streams.
         self.telemetry_aspects = [
@@ -566,6 +584,49 @@ class DroneMover():
                       roll_deg, safe_roll, pitch_deg, safe_pitch, thrust, self.min_lift_fraction, effective_min_lift, bonus)
         return safe_roll, safe_pitch
 
+    def _belly_down_yaw_rate(self, current_telemetry) -> float:
+        """Yaw rate (deg/s) that rotates the nose toward the ground ("belly-down").
+
+        For this airframe the body/forward axis is normal to the rotor plane, so
+        belly-down == the forward axis pointing along gravity. Yaw spins the craft
+        about the body-down (rotor-normal) axis, which can only move the nose
+        within the body forward-right plane. We therefore estimate the earth-down
+        direction in the body frame from the accelerometer and drive the nose
+        toward the in-plane part of it with a proportional controller.
+
+        The accelerometer reports specific force (≈ -gravity at rest), so the
+        earth-down direction in the body frame is the negated accel vector.
+
+        Returns 0.0 when disabled, when telemetry is missing, or when the body is
+        too close to upright for yaw to make any difference.
+        """
+        if not self.belly_down_yaw:
+            return 0.0
+
+        try:
+            accel = current_telemetry["imu"]["acceleration_frd"]
+            down_fwd = -accel["forward_m_s2"]
+            down_rgt = -accel["right_m_s2"]
+        except (TypeError, KeyError):
+            return 0.0
+
+        # Gravity component lying in the forward-right plane (the plane yaw can
+        # rotate the nose within). Too small => nose ~aligned with rotor axis.
+        horizontal_g = hypot(down_fwd, down_rgt)
+        if horizontal_g < self.belly_down_min_horizontal_g_mss:
+            return 0.0
+
+        # Heading error between the nose (+forward) and the in-plane down dir.
+        # Positive yaw (about body-down) swings +forward toward +right.
+        error_deg = degrees(atan2(down_rgt, down_fwd))
+        yaw_rate = self.belly_down_yaw_kp * error_deg
+        yaw_rate = max(-self.belly_down_yaw_max_rate_deg_s,
+                       min(self.belly_down_yaw_max_rate_deg_s, yaw_rate))
+
+        logger.debug("belly-down yaw: down_frd=(%.2f,%.2f) horiz_g=%.2f err=%.1f° -> yaw_rate=%.1f°/s",
+                     down_fwd, down_rgt, horizontal_g, error_deg, yaw_rate)
+        return yaw_rate
+
     async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0, current_telemetry = None) -> None:
         if self.upside_down_state:
             logger.warning("drone is UPSIDE-DOWN, ignoring command")
@@ -585,11 +646,12 @@ class DroneMover():
                 )
             )
         else:
+            yaw_deg_s = self._belly_down_yaw_rate(current_telemetry)
             await drone_offboard.set_attitude_rate(
                 AttitudeRate(
                     roll_deg_s=roll_degree,
                     pitch_deg_s=pitch_degree,
-                    yaw_deg_s=0,
+                    yaw_deg_s=yaw_deg_s,
                     thrust_value=thrust,
                 )
             )
