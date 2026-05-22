@@ -146,9 +146,94 @@ class DroneMover():
         asyncio.run(__shutdown_async())
 
 
+    @staticmethod
+    def _find_usb_device() -> str:
+        """Resolve the special 'USB' connection target to a concrete device path.
+
+        1. Prefer a stable by-id symlink for an Auterion PX4 FMU, e.g.
+           /dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00.
+        2. Otherwise fall back to the most recently connected /dev/ttyACM* node.
+
+        Raises RuntimeError when neither is present.
+        """
+        import glob
+        import os
+
+        by_id = sorted(glob.glob("/dev/serial/by-id/usb-Auterion_PX4_FMU*"))
+        if by_id:
+            logger.info("USB -> PX4 by-id device: %s", by_id[0])
+            return by_id[0]
+
+        acm = glob.glob("/dev/ttyACM*")
+        if acm:
+            # newest device node = most recently connected
+            device = max(acm, key=lambda p: os.stat(p).st_mtime)
+            logger.info("USB -> most recently connected device: %s", device)
+            return device
+
+        raise RuntimeError("No viable USB devices found")
+
+    @staticmethod
+    def _validate_px4_on_serial(device_path: str, baud: int = 57600, timeout_s: float = 10.0) -> bool:
+        """Briefly open `device_path` with pymavlink and confirm a PX4 autopilot
+        is heartbeating on the other side, then close the port so mavsdk can
+        take it over.
+
+        Returns True if a PX4 heartbeat is seen, False otherwise. When
+        pymavlink is unavailable validation is skipped (returns True).
+        """
+        try:
+            from pymavlink import mavutil
+        except ImportError:
+            logger.warning("pymavlink unavailable, skipping PX4 validation of %s", device_path)
+            return True
+
+        conn = None
+        try:
+            conn = mavutil.mavlink_connection(device_path, baud=baud)
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                hb = conn.recv_match(type="HEARTBEAT", blocking=True, timeout=1.0)
+                if hb is None:
+                    continue
+                # GCS / companion heartbeats report INVALID; keep looking for the FC.
+                if hb.autopilot == mavutil.mavlink.MAV_AUTOPILOT_INVALID:
+                    continue
+                is_px4 = hb.autopilot == mavutil.mavlink.MAV_AUTOPILOT_PX4
+                logger.info("Heartbeat on %s: autopilot=%d (is PX4: %s)",
+                            device_path, hb.autopilot, is_px4)
+                return is_px4
+        except Exception:
+            logger.exception("PX4 validation failed on %s", device_path)
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        logger.warning("No PX4 heartbeat seen on %s within %.0fs", device_path, timeout_s)
+        return False
+
+    def _resolve_connection_string(self) -> str:
+        """Expand the special 'USB' connection target into a concrete
+        serial:// device path, validating that a PX4 is actually on the other
+        side. Any other connection string is returned unchanged."""
+        if self.drone_connection_string.lower() != "usb":
+            return self.drone_connection_string
+
+        device = self._find_usb_device()
+        # pixhawk 6x seems to be supporting about 2Mbps, here using ~1Mbps-ish just to be safe.
+        BAUD_RATE=1_000_000
+        # MUST specify baude rate explicitly otherwise will fail to connect later
+        return f"serial://{device}:{BAUD_RATE}"
+
+
     async def startup_sequence(self, arm_attempts = 100, force_arm=False):
-        logging.info("Connecting to drone... %s", self.drone_connection_string)
-        await self.drone.connect(system_address = self.drone_connection_string)
+        connection_string = self._resolve_connection_string()
+        logging.info("Connecting to drone... %s", connection_string)
+        await self.drone.connect(system_address = connection_string)
         arm_attempts = max(3, arm_attempts)
 
         drone = self.drone
