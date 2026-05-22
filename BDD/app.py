@@ -452,6 +452,13 @@ def main():
                 'min_lift_fraction': 0.1,
                 'lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
                 'lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+
+                # Belly-down yaw assist: yaw the nose toward the ground (forward
+                # axis points down) using the accelerometer-estimated gravity dir.
+                'belly_down_yaw': True,                  # set False to disable
+                'belly_down_yaw_kp': 1.5,                # deg/s per deg of heading error
+                'belly_down_yaw_max_rate_deg_s': 90.0,   # clamp on commanded yaw rate
+                'belly_down_min_horizontal_g_mss': 2.0,  # min in-plane gravity to engage
             }
         },
 
