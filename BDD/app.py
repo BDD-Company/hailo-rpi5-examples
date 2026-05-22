@@ -157,7 +157,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
     seen_frames.append(frame_id)
 
-    if True:
+    if False:
         pipeline_clock = pad.get_parent_element().get_clock()
         base_time      = pad.get_parent_element().get_base_time()
         now_running    = pipeline_clock.get_time() - base_time
