@@ -129,6 +129,13 @@ class XY:
     def __str__(self):
         return f"XY({self.x:.3f}, {self.y:.3f})"
 
+    def __format__(self, format_spec):
+        # Apply the format spec to x and y individually, e.g. f"{xy:.2f}".
+        # An empty spec falls back to the default __str__ representation.
+        if not format_spec:
+            return self.__str__()
+        return f"XY({self.x:{format_spec}}, {self.y:{format_spec}})"
+
 
 @dataclass(init=True, slots=True, order=True, repr=False)
 class Rect:
