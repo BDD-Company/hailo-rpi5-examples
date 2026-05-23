@@ -72,7 +72,24 @@ def is_drone_moving(telemetry_dict):
 
 def clamp(min_val, val, max_val):
     typeof_val = type(val)
+    if typeof_val == XY:
+        return clamp_xy(min_val, val, max_val)
+
     return typeof_val(max(min_val, min(max_val, val)))
+
+
+def clamp_xy(min_val, val: XY, max_val) -> XY:
+    """Clamp each component of an XY independently.
+
+    Bounds may be scalars (same bound on both axes) or XY (per-axis bounds);
+    in either case x is clamped against the x bound and y against the y bound.
+    """
+    min_x = min_val.x if isinstance(min_val, XY) else min_val
+    min_y = min_val.y if isinstance(min_val, XY) else min_val
+    max_x = max_val.x if isinstance(max_val, XY) else max_val
+    max_y = max_val.y if isinstance(max_val, XY) else max_val
+
+    return XY(clamp(min_x, val.x, max_x), clamp(min_y, val.y, max_y))
 
 
 def _pick_target_detection(
@@ -211,7 +228,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
 
-    PD_COEFF_P                      = control_config.pop('pd_coeff_p', 1)
+    PD_COEFF_P                      = control_config.pop('pd_coeff_p', XY(1, 1))
+    # P may be different along each axis, so it is carried around as an XY.
+    # Accept a plain scalar from config too and apply it to both axes.
+    if not isinstance(PD_COEFF_P, XY):
+        PD_COEFF_P = XY(PD_COEFF_P, PD_COEFF_P)
     PD_COEFF_D                      = control_config.pop('pd_coeff_d', 0)
 
     PD_COEFF_P_DYNAMIC               = control_config.pop('pd_coeff_p_dynamic', False)
@@ -221,9 +242,17 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     PD_COEFF_P_DYNAMIC_MIN           = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
     PD_COEFF_P_DYNAMIC_MAX           = control_config.pop('pd_coeff_p_dynamic_max', 2)
 
-    PD_COEFF_P_SAFE_MIN              = control_config.pop('pd_coeff_p_safe_min', 0.5)
-    PD_COEFF_P_MIN                   = control_config.pop('pd_coeff_p_min', 0.5)
-    PD_COEFF_P_MAX                   = control_config.pop('pd_coeff_p_max', 5)
+    PD_COEFF_P_SAFE_MIN              = control_config.pop('pd_coeff_p_safe_min', XY(0.5, 0.5))
+    if not isinstance(PD_COEFF_P_SAFE_MIN, XY):
+        PD_COEFF_P_SAFE_MIN = XY(PD_COEFF_P_SAFE_MIN, PD_COEFF_P_SAFE_MIN)
+    PD_COEFF_P_MIN                   = control_config.pop('pd_coeff_p_min', XY(0.5, 0.5))
+    PD_COEFF_P_MAX                   = control_config.pop('pd_coeff_p_max', XY(5, 5))
+    # P bounds may be different along each axis, carried around as XY.
+    # Accept a plain scalar from config too and apply it to both axes.
+    if not isinstance(PD_COEFF_P_MIN, XY):
+        PD_COEFF_P_MIN = XY(PD_COEFF_P_MIN, PD_COEFF_P_MIN)
+    if not isinstance(PD_COEFF_P_MAX, XY):
+        PD_COEFF_P_MAX = XY(PD_COEFF_P_MAX, PD_COEFF_P_MAX)
 
     OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = control_config.pop('optical_methods_to_refine_target_size_and_center', False)
     ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = control_config.pop('adjust_aim_point_at_edge_of_frame', False)
@@ -430,14 +459,14 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             * ((s - PD_COEFF_P_STAGE_2_THRESHOLD) / (1.0 - PD_COEFF_P_STAGE_2_THRESHOLD))
         )
 
-    def pd_coeff_p_for_target_size(target_size):
+    def pd_coeff_p_for_target_size(target_size) -> XY:
         if isinstance(target_size, XY):
             target_size = target_size.x * target_size.y
 
-        def compute_p(target_size):
+        def compute_p(target_size) -> XY:
             # avoid tipping over on hallucinations while close to the ground
             if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
-                logger.warning("Initial stage of flight, reducing P to %s", PD_COEFF_P_MIN)
+                logger.warning("Initial stage of flight, reducing P to %s", PD_COEFF_P_SAFE_MIN)
                 return PD_COEFF_P_SAFE_MIN
 
             if not PD_COEFF_P_DYNAMIC:
@@ -450,21 +479,24 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
             if max_size <= min_size:
                 logger.warning("Invalid target size range: min=%s max=%s", min_size, max_size)
-                return p_min
+                return XY(p_min, p_min)
 
             s = (target_size - min_size) / (max_size - min_size)
             s = clamp(0.0, s, 1.0)
 
+            # Dynamic profile produces a single size-based gain; apply it to both axes.
             if PD_COEFF_P_DYNAMIC_USE_PIECEWISE:
                 ratio = piecewise_p_ratio(s)
-                return clamp(p_min, p_min + ratio * (p_max - p_min), p_max)
+                p = clamp(p_min, p_min + ratio * (p_max - p_min), p_max)
+                return XY(p, p)
 
             result = p_min + s * (p_max - p_min)
 
-            return clamp(p_min, result, p_max)
+            p = clamp(p_min, result, p_max)
+            return XY(p, p)
 
         p = compute_p(target_size)
-        p = clamp(PD_COEFF_P_MIN, p, PD_COEFF_P_MAX)
+        p = clamp_xy(PD_COEFF_P_MIN, p, PD_COEFF_P_MAX)
         return p
 
 
@@ -854,7 +886,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 logger.debug("angle to target: %s", angle_to_target)
 
-                mode += f'size: {target_size}, estimated distance: ({estimated_distance_class} @ {estimated_distance_m:.1f}m), p: {pd_coeff_p * 1.0 : .3} '
+                mode += f'size: {target_size}, estimated distance: ({estimated_distance_class} @ {estimated_distance_m:.1f}m), p: {pd_coeff_p:.2f} '
 
                 # while still taking off, avoid dangerous moves
                 # if flight_time_ns < SAFE_TAKEOFF_PERIOD_NS:
