@@ -31,8 +31,15 @@ class CommandRegulator:
 
         Pk, Dk = self.Pk, self.Dk
 
+        # Pk may be a scalar (same gain on both axes) or an XY (per-axis gain,
+        # so X and Y can be regulated differently).
+        if isinstance(Pk, XY):
+            p_term = command.multiplied_by_XY(Pk)
+        else:
+            p_term = command * Pk
+
         # Note: looks like introducing D leads to crazy command output, too big
-        return command * Pk + (command - prev_command) * (Dk / dt_ms)
+        return p_term + (command - prev_command) * (Dk / dt_ms)
 
 
 def test_CommandRegulator():

@@ -397,11 +397,11 @@ def main():
         'adjust_aim_point_at_edge_of_frame_threshold': 0.01,
         'adjust_aim_point_at_edge_of_frame_max_size': 0.25, # w*h, e.g. w=0.5, h=0.5, size=0.25
 
-        'pd_coeff_p': 1,
+        'pd_coeff_p': XY(1, 0.5), # per-axis P gain (x, y)
         'pd_coeff_d': 0, #-1, # -1
-        'pd_coeff_p_safe_min': 0.6,
-        'pd_coeff_p_min' : 0.5,
-        'pd_coeff_p_max' : 1.5,
+        'pd_coeff_p_safe_min': XY(0.5, 0.5),
+        'pd_coeff_p_min' : XY(0.5, 0.5),
+        'pd_coeff_p_max' : XY(1.5, 1.5),
 
         # Dynamically adjust P coeff based on target size.
         # Old mode: linear interpolation between min and max.
