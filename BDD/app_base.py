@@ -15,7 +15,7 @@ import queue
 
 
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GLib, GObject
+from gi.repository import Gst, GLib, GObject, GstApp
 
 from hailo_apps.hailo_app_python.core.common.installation_utils import detect_hailo_arch
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser, get_resource_path
@@ -497,18 +497,18 @@ class GStreamerApp:
             display_process = multiprocessing.Process(target=display_user_data_frame, args=(self.user_data,))
             display_process.start()
 
-        # Buffer-counter probes at strategic points in the pipeline. The order matters:
-        # _log_pipeline_health() treats the LAST registered probe as the "deepest" one
-        # for stall detection. So register them upstream → downstream.
-        for elem_name in (
-            'app_source',
-            'inference_wrapper_input_q',
-            'inference_hailonet',
-            'inference_hailofilter',
-            'inference_wrapper_output_q',
-            'identity_callback',
-        ):
-            self._add_buffer_counter_probe(elem_name, 'src')
+        # # Buffer-counter probes at strategic points in the pipeline. The order matters:
+        # # _log_pipeline_health() treats the LAST registered probe as the "deepest" one
+        # # for stall detection. So register them upstream → downstream.
+        # for elem_name in (
+        #     'app_source',
+        #     'inference_wrapper_input_q',
+        #     'inference_hailonet',
+        #     'inference_hailofilter',
+        #     'inference_wrapper_output_q',
+        #     'identity_callback',
+        # ):
+        #     self._add_buffer_counter_probe(elem_name, 'src')
 
         if self.source_type == 'libcamera':
             # Stamp detection-start timestamp on buffers entering the inference wrapper.
@@ -516,7 +516,7 @@ class GStreamerApp:
             self._install_detection_start_probe()
 
         # Periodic pipeline health snapshot (buffer counts, queue levels, stall detection).
-        GLib.timeout_add_seconds(2, self._log_pipeline_health)
+        # GLib.timeout_add_seconds(2, self._log_pipeline_health)
 
         if self.source_type == RPI_NAME_I:
             on_picam_failure = lambda: GLib.idle_add(self.shutdown)
@@ -565,11 +565,36 @@ class GStreamerApp:
                 sys.exit(0)
 
 
-def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 25, picamera_controls_initial = None, picamera_controls_per_frame_callback = None, on_failure=None, capture_timeout_s = 1.0, slow_capture_warn_s = 0.2, alive_log_every_n_frames = 100):
-    appsrc = pipeline.get_by_name("app_source")
+def picamera_thread(
+        pipeline,
+        video_width,
+        video_height,
+        video_format,
+        picamera_config=None,
+        target_fps = 20,
+        picamera_controls_initial = None,
+        picamera_controls_per_frame_callback = None,
+        on_failure=None,
+        capture_timeout_s = 1,
+        slow_capture_warn_s = 0.2,
+        alive_log_every_n_frames = 100
+    ):
+    appsrc: GstApp.AppSrc = pipeline.get_by_name("app_source")
     appsrc.set_property("is-live", True)
     appsrc.set_property("format", Gst.Format.TIME)
-    logger.debug("appsrc properties: %s", appsrc)
+    if logger.isEnabledFor(logging.DEBUG):
+        prop_lines = []
+        for pspec in appsrc.list_properties():
+            if not (pspec.flags & GObject.ParamFlags.READABLE):
+                continue
+            try:
+                value = appsrc.get_property(pspec.name)
+            except Exception as e:  # some props raise when not yet negotiated
+                value = f"<unreadable: {e}>"
+            if isinstance(value, Gst.Caps):
+                value = value.to_string()
+            prop_lines.append(f"  {pspec.name} = {value!r}")
+        logger.debug("appsrc '%s' properties:\n%s", appsrc.get_name(), "\n".join(prop_lines))
     # Initialize Picamera2
 
     camera_model = Picamera2.global_camera_info()[0]['Model']
