@@ -397,7 +397,7 @@ def main():
         'adjust_aim_point_at_edge_of_frame_threshold': 0.01,
         'adjust_aim_point_at_edge_of_frame_max_size': 0.25, # w*h, e.g. w=0.5, h=0.5, size=0.25
 
-        'pd_coeff_p': XY(1, 0.5), # per-axis P gain (x, y)
+        'pd_coeff_p': XY(8, 2), # per-axis P gain (x, y)
         'pd_coeff_d': 0, #-1, # -1
         'pd_coeff_p_safe_min': XY(0.5, 0.5),
         'pd_coeff_p_min' : XY(0.5, 0.5),
@@ -444,7 +444,8 @@ def main():
         'drone' : {
             # 'connection_string' : 'udpout://192.168.0.3:14540', # direct comm with drone, slow to start, fails to connect on client restart
             #'connection_string' : 'udp://:14550', # mavlink-rounterd
-            'connection_string' : 'serial:///dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00',
+            # 'connection_string' : 'serial:///dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00',
+            'connection_string' : 'usb',
             'config' : {
                 'upside_down_angle_deg': 130,
                 'upside_down_hold_s': 0.2,
