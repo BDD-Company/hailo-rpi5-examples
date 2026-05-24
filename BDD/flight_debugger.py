@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal, QObject, QPoint
 from PyQt6.QtGui import (
     QImage, QPixmap, QTextCursor, QTextCharFormat, QColor, QFont,
-    QAction, QShortcut, QKeySequence,
+    QAction, QShortcut, QKeySequence, QColorConstants
 )
 
 import matplotlib
@@ -65,7 +65,7 @@ class HighlightStyle:
     BOLD       : bool — whether highlighted text is bold
     """
     BACKGROUND = QColor(50, 50, 100)
-    FOREGROUND = None                     # keep default text colour
+    FOREGROUND = QColorConstants.White
     BOLD = False
 
 
