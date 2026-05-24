@@ -885,12 +885,39 @@ class GStreamerDetectionApp(GStreamerApp):
             # here custom pipeline might break rewinding of initial source, use default display pipeline
             display_pipeline = DISPLAY_PIPELINE(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
 
+        # Split the post-inference stream with a tee so the (software, CPU-heavy)
+        # video recorder can never back-pressure the detection path.
+        #
+        # Why the isolating queue goes AFTER the tee, not before it:
+        # a tee fans every buffer out to all of its src pads *synchronously, on the
+        # thread that pushed the buffer in*. A queue placed BEFORE the tee would only
+        # decouple the tee from its upstream — both branches would still run on that one
+        # post-queue thread, so a slow encoder would still stall detection. Placing the
+        # large leaky queue AFTER the tee, on the recording branch, gives the encoder its
+        # own streaming thread; the tee's push into a leaky queue returns immediately
+        # (dropping the oldest frame when full), so detection never waits on the encoder.
+        #
+        #   output_tee
+        #     ├─ detection branch:  identity (probe) -> fakesink   (terminates ASAP)
+        #     └─ recording branch:  BIG leaky queue -> encoder -> splitmuxsink
+        #
+        # The recording queue is leaky=downstream so a lagging encoder drops the oldest
+        # *raw* frame instead of blocking the tee. Sized in buffers (raw RGB ~2.6 MB each
+        # at 1280x720) to bound RAM (~30 buffers ≈ 80 MB); raise it to ride out longer
+        # encoder stalls without dropping recorded frames, at the cost of RAM only — it
+        # adds no detection latency because it is leaky.
+        recording_input_queue = (
+            'queue name=recording_input_q leaky=downstream '
+            'max-size-buffers=120 max-size-bytes=0 max-size-time=0'
+        )
+
         pipeline_string = (
             f'{source_pipeline} ! '
             f'{detection_pipeline_wrapper} ! '
             f'{tracker_pipeline} '
-            f'{user_callback_pipeline} ! '
-            f'{display_pipeline}'
+            f'tee name=output_tee '
+            f'output_tee. ! {user_callback_pipeline} ! fakesink name=detection_sink sync=false async=false '
+            f'output_tee. ! {recording_input_queue} ! {display_pipeline}'
         )
 
         logger.debug(pipeline_string)
