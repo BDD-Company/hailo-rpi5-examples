@@ -349,12 +349,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     pd_coeff_p_dynamic_stage = None
 
     cpu = CPUTemperature()
-    logger.info(f"PRE START CPU Temperature: {cpu.temperature}°C")
+    logger.info("PRE START CPU Temperature: %s°C", cpu.temperature)
 
     drone = DroneMover(drone_connection_string, drone_config)
     logger.debug("starting up drone... with %s, config: %s", drone_connection_string, drone_config)
 
-    logger.info(f"POST START CPU Temperature: {cpu.temperature}°C")
+    logger.info("POST START CPU Temperature: %s°C", cpu.temperature)
 
     # udp_port = 14560
     # killdrone_thread = threading.Thread(
@@ -623,7 +623,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK
             )
             detection = picked if picked is not None else Detection()
-            logger.info(f"!!!!! CPU Temperature: {cpu.temperature}°C")
+            # Guard the read: cpu.temperature is a sysfs access, so even %-style would
+            # evaluate it every frame. Skip it entirely when INFO is disabled.
+            if logger.isEnabledFor(logging.INFO) and frame_id % 10 == 0:
+                logger.info("!!!!! CPU Temperature: %s°C", cpu.temperature)
 
             if detection.confidence >= CONFIDENCE_MIN:
             #     await drone.move_to_target_zenith_async(roll_degree=0, pitch_degree=0, thrust=0.2, current_telemetry=telemetry_dict)
@@ -663,10 +666,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         target_center.y = min(1, max_p.y) - ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD
 
 
-                logger.debug(f"!!! {TARGET_SIZE_M}, {FRAME_ANGLUAR_SIZE_DEG}, visual size: {target_size}/{detection.bbox.size}, visual center: {target_center}/{detection.bbox.center}")
+                logger.debug("!!! %s, %s, visual size: %s/%s, visual center: %s/%s",
+                        TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, target_size, detection.bbox.size, target_center, detection.bbox.center)
                 estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, target_size)
 
-                logger.debug(f"!!! RAW estimated_distance: {estimated_distance_class} {estimated_distance_m}")
+                logger.debug("!!! RAW estimated_distance: %s %s",
+                        estimated_distance_class, estimated_distance_m)
 
                 # if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS and estimated_distance_m < 10:
                 #     # HACK: we have a distance estimation issue here, distance is at least 50m
@@ -676,7 +681,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 # logger.debug(f"!!! estimated_distance: {estimated_distance_m}")
                 # NOTE: At large distances estimation higly undershoots, formula corrects it to be good enough
                 # estimated_distance_m *= math.e #(math.log(estimated_distance_m, 10) + 0.5)
-                logger.debug(f"!!! estimated_distance: {estimated_distance_m}")
+                logger.debug("!!! estimated_distance: %s", estimated_distance_m)
 
                 try:
                     drone_pose = get_pose(telemetry_dict)
@@ -956,8 +961,28 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         # moving = False
                         await drone.idle()
 
-            last_command = drone.last_command() or '<<== NO ==>>'
+            # Stage C latency: stamp the moment the control command has actually been
+            # sent to the drone (the awaited move/idle/hover above has returned), then
+            # split the capture→command path into its segments:
+            #   sensor→command (e2e)  = the true end-to-end number
+            #   callback→command (C)  = queue_wait + processing
+            #     queue_wait = callback (frame enqueued) → this iteration dequeued it
+            #     processing = dequeue → command sent (telemetry + estimation + PD + await)
+            # detection_end (callback) and capture (sensor) come from the frame meta;
+            # current_frame_timestamp_ns is when this iteration dequeued the frame.
+            command_sent_ns = time.monotonic_ns()
+            raw_last_command = drone.last_command()
+            last_command = raw_last_command or '<<== NO ==>>'
             debug_info["action"] = last_command
+            if raw_last_command:  # a control command was actually issued this frame
+                _meta = detections_obj.meta
+                logger.warning(
+                    "!!! LATENCY sensor→command(e2e): %.1fms | callback→command(stageC): %.1fms = queue_wait %.1fms + processing %.1fms",
+                    (command_sent_ns - _meta.capture_timestamp_ns) / 1000_000,
+                    (command_sent_ns - _meta.detection_end_timestamp_ns) / 1000_000,
+                    (current_frame_timestamp_ns - _meta.detection_end_timestamp_ns) / 1000_000,
+                    (command_sent_ns - current_frame_timestamp_ns) / 1000_000,
+                )
             mode = debug_info.get('mode', '')
             logger.info("MODE: %s, ACTION: %s", mode, last_command)
 
@@ -992,4 +1017,5 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 output_queue.put(output)
 
         except:
-            logger.exception(f"Got exception: %s %s COMMAND: %s", detections_obj, distance_to_center, move_command, exc_info=True)
+            logger.exception("Got exception: %s %s COMMAND: %s",
+                    detections_obj, distance_to_center, move_command, exc_info=True)
