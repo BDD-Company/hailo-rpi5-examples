@@ -347,7 +347,13 @@ def main():
         logger.error("!!! ============================================================== !!!")
         logger.error('')
 
-    detections_queue = OverwriteQueue(maxsize=20)
+    # maxsize=1 so the control loop always acts on the FRESHEST detection.
+    # The producer (camera->pipeline->callback) runs ~14 fps but the drone loop only
+    # ~8.5 fps; with a deep queue + oldest-first get() the loop chewed through a ~20-frame
+    # backlog, making every decision act on a frame ~1.3 s stale (the dominant latency).
+    # With size 1 the callback overwrites, so get() returns the latest frame and stale
+    # frames are dropped instead of queued (same drop count, but keeps new not old).
+    detections_queue = OverwriteQueue(maxsize=1)
     output_queue = OverwriteQueue(maxsize=200)
 
 
