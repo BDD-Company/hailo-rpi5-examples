@@ -976,7 +976,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             debug_info["action"] = last_command
             if raw_last_command:  # a control command was actually issued this frame
                 _meta = detections_obj.meta
-                logger.warning(
+                logger.debug(
                     "!!! LATENCY sensor→command(e2e): %.1fms | callback→command(stageC): %.1fms = queue_wait %.1fms + processing %.1fms",
                     (command_sent_ns - _meta.capture_timestamp_ns) / 1000_000,
                     (command_sent_ns - _meta.detection_end_timestamp_ns) / 1000_000,
