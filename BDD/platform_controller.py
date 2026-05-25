@@ -95,7 +95,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     PLATFORM_INITIAL_POS = control_config.pop('platform_initiali_pos', XY(0, 0))
 
     if len(control_config) > 0:
-        logger.warning("Unknonw/unused config parameters: %s", control_config)
+        logger.warning("Unknown/unused config parameters: %s", control_config)
 
     center = XY(0.5, 0.5)
     distance_r = 0.1
