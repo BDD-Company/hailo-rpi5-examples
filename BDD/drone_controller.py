@@ -339,7 +339,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     #     drone_config[drone_config_key_stripped]=control_config.pop(drone_config_key)
 
     if len(control_config) > 0:
-        logger.warning("Unknonw/unused config parameters: %s", control_config)
+        logger.warning("Unknown/unused config parameters: %s", control_config)
 
 
     distance_r = 0.1
