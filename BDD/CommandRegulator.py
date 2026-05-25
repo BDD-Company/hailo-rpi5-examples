@@ -1,18 +1,19 @@
 #!/usr/bin/env python
 
 from collections import deque
+from copy import copy
 
 from helpers import XY
 
 class CommandRegulator:
     def __init__(self, Pk, Dk):
-        self.Pk = Pk
-        self.Dk = Dk
+        self.Pk = copy(Pk)
+        self.Dk = copy(Dk)
         self.previous_commands = deque(maxlen=3)
 
     def set_coeffs(self, Pk, Dk):
-        self.Pk = Pk
-        self.Dk = Dk
+        self.Pk = copy(Pk)
+        self.Dk = copy(Dk)
 
 
     def get_coeffs(self):

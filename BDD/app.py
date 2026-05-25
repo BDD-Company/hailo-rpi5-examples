@@ -407,7 +407,7 @@ def main():
         'pd_coeff_d': 0, #-1, # -1
         'pd_coeff_p_safe_min': XY(0.5, 0.5),
         'pd_coeff_p_min' : XY(0.5, 0.5),
-        'pd_coeff_p_max' : XY(1.5, 1.5),
+        'pd_coeff_p_max' : XY(4, 2),
 
         # Dynamically adjust P coeff based on target size.
         # Old mode: linear interpolation between min and max.

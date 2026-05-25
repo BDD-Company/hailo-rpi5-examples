@@ -3,6 +3,7 @@
 import asyncio
 import math
 import time
+from  copy import copy
 from queue import Empty, Queue
 
 from helpers import XY
@@ -467,10 +468,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             # avoid tipping over on hallucinations while close to the ground
             if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
                 logger.warning("Initial stage of flight, reducing P to %s", PD_COEFF_P_SAFE_MIN)
-                return PD_COEFF_P_SAFE_MIN
+                return copy(PD_COEFF_P_SAFE_MIN)
 
             if not PD_COEFF_P_DYNAMIC:
-                return PD_COEFF_P
+                return copy(PD_COEFF_P)
 
             min_size = PD_COEFF_P_MIN_TARGET_SIZE
             max_size = PD_COEFF_P_MAX_TARGET_SIZE
@@ -496,7 +497,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             return XY(p, p)
 
         p = compute_p(target_size)
-        p = clamp_xy(PD_COEFF_P_MIN, p, PD_COEFF_P_MAX)
+        p = copy(clamp_xy(PD_COEFF_P_MIN, p, PD_COEFF_P_MAX))
         return p
 
 
