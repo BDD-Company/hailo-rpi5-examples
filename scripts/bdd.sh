@@ -33,7 +33,30 @@ if [[ -z "$TMUX" ]]; then
     tmux new-session -d -s "$SESSION_NAME" "$quoted"
 
     if [[ -t 1 ]]; then
-        exec tmux attach -t "$SESSION_NAME"
+        echo "App running detached in tmux session '$SESSION_NAME'."
+        echo "Streaming its output below; lines stay in THIS terminal's scrollback."
+        echo "Ctrl-C stops the APP (forwarded into tmux). Reattach: tmux attach -t $SESSION_NAME"
+        echo
+
+        # Ctrl-C here sends a real SIGINT to the app in the pane (graceful, just
+        # like pressing Ctrl-C while attached) instead of only killing the tail.
+        trap 'tmux send-keys -t "$SESSION_NAME" C-c 2>/dev/null' INT
+
+        # Foreground the log in the real terminal (no tmux alt-screen) so output
+        # accumulates in the client's native scrollback and survives a Pi power-out.
+        # The subshell ignores INT so the tail keeps printing the app's shutdown
+        # messages; -F waits for latest.log and re-follows when a new run rotates it.
+        ( trap '' INT; exec tail -n +1 -F "./hailo-rpi5-examples/_DEBUG/latest.log" ) &
+        tail_pid=$!
+
+        # Block until the app's session ends (normal exit, or after Ctrl-C), then
+        # stop the tail and drop back to the shell.
+        while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
+            sleep 1
+        done
+        sleep 1                                   # let tail flush the last lines
+        kill "$tail_pid" 2>/dev/null ||:
+        exit 0
     else
         echo "Started detached in tmux session '$SESSION_NAME'."
         echo "Attach: tmux attach -t $SESSION_NAME"
@@ -47,6 +70,9 @@ cd ./hailo-rpi5-examples/
 
 readonly start_time=$(date +%Y%m%d-%H%M%S)
 mkdir -p ./_DEBUG/ ||:
+
+# Stable name the foreground `tail -F` (see bootstrap) can follow across runs.
+ln -sfn "BDD_${start_time}.log" "./_DEBUG/latest.log"
 
 # Mirror stdout/stderr to log file while still showing live in the tmux pane.
 exec > >(tee "./_DEBUG/BDD_${start_time}.log") 2>&1
@@ -69,7 +95,7 @@ export LIBCAMERA_LOG_LEVELS=1
 export DISPLAY=:0
 export HAILO_MODEL="/home/bdd/models/2026-04-22_11n_sh_v5.hef"
 
-python \
+python -u \
     ./BDD/app.py \
     --hef-path "${HAILO_MODEL}" \
     -i rpi \
