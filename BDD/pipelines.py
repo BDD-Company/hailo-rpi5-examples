@@ -138,16 +138,20 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
 
     if source_type == 'rpi':
         # The picamera2/appsrc producer already delivers exactly video_format @
-        # video_width x video_height (it sets the appsrc caps to match), so the videoscale
-        # (W->W) and videoconvert (format->format) below would be pure no-ops that still
-        # cost a full-frame CPU pass + a thread hop each. Skip them — the inference
-        # wrapper does its own scale/convert to the model's input size downstream. Keep
-        # one decoupling queue plus the videorate/fps caps (rate control + element names
-        # update_fps_caps() looks up).
+        # video_width x video_height at the camera's natural (variable) rate with correct
+        # per-buffer PTS, so the whole common tail is redundant on this path:
+        #   - videoscale (W->W) / videoconvert (format->format) — pure no-op full-frame
+        #     passes;
+        #   - videorate + fps_caps — only DUPLICATED the variable camera stream up to a
+        #     fixed framerate, and those dupes got inferred by Hailo then dropped by the
+        #     callback's frame-id dedup, wasting inference. Downstream times off PTS, so
+        #     no fixed rate is needed for the live path.
+        # The inference wrapper does its own scale/convert to the model input downstream.
+        # (update_fps_caps() would look up the now-removed videorate/fps_caps elements,
+        # but it has no callers and already no-ops gracefully if they are absent.)
         source_pipeline = (
             f'{source_element} '
-            f'{QUEUE(name=f"{name}_scale_q")} ! '
-            f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
+            f'{QUEUE(name=f"{name}_scale_q")} '
         )
     else:
         source_pipeline = (
