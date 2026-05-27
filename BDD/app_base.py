@@ -623,7 +623,11 @@ def picamera_thread(
         picamera_controls_initial = None,
         picamera_controls_per_frame_callback = None,
         on_failure=None,
-        capture_timeout_s = 1,
+        # imx477's first frame after a fresh start regularly takes 0.5-1.5s
+        # (especially after a fast restart of the previous process) and 1s
+        # was too tight — half the cold starts now fail. 3s gives the slower
+        # sensor headroom without masking a truly stalled camera.
+        capture_timeout_s = 3,
         slow_capture_warn_s = 0.2,
         alive_log_every_n_frames = 100,
         appsrc_name = "app_source",
