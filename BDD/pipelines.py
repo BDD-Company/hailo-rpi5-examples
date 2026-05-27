@@ -136,16 +136,30 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
     else:
         fps_caps = base_caps
 
-    source_pipeline = (
-        f'{source_element} '
-        f'{QUEUE(name=f"{name}_scale_q")} ! '
-        f'videoscale name={name}_videoscale n-threads=2 ! '
-        f'{QUEUE(name=f"{name}_convert_q")} ! '
-        f'videoconvert n-threads=3 name={name}_convert qos=false ! '
-        f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, '
-        f'width={video_width}, height={video_height} ! '
-        f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
-    )
+    if source_type == 'rpi':
+        # The picamera2/appsrc producer already delivers exactly video_format @
+        # video_width x video_height (it sets the appsrc caps to match), so the videoscale
+        # (W->W) and videoconvert (format->format) below would be pure no-ops that still
+        # cost a full-frame CPU pass + a thread hop each. Skip them — the inference
+        # wrapper does its own scale/convert to the model's input size downstream. Keep
+        # one decoupling queue plus the videorate/fps caps (rate control + element names
+        # update_fps_caps() looks up).
+        source_pipeline = (
+            f'{source_element} '
+            f'{QUEUE(name=f"{name}_scale_q")} ! '
+            f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
+        )
+    else:
+        source_pipeline = (
+            f'{source_element} '
+            f'{QUEUE(name=f"{name}_scale_q")} ! '
+            f'videoscale name={name}_videoscale n-threads=2 ! '
+            f'{QUEUE(name=f"{name}_convert_q")} ! '
+            f'videoconvert n-threads=3 name={name}_convert qos=false ! '
+            f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, '
+            f'width={video_width}, height={video_height} ! '
+            f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
+        )
 
     return source_pipeline
 
