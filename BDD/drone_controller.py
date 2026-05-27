@@ -641,6 +641,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
 
+                aim_point = copy(AIM_POINT)
+
                 target_size = detection.bbox.size
                 target_center = detection.bbox.center
 
@@ -695,7 +697,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 # target_size = target_size #detection.bbox.area()
                 pd_coeff_p = pd_coeff_p_for_target_size(target_size.x * target_size.y)
 
-                target_relative_pos = AIM_POINT - target_center
+                target_relative_pos = aim_point - target_center
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
 
                 # TODO maybe use frame capture time?
