@@ -742,6 +742,15 @@ def picamera_thread(
         # NOT derived from this anymore — see _shared_pts_ns above for why.
         first_sensor_timestamp_ns = 0
         prev_frame_timestamp_ns = 0
+
+        # Dual-camera idle throttle. When this camera is INACTIVE (the other
+        # one is feeding inference), we still need it captured so AGC/AWB stay
+        # converged for an instant switch — but at the full target_fps the
+        # idle camera burned ~half the ISP/CPU budget that the active path
+        # needed. Set a low FrameRate while inactive; restore on activation.
+        # Effect on latency p50 of the active path was the primary motivation.
+        INACTIVE_FPS = 5
+        was_active : bool | None = None  # forces the initial control push on first iteration
         logger.debug("picamera_process started")
         last_alive_log_monotonic = time.monotonic()
         last_alive_log_frame_count = 0
@@ -763,6 +772,19 @@ def picamera_thread(
                 picamera_controls = picamera_controls_per_frame_callback(frame_count)
                 if picamera_controls:
                     apply_controls(picamera_controls)
+
+            # Apply FrameRate based on active/inactive transition. Cheap call;
+            # only invoked when the active flag actually flips. picam2 latches
+            # the new rate on the next ISP cycle (~one frame interval), which
+            # is fast enough that the first push after a switch is at full
+            # rate already (we ramp up just before becoming active).
+            if camera_switcher is not None:
+                is_active = camera_switcher.is_active(camera_id)
+                if is_active != was_active:
+                    new_fps = capture_target_fps if is_active else INACTIVE_FPS
+                    apply_controls({'FrameRate': new_fps})
+                    logger.info("%s FrameRate -> %d fps (active=%s)", log_prefix, new_fps, is_active)
+                    was_active = is_active
 
             capture_started_monotonic = time.monotonic()
             try:
