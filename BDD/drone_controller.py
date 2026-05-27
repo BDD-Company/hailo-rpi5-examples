@@ -21,7 +21,7 @@ from telemetry_position import (
     project_ned_to_camera
 )
 # from drone_killswitch import kill_on_rc_switch_on_channel
-from helpers import Detection, Detections, MoveCommand, STOP
+from helpers import Detection, Detections, MoveCommand, STOP, CameraSwitcher, DEFAULT_CAMERA_ID
 
 try:
     from gpiozero import CPUTemperature
@@ -47,12 +47,19 @@ DEBUG = False
 
 
 def drone_controlling_thread(*args, **kwargs):
+    signal_event_when_ready = kwargs.get('signal_event_when_ready')
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(drone_controlling_thread_async(*args, **kwargs))
     except Exception as e:
         logger.error("in drone event loop", exc_info=True, stack_info=True)
+        # Unblock app.run(event) so the GStreamer pipeline still comes up.
+        # Otherwise a startup failure here (e.g. no PX4 USB attached on a
+        # bench) deadlocks the main thread waiting on event.wait() and the
+        # picam/inference threads never spawn, masking unrelated issues.
+        if signal_event_when_ready is not None:
+            signal_event_when_ready.set()
     finally:
         loop.close()
 
@@ -193,7 +200,15 @@ def compute_inertia_correction(telemetry_dict, target_relative_pos, gain, min_sp
     )
 
 
-async def drone_controlling_thread_async(drone_connection_string, drone_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None):
+async def drone_controlling_thread_async(
+        drone_connection_string,
+        drone_config,
+        detections_queue,
+        control_config = {},
+        output_queue = None,
+        signal_event_when_ready = None,
+        camera_switcher : CameraSwitcher | None = None
+    ):
     # from math import radians
 
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
@@ -293,7 +308,17 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     PD_COEFF_P_STAGE_3_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_3_ratio', 0.35)
 
     TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
-    FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
+    # Legacy / single-camera fallback. When camera_switcher is provided, FOV
+    # is looked up per-frame from the matching CameraConfig instead, so two
+    # cameras with different FOVs (wide vs tele) yield correct steering angles.
+    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = control_config.pop('frame_angular_size_deg', XY(120, 90))
+
+    def fov_for_camera(cam_id : int) -> XY:
+        if camera_switcher is not None:
+            cfg = camera_switcher.get_config(cam_id)
+            if cfg is not None:
+                return cfg.frame_angular_size_deg
+        return FRAME_ANGLUAR_SIZE_DEG_DEFAULT
 
     # INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
     # INERTIA_CORRECTION_LIMITS : XY = control_config.pop('inertia_correction_limits', XY(1, 1))
@@ -396,6 +421,14 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     moving = False
     flight_time_ns = 0
+    # Tracks which camera last produced a frame, so we can detect a camera
+    # switch and clear all per-camera caches (estimators, ByteTrack lock,
+    # PD history) — geometry/FOV change at the switch makes old samples
+    # meaningless and would otherwise inject a bogus velocity spike.
+    last_camera_id : int | None = None
+    # FOV in degrees of the camera that produced the CURRENT frame. Initialized
+    # to the default; refreshed every iteration from the incoming Detections.
+    FRAME_ANGLUAR_SIZE_DEG : XY = FRAME_ANGLUAR_SIZE_DEG_DEFAULT
     takeoff_time_ns = None
     prev_angle_to_target = XY()
     skipped_detetions = 0
@@ -559,7 +592,36 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 break
 
             update_timestamps()
-            logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
+            logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}/cam{detections_obj.camera_id}')
+
+            # Camera switch detection. On switch, refresh the per-frame FOV
+            # used for all geometry below AND drop all per-camera caches:
+            #   - target estimators (2D + 3D) hold positions captured under
+            #     the OLD camera's pinhole; reusing them after a switch would
+            #     compute a wildly wrong velocity at the discontinuity
+            #   - ByteTrack track ids are camera-local; the locked id must
+            #     be released so the next frame can establish a new lock
+            #   - PD regulator history is from the old camera's angular
+            #     resolution; carrying it across yields one bogus large step
+            if last_camera_id is None or last_camera_id != detections_obj.camera_id:
+                if last_camera_id is not None:
+                    logger.warning(
+                        "!!! CAMERA SWITCH: %s -> %s, purging estimators / track lock / PD history",
+                        last_camera_id, detections_obj.camera_id,
+                    )
+                    target_estimator_2d.clear_history()
+                    target_estimator_3d.clear_history()
+                    locked_track_id = None
+                    target_position_ned = None
+                    target_position_prev_ned = None
+                    estimated_velocity_ned = None
+                    prev_angle_to_target = XY()
+                    # CommandRegulator stores last input internally; reinstating
+                    # the configured P/D forces it to drop its previous-sample
+                    # state (next_command() initializes on first call).
+                    command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
+                last_camera_id = detections_obj.camera_id
+                FRAME_ANGLUAR_SIZE_DEG = fov_for_camera(detections_obj.camera_id)
 
             # if DEBUG:
             #     # NOTE: injecting fake detections to debug
@@ -636,6 +698,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 if BYTETRACK_TARGET_LOCK and detection.track_id is not None:
                     locked_track_id = detection.track_id
+
+                if frame_id != 0 and frame_id % 100 == 0:
+                    logger.info("Switching camera from %s", camera_switcher.active_id())
+                    camera_switcher.toggle()
 
                 seen_target = True
                 last_seen_target_at_frame = detections_obj.frame_id
@@ -1015,7 +1081,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     # 'target_pos_ned' : target_estimator_3d.latest,
                     # 'target_pos_ned_estimated' : target_estimator_3d.estimate(current_frame_timestamp_ns),
                     # 'inertia_accumuated' : target_relative_pos,
-                    'move_goal' : target_relative_pos
+                    'move_goal' : target_relative_pos,
+                    'camera_id' : detections_obj.camera_id,
+                    'frame_angular_size_deg' : FRAME_ANGLUAR_SIZE_DEG,
                 }
                 output_queue.put(output)
 

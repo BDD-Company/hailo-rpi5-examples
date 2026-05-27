@@ -9,7 +9,7 @@ from helpers import XY
 from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator
 from platform_mover import PlatformMover
-from helpers import Detection, Detections, MoveCommand, STOP
+from helpers import Detection, Detections, MoveCommand, STOP, CameraSwitcher, DEFAULT_CAMERA_ID
 from estimate_distance import estimate_distance_class, DistanceClass
 
 
@@ -33,7 +33,7 @@ def platform_controlling_thread(*args, **kwargs):
         loop.close()
 
 
-async def platform_controlling_thread_async(platform_connection_string, platform_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None):
+async def platform_controlling_thread_async(platform_connection_string, platform_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None, camera_switcher : CameraSwitcher | None = None):
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
     global global_logger
     logger = global_logger
@@ -88,7 +88,20 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     PD_COEFF_P_STAGE_3_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_3_ratio', 0.35)
 
     TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
-    FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
+    # Legacy / single-camera fallback. With camera_switcher we resolve FOV
+    # per-frame from the active CameraConfig so a tele-camera frame is steered
+    # with the tele-camera FOV (not the wide-camera default).
+    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = control_config.pop('frame_angular_size_deg', XY(120, 90))
+
+    def fov_for_camera(cam_id : int) -> XY:
+        if camera_switcher is not None:
+            cfg = camera_switcher.get_config(cam_id)
+            if cfg is not None:
+                return cfg.frame_angular_size_deg
+        return FRAME_ANGLUAR_SIZE_DEG_DEFAULT
+
+    FRAME_ANGLUAR_SIZE_DEG : XY = FRAME_ANGLUAR_SIZE_DEG_DEFAULT
+    last_camera_id : int | None = None
 
     # SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
 
@@ -228,7 +241,22 @@ async def platform_controlling_thread_async(platform_connection_string, platform
 
             update_timestamps()
             logger.debug("!!!")
-            logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
+            logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}/cam{detections_obj.camera_id}')
+
+            # Camera switch: discard the trajectory history captured under the
+            # previous camera's FOV (would compute a wildly wrong velocity at
+            # the discontinuity) and refresh FOV used by angle math below.
+            if last_camera_id is None or last_camera_id != detections_obj.camera_id:
+                if last_camera_id is not None:
+                    logger.warning(
+                        "!!! CAMERA SWITCH: %s -> %s, purging target estimator history",
+                        last_camera_id, detections_obj.camera_id,
+                    )
+                    target_estimator.clear_history()
+                    prev_angle_to_target = XY()
+                    command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
+                last_camera_id = detections_obj.camera_id
+                FRAME_ANGLUAR_SIZE_DEG = fov_for_camera(detections_obj.camera_id)
 
             # if DEBUG:
             #     # NOTE: injecting fake detections to debug
@@ -391,7 +419,9 @@ async def platform_controlling_thread_async(platform_connection_string, platform
                     'selected' : detection,
                     'telemetry': debug_info,
                     'selected_detection_projected_pos' : target_relative_pos,
-                    'move_goal' : target_relative_pos
+                    'move_goal' : target_relative_pos,
+                    'camera_id' : detections_obj.camera_id,
+                    'frame_angular_size_deg' : FRAME_ANGLUAR_SIZE_DEG,
                 }
                 output_queue.put(output)
 
