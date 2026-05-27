@@ -94,8 +94,14 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
             framere_clause=f',framerate={framerate}/1'
 
         source_element = (
-            # max-size-time is 100ms in nanoseconds
-            f'appsrc name=app_source is-live=true leaky-type=downstream {do_timestamp_clause} ! '
+            # `format=time` MUST be set on appsrc at pipeline-parse time, not later from
+            # picamera_thread: with the lighter single-stream picam2 config, the main
+            # thread now reaches Gst.State.PAUSED before picamera_thread runs its
+            # set_property("format", Gst.Format.TIME), so appsrc emits a BYTES-format
+            # segment and videorate downstream rejects it with "Got segment but doesn't
+            # have GST_FORMAT_TIME value" -> Internal data stream error and the pipeline
+            # dies. Declaring it here eliminates the race regardless of thread timing.
+            f'appsrc name=app_source is-live=true leaky-type=downstream format=time {do_timestamp_clause} ! '
             # 'videoflip name=videoflip video-direction=horiz ! '
             f'video/x-raw, format={video_format}, width={video_width}, height={video_height} {framere_clause} ! '
         )
