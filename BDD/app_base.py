@@ -571,7 +571,7 @@ def picamera_thread(
         video_height,
         video_format,
         picamera_config=None,
-        target_fps = 20,
+        target_fps = 30,  # aligns appsrc caps with the pipeline's 30/1 -> no videorate duplication
         picamera_controls_initial = None,
         picamera_controls_per_frame_callback = None,
         on_failure=None,
@@ -601,11 +601,15 @@ def picamera_thread(
 
     with Picamera2(tuning=f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}_noir.json") as picam2:
         if picamera_config is None:
-            # Default configuration
+            # Single ISP output stream. The inference path only ever consumed one
+            # 1280x720 RGB frame; the old config also allocated an identical, UNUSED
+            # `lores` stream which doubled ISP output bandwidth for nothing. Capture
+            # `main` only. buffer_count trimmed from the preview default (4) to 3 to
+            # shorten the camera pipeline depth (fewer frames in flight => lower capture
+            # latency); each request is released immediately after copying, so 3 suffices.
             main = {'size': (1280, 720), 'format': 'RGB888'}
-            lores = {'size': (video_width, video_height), 'format': 'RGB888'}
             controls = {'FrameRate': target_fps}
-            config = picam2.create_preview_configuration(main=main, lores=lores, controls=controls)
+            config = picam2.create_preview_configuration(main=main, controls=controls, buffer_count=3)
         else:
             config = picamera_config
         # Configure the camera with the created configuration
@@ -618,10 +622,10 @@ def picamera_thread(
         if picamera_controls_initial is not None:
             apply_controls(picamera_controls_initial)
 
-        # Update GStreamer caps based on 'lores' stream
-        lores_stream = config['lores']
-        format_str = 'RGB' if lores_stream['format'] == 'RGB888' else video_format
-        width, height = lores_stream['size']
+        # Update GStreamer caps based on the captured stream
+        capture_stream = config['main']
+        format_str = 'RGB' if capture_stream['format'] == 'RGB888' else video_format
+        width, height = capture_stream['size']
         logger.debug("Picamera2 configuration: width=%s, height=%s, format=%s", width, height, format_str)
         appsrc.set_property(
             "caps",
@@ -644,6 +648,11 @@ def picamera_thread(
         logger.debug("picamera_process started")
         last_alive_log_monotonic = time.monotonic()
         last_alive_log_frame_count = 0
+        # Timing breakdown to locate the fps bottleneck: capture wait (camera/ISP) vs
+        # post-capture loop work (cvtColor/tobytes/appsrc push). Reset each alive window.
+        capture_time_accum = 0.0
+        processing_time_accum = 0.0
+        emit_time_accum = 0.0  # subset of loop_proc spent inside appsrc push-buffer
         while True:
             # TODO(vnemkov): only set if camera actually supports those:
             # Must set AF params AFTER picam2.start() above, otherwise it doesn't work
@@ -676,12 +685,14 @@ def picamera_thread(
                     "picam2.capture_request took %.3fs (frame #%d) — exceeds %.3fs threshold; camera may be stalling",
                     capture_elapsed_s, frame_count, slow_capture_warn_s,
                 )
+            capture_time_accum += capture_elapsed_s
+            proc_start_monotonic = time.monotonic()
 
             frame_data = None
             frame_meta = None
             frame_timestamp_ns = 0
             try:
-                frame_data = request.make_array("lores")
+                frame_data = request.make_array("main")
                 frame_meta = request.get_metadata()
             finally:
                 request.release()
@@ -722,7 +733,9 @@ def picamera_thread(
                 buffer.offset = frame_count
 
             # Push the buffer to appsrc
+            emit_start_monotonic = time.monotonic()
             ret = appsrc.emit('push-buffer', buffer)
+            emit_time_accum += time.monotonic() - emit_start_monotonic
             if ret == Gst.FlowReturn.FLUSHING:
                 break
             if ret != Gst.FlowReturn.OK:
@@ -730,6 +743,7 @@ def picamera_thread(
                 if on_failure is not None:
                     on_failure()
                 break
+            processing_time_accum += time.monotonic() - proc_start_monotonic
             frame_count += 1
 
             if alive_log_every_n_frames and frame_count % alive_log_every_n_frames == 0:
@@ -737,12 +751,21 @@ def picamera_thread(
                 window_s = now_monotonic - last_alive_log_monotonic
                 window_frames = frame_count - last_alive_log_frame_count
                 window_fps = window_frames / window_s if window_s > 0 else 0.0
+                avg_capture_ms = (capture_time_accum / window_frames * 1000.0) if window_frames else 0.0
+                avg_proc_ms = (processing_time_accum / window_frames * 1000.0) if window_frames else 0.0
+                avg_emit_ms = (emit_time_accum / window_frames * 1000.0) if window_frames else 0.0
                 logger.info(
-                    "picamera_thread alive: pushed %d frames so far, last %d frames in %.2fs (%.1f fps)",
+                    "picamera_thread alive: pushed %d frames so far, last %d frames in %.2fs (%.1f fps); "
+                    "per-frame avg: capture_wait=%.1fms loop_proc=%.1fms [convert=%.1fms emit=%.1fms] (interval=%.1fms)",
                     frame_count, window_frames, window_s, window_fps,
+                    avg_capture_ms, avg_proc_ms, avg_proc_ms - avg_emit_ms, avg_emit_ms,
+                    (window_s / window_frames * 1000.0) if window_frames else 0.0,
                 )
                 last_alive_log_monotonic = now_monotonic
                 last_alive_log_frame_count = frame_count
+                capture_time_accum = 0.0
+                processing_time_accum = 0.0
+                emit_time_accum = 0.0
 
 
 def disable_qos(pipeline):
