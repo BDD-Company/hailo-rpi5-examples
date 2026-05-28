@@ -466,6 +466,14 @@ def main():
         # Legacy fallback used only when 'cameras' is empty.
         'frame_angular_size_deg' : XY(107, 85),
 
+        # Relative size of the tracked object (or bigger) that triggers switching to wide-angle camera.
+        # With wide 107° / zoom 14° FOVs (zoom_factor ~11x), 0.25 on zoom -> ~0.023 on wide after the
+        # switch, leaving a ~1.5x margin above camera_switch_to_zoom_size to prevent immediate flip-back.
+        'camera_switch_to_wide_size': 0.25,
+        # Relative size of the tracked object (or smaller) that triggers switching to narrow-angle (zoomed) camera.
+        # 0.015 on wide -> ~0.165 on zoom after the switch, ~1.5x below camera_switch_to_wide_size.
+        'camera_switch_to_zoom_size': 0.015,
+
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
         'target_size_m': XY(1.2, 1.2),            # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
