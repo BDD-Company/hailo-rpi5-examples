@@ -609,9 +609,20 @@ async def drone_controlling_thread_async(
         # → step toward a wider peer; target shrinking past the zoom
         # threshold → step toward a more-zoomed peer. Also generalizes to
         # >2 cameras (it will only ever step one peer at a time).
+        #
+        # Asymmetric axis test:
+        # - zoom→wide uses MAX(w,h): if either axis is about to clip the
+        #   frame edge we lose the target, so switch when any dimension
+        #   crosses the threshold. The old min(w,h) rule was too tolerant
+        #   of elongated bboxes (aspect ~1.3 is normal for non-square
+        #   objects) and never fired on real bench sweeps.
+        # - wide→zoom keeps MAX(w,h) ≤ threshold: BOTH axes must be small
+        #   for us to confidently say "target is far away, zoom in safely".
+        #   Using min() here would let a long thin false-positive flip us
+        #   into zoom on a frame that actually has a large target.
         current_cfg : CameraConfig = camera_switcher.get_config(current_camera_id)
         target_cfg = None
-        if target_size_ema.min_val() >= CAMERA_SWITCH_TO_WIDE_SIZE:
+        if target_size_ema.max_val() >= CAMERA_SWITCH_TO_WIDE_SIZE:
             target_cfg = _nearest_peer(current_cfg, wider=True)
         elif target_size_ema.max_val() <= CAMERA_SWITCH_TO_ZOOM_SIZE:
             target_cfg = _nearest_peer(current_cfg, wider=False)
