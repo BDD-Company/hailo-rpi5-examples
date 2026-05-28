@@ -574,19 +574,28 @@ class CameraSwitcher:
                  *,
                  width : int = 1280,
                  height : int = 720,
-                 target_fps : int = 30,
+                 fps : int = 30,
                  video_format : str = 'RGB',
-                 active_camera_id : int | None = None):
+                 active_id : int | None = None,
+                 switch_to_wide_size : float = 0.25,
+                 switch_to_zoom_size : float = 0.015):
         if not configs:
             raise ValueError("CameraSwitcher requires at least one CameraConfig")
         # All cameras share one appsrc → one set of caps. Hold them here so
         # there is exactly one source of truth; the producer threads and the
-        # pipeline both read width/height/target_fps/video_format from this
-        # object instead of from per-camera fields.
+        # pipeline both read width/height/fps/video_format from this object
+        # instead of from per-camera fields.
         self.width = width
         self.height = height
-        self.target_fps = target_fps
+        self.fps = fps
         self.video_format = video_format
+        # Switch policy thresholds, EMA-tested in the controller:
+        #   zoom→wide fires when EMA(max(w,h)) >= switch_to_wide_size
+        #   wide→zoom fires when EMA(max(w,h)) <= switch_to_zoom_size
+        # Held here so the consumer reads one policy object instead of
+        # duplicating values across control_config / per-controller code.
+        self.switch_to_wide_size = switch_to_wide_size
+        self.switch_to_zoom_size = switch_to_zoom_size
         # Derive each camera's zoom factor relative to the widest camera in the
         # set. We use the tan-based linear magnification (correct for a pinhole
         # / rectilinear projection), normalized so the widest horizontal FOV
@@ -596,11 +605,11 @@ class CameraSwitcher:
         self._configs : dict[int, CameraConfig] = {c.camera_id: c for c in configs}
         if len(self._configs) != len(configs):
             raise ValueError("CameraConfig.camera_id must be unique")
-        if active_camera_id is None:
-            active_camera_id = configs[0].camera_id
-        if active_camera_id not in self._configs:
-            raise ValueError(f"active_camera_id {active_camera_id} not in configs")
-        self._active_id = active_camera_id
+        if active_id is None:
+            active_id = configs[0].camera_id
+        if active_id not in self._configs:
+            raise ValueError(f"active_id {active_id} not in configs")
+        self._active_id = active_id
         self._lock = threading.Lock()
 
     def configs(self) -> list[CameraConfig]:

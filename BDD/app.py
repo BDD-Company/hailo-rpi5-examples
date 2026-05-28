@@ -440,42 +440,47 @@ def main():
         'pd_coeff_p_dynamic_stage_2_ratio': 1,
         'pd_coeff_p_dynamic_stage_3_ratio': 1,
 
-        # Multi-camera support. Each entry maps to a CameraConfig; the producer
-        # spawns one picamera thread per entry but only the camera with camera_id
-        # == CameraSwitcher.active_camera_id is feeding inference at any moment.
-        # The drone/platform controller looks up frame_angular_size_deg from
-        # the active config so the wide FOV is never applied to a tele frame.
-        # zoom_factor is auto-derived by CameraSwitcher from the FOVs.
-        #
-        # Resolution / fps / video_format are SHARED across all cameras (a
-        # single appsrc downstream demands identical caps); see
-        # 'cameras_shared' below.
-        'cameras': [
-            dict(
-                camera_id=0,
-                name='wide',
-                sensor_index=1,
-                frame_angular_size_deg=XY(107, 85),
-            ),
-            dict(
-                camera_id=1,
-                name='zoom',
-                sensor_index=0,
-                frame_angular_size_deg=XY(14, 8),
-            ),
-        ],
-        'cameras_shared': dict(width=1280, height=720, target_fps=30, video_format='RGB'),
-        'active_camera_id': 1,
-        # Legacy fallback used only when 'cameras' is empty.
-        'frame_angular_size_deg' : XY(107, 85),
+        # Multi-camera support. The 'camera' dict is the single source of
+        # truth: top-level keys (width/height/fps/video_format/active_id/
+        # switch_to_wide_size/switch_to_zoom_size) are SHARED across all
+        # cameras (a single appsrc downstream demands identical caps). The
+        # nested 'cameras' list holds per-camera CameraConfig dicts; the
+        # producer spawns one picamera thread per entry but only the camera
+        # with camera_id == active_id feeds inference at any moment. The
+        # drone/platform controller looks up frame_angular_size_deg from
+        # the active config so the wide FOV is never applied to a tele
+        # frame. zoom_factor is auto-derived by CameraSwitcher from the FOVs.
+        'camera': {
+            'width': 1280,
+            'height': 720,
+            'fps': 30,
+            'video_format': 'RGB',
+            'active_id': 1,
+            # Relative size of the tracked object (or bigger) that triggers switching to wide-angle camera.
+            # With wide 107° / zoom 14° FOVs (zoom_factor ~11x), 0.25 on zoom -> ~0.023 on wide after the
+            # switch, leaving a ~1.5x margin above switch_to_wide_size to prevent immediate flip-back.
+            'switch_to_wide_size': 0.25,
+            # Relative size of the tracked object (or smaller) that triggers switching to narrow-angle (zoomed) camera.
+            # 0.015 on wide -> ~0.165 on zoom after the switch, ~1.5x below switch_to_zoom_size.
+            'switch_to_zoom_size': 0.015,
 
-        # Relative size of the tracked object (or bigger) that triggers switching to wide-angle camera.
-        # With wide 107° / zoom 14° FOVs (zoom_factor ~11x), 0.25 on zoom -> ~0.023 on wide after the
-        # switch, leaving a ~1.5x margin above camera_switch_to_zoom_size to prevent immediate flip-back.
-        'camera_switch_to_wide_size': 0.25,
-        # Relative size of the tracked object (or smaller) that triggers switching to narrow-angle (zoomed) camera.
-        # 0.015 on wide -> ~0.165 on zoom after the switch, ~1.5x below camera_switch_to_wide_size.
-        'camera_switch_to_zoom_size': 0.015,
+            'cameras': [
+                # NOTE: must be at least 1 camera
+                dict(
+                    camera_id=0,
+                    name='wide',
+                    sensor_index=1,
+                    frame_angular_size_deg=XY(107, 85),
+                ),
+                dict(
+                    camera_id=1,
+                    name='zoom',
+                    sensor_index=0,
+                    frame_angular_size_deg=XY(14, 8),
+                ),
+            ],
+        },
+
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
         'target_size_m': XY(1.2, 1.2),            # shahed small
@@ -553,23 +558,21 @@ def main():
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True
 
-    # Build CameraSwitcher from the 'cameras' list in control_config.
-    camera_dicts = control_config.pop('cameras', None) or []
-    cameras_shared = control_config.pop('cameras_shared', None) or {}
-    active_camera_id = control_config.pop('active_camera_id', None)
+    # Build CameraSwitcher from the 'camera' dict in control_config.
+    # The dict is the kwargs for CameraSwitcher except for 'cameras' which
+    # is the list of per-camera dicts (each one a CameraConfig kwargs).
+    camera_block = control_config.pop('camera', None) or {}
+    camera_dicts = camera_block.pop('cameras', None) or []
     camera_switcher = None
     if camera_dicts:
         camera_configs = [CameraConfig(**d) for d in camera_dicts]
-        camera_switcher = CameraSwitcher(
-            camera_configs,
-            active_camera_id=active_camera_id,
-            **cameras_shared,
-        )
-        logger.info("!!! Cameras configured: %s, active=%d, shared caps: %dx%d@%dfps %s",
+        camera_switcher = CameraSwitcher(camera_configs, **camera_block)
+        logger.info("!!! Cameras configured: %s, active=%d, shared caps: %dx%d@%dfps %s, thresholds: wide>=%.3f zoom<=%.3f",
                     [(c.camera_id, c.name) for c in camera_configs],
                     camera_switcher.active_id(),
                     camera_switcher.width, camera_switcher.height,
-                    camera_switcher.target_fps, camera_switcher.video_format)
+                    camera_switcher.fps, camera_switcher.video_format,
+                    camera_switcher.switch_to_wide_size, camera_switcher.switch_to_zoom_size)
 
     app = App(
         app_callback,
