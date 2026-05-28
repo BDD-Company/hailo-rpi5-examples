@@ -773,7 +773,15 @@ async def drone_controlling_thread_async(
                 telemetry_dict = DEBUG_TELEMETRY_DICT
                 logger.warning("!!! USING DEBUG TELEMETRY data !!!")
 
-            logger.debug("telemetry: %s", telemetry_dict)
+            # Throttle: the full telemetry dict is ~1869 chars including two
+            # 21-element covariance matrices full of NaN; str()-ing it costs
+            # ~30 ms on the hot thread. %-style is "lazy" only when the level
+            # check fails, but DEBUG is enabled, so the format runs every
+            # iteration. Once every 10 controller frames (~1.2 s at ~8.5 fps)
+            # keeps the dump useful for offline analysis without spending
+            # ~30 ms per frame on the hot path.
+            if logger.isEnabledFor(logging.DEBUG) and frame_id % 10 == 0:
+                logger.debug("telemetry: %s", telemetry_dict)
             debug_info = telemetry_dict
 
             ## Check if take off
