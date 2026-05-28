@@ -462,7 +462,7 @@ def main():
                 frame_angular_size_deg=XY(14, 8),
             ),
         ],
-        'active_camera_id': 0,
+        'active_camera_id': 1,
         # Legacy fallback used only when 'cameras' is empty.
         'frame_angular_size_deg' : XY(107, 85),
 
