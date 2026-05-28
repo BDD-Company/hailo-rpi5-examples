@@ -815,26 +815,24 @@ def picamera_thread(
             frame_meta = None
             frame_timestamp_ns = 0
             try:
+                # L1: skip the ~2.7 MB make_array copy + metadata fetch entirely
+                # when this camera is inactive. The ISP keeps running (so AGC/AWB
+                # stay warm); we only need to release the ISP buffer back to the
+                # pool. `continue` inside `try` still runs the `finally` below.
+                if camera_switcher is not None and not camera_switcher.is_active(camera_id):
+                    frame_count += 1
+                    processing_time_accum += time.monotonic() - proc_start_monotonic
+                    continue
                 frame_data = request.make_array("main")
                 frame_meta = request.get_metadata()
             finally:
                 request.release()
 
-            # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
             if frame_data is None:
                 logger.error("%s Failed to capture frame #%s.", log_prefix, frame_count)
                 if on_failure is not None:
                     on_failure()
                 break
-
-            # Multi-camera: if this camera is currently inactive, skip all the
-            # heavy work (cvtColor, tobytes, push). Keeping picam2 running and
-            # just releasing the request is enough to hold AGC/AWB warm so the
-            # next switch is instant.
-            if camera_switcher is not None and not camera_switcher.is_active(camera_id):
-                frame_count += 1
-                processing_time_accum += time.monotonic() - proc_start_monotonic
-                continue
 
             # Convert framontigue data if necessary
             frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
