@@ -130,6 +130,12 @@ class XY:
     def to_tuple(self, to = lambda x: x):
         return (to(self.x), to(self.y))
 
+    def max_val(self):
+        return max(self.x, self.y)
+
+    def min_val(self):
+        return min(self.x, self.y)
+
     def __str__(self):
         return f"XY({self.x:.3f}, {self.y:.3f})"
 
@@ -583,6 +589,9 @@ class CameraSwitcher:
     def configs(self) -> list[CameraConfig]:
         return list(self._configs.values())
 
+    def num_cameras(self):
+        return len(self._configs)
+
     def get_config(self, camera_id : int) -> CameraConfig | None:
         return self._configs.get(camera_id)
 
@@ -608,9 +617,15 @@ class CameraSwitcher:
             self._active_id = camera_id
             return True
 
-    def toggle(self) -> int:
-        """Convenience: switch to the next camera_id in the configured order."""
+    def toggle(self, from_id = None) -> int | None:
+        """Convenience: switch to the next camera_id in the configured order.
+        Optional: if `from_id` is NOT None, then switch only if current `active_id == from_id`
+        Returns: None if NOT switched, otherise active_id
+        """
         with self._lock:
+            if from_id is not None and self._active_id != from_id:
+                return None
+
             ids = list(self._configs.keys())
             idx = ids.index(self._active_id)
             self._active_id = ids[(idx + 1) % len(ids)]

@@ -21,7 +21,7 @@ from telemetry_position import (
     project_ned_to_camera
 )
 # from drone_killswitch import kill_on_rc_switch_on_channel
-from helpers import Detection, Detections, MoveCommand, STOP, CameraSwitcher, DEFAULT_CAMERA_ID
+from helpers import Detection, Detections, MoveCommand, STOP, CameraSwitcher, DEFAULT_CAMERA_ID, CameraConfig
 
 try:
     from gpiozero import CPUTemperature
@@ -358,6 +358,10 @@ async def drone_controlling_thread_async(
         logger.warning("follow_target_position_ned requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True
 
+    CAMERA_SWITCH_TO_WIDE_SIZE = control_config.pop('camera_switch_to_wide_size', 0.25)
+    CAMERA_SWITCH_TO_ZOOM_SIZE = control_config.pop('camera_switch_to_zoom_size', 0.015)
+
+
     # DRONE_CONFIG_PREFIX = 'drone_'
     # for drone_config_key in [k for k in control_config.keys() if k.startswith(DRONE_CONFIG_PREFIX)]:
     #     drone_config_key_stripped = drone_config_key.removeprefix(DRONE_CONFIG_PREFIX)
@@ -533,6 +537,28 @@ async def drone_controlling_thread_async(
         p = copy(clamp_xy(PD_COEFF_P_MIN, p, PD_COEFF_P_MAX))
         return p
 
+    def maybe_switch_to_another_camera(target_size : XY, frame_camera_id : int):
+        if camera_switcher is None or camera_switcher.num_cameras() <= 1:
+            return
+
+        current_camera_id = camera_switcher.active_id()
+        if frame_camera_id != current_camera_id:
+            # NOTE: switching is already requested
+            return
+
+        current_camera_config : CameraConfig = camera_switcher.get_config(frame_camera_id)
+        new_camera_id = None
+        if current_camera_config.name == 'zoom' \
+                and target_size.min_val() >= CAMERA_SWITCH_TO_WIDE_SIZE:
+            new_camera_id = camera_switcher.toggle(detections_obj.camera_id)
+        elif current_camera_config.name == 'wide' \
+                and target_size.max_val() <= CAMERA_SWITCH_TO_ZOOM_SIZE:
+            new_camera_id = camera_switcher.toggle(detections_obj.camera_id)
+
+        if new_camera_id is not None:
+            # Note: there might be multiple consequent similar log lines due to switching delay
+            logger.warning("Switching cameras from %s to %s", current_camera_config.name, camera_switcher.get_config(new_camera_id).name)
+
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
     while True:
@@ -699,10 +725,6 @@ async def drone_controlling_thread_async(
                 if BYTETRACK_TARGET_LOCK and detection.track_id is not None:
                     locked_track_id = detection.track_id
 
-                if frame_id != 0 and frame_id % 100 == 0:
-                    logger.info("Switching camera from %s", camera_switcher.active_id())
-                    camera_switcher.toggle()
-
                 seen_target = True
                 last_seen_target_at_frame = detections_obj.frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
@@ -734,13 +756,14 @@ async def drone_controlling_thread_async(
                     elif max_p.y >= 1 - ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD:
                         target_center.y = min(1, max_p.y) - ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD
 
-
                 logger.debug("!!! %s, %s, visual size: %s/%s, visual center: %s/%s",
                         TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, target_size, detection.bbox.size, target_center, detection.bbox.center)
                 estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, target_size)
 
                 logger.debug("!!! RAW estimated_distance: %s %s",
                         estimated_distance_class, estimated_distance_m)
+
+                maybe_switch_to_another_camera(target_size, detections_obj.camera_id)
 
                 # if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS and estimated_distance_m < 10:
                 #     # HACK: we have a distance estimation issue here, distance is at least 50m
