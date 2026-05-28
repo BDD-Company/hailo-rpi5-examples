@@ -121,6 +121,11 @@ class FormatPrinter(pprint.PrettyPrinter):
 def make_debug_info_dict(frame_id, telemetry_dict : dict, frame_metadata):
     start_time_ms = telemetry_dict.pop('start_time_ms', 0)
     flight_time_ms = telemetry_dict.pop('flight_time_ms', 0)
+    # Controller-provided monotonic counter + source-frame identity. Optional:
+    # callers that don't supply them (e.g. legacy single-camera paths) fall
+    # back to the positional `frame_id` (the camera-local id from Detections).
+    camera_id = telemetry_dict.pop('camera_id', None)
+    camera_frame_id = telemetry_dict.pop('camera_frame_id', None)
 
     result = dict(**telemetry_dict)
     # remove 'covariance_matrix' which is too verbose
@@ -129,7 +134,10 @@ def make_debug_info_dict(frame_id, telemetry_dict : dict, frame_metadata):
     result = filterdict(result, lambda k, v :  not (hasattr(v, '__len__') and len(v) == 0))
     # remove various timestamps
     result = filterdict(result, lambda k, v :  not (isinstance(k, str) and 'time' in k))
-    result['frame'] = frame_id
+    if camera_id is not None and camera_frame_id is not None:
+        result['frame'] = f"#{frame_id:04d}  cam{camera_id}#{camera_frame_id:04d}"
+    else:
+        result['frame'] = frame_id
 
     detection_delay = (frame_metadata.detection_end_timestamp_ns - frame_metadata.detection_start_timestamp_ns) / 1000000
     now_ms = time.monotonic_ns() / 1000_000
@@ -289,7 +297,10 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     frame_center = frame_size.multiplied_by_XY(aim_point)
 
     if telemetry is not None:
-        debug_info = make_debug_info_dict(detections.frame_id, telemetry, detections.meta)
+        # Prefer the controller's monotonic frame_id (carried in telemetry);
+        # fall back to the camera-local id on detections for legacy callers.
+        frame_id_for_overlay = telemetry.get('frame_id', detections.frame_id)
+        debug_info = make_debug_info_dict(frame_id_for_overlay, telemetry, detections.meta)
 
         lines = []
         printer = FormatPrinter({float: "%.2f"}, indent=0, sort_dicts=True, compact=True)

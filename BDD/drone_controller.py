@@ -11,7 +11,7 @@ from helpers import XY
 from drone import DroneMover
 from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
-from telemetry_position import PositionNED, VelocityNED
+# from telemetry_position import PositionNED, VelocityNED
 from estimate_distance import estimate_distance_class, DistanceClass, OpticalObjectInfo
 from telemetry_position import (
     # get_position_ned,
@@ -375,6 +375,12 @@ async def drone_controlling_thread_async(
     distance_r *= distance_r
     seen_target = False
     last_seen_target_at_frame = 0
+    # Monotonic per-iteration counter. Incremented for every frame dequeued
+    # from detections_queue, so it does NOT reset across camera switches —
+    # unlike detections_obj.frame_id, which is the camera-local index and
+    # jumps when the active camera changes. All internal "frames since X"
+    # logic (target-lost history clearing, periodic logging, idle throttling)
+    # must use this counter to stay consistent across switches.
     frame_id = 0
     pd_coeff_p_dynamic_stage = None
 
@@ -618,7 +624,9 @@ async def drone_controlling_thread_async(
                 break
 
             update_timestamps()
-            logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}/cam{detections_obj.camera_id}')
+            frame_id += 1
+            logger = LoggerWithPrefix(logger, prefix=f'frame=#{frame_id:04}')
+            logger.debug(f"frame cam{detections_obj.camera_id}#{detections_obj.frame_id:04}")
 
             # Camera switch detection. On switch, refresh the per-frame FOV
             # used for all geometry below AND drop the camera-frame caches:
@@ -710,7 +718,6 @@ async def drone_controlling_thread_async(
             target_relative_pos = None
             target_relative_pos_uncorrected = None
             target_position_ned = None
-            frame_id = detections_obj.frame_id
             target_estimator = None
             target_center = None
             target_size = None
@@ -733,7 +740,7 @@ async def drone_controlling_thread_async(
                     locked_track_id = detection.track_id
 
                 seen_target = True
-                last_seen_target_at_frame = detections_obj.frame_id
+                last_seen_target_at_frame = frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
 
                 aim_point = copy(AIM_POINT)
@@ -1056,7 +1063,7 @@ async def drone_controlling_thread_async(
                         debug_info["mode"] = "hover"
                 else:
                     debug_info["mode"] = "idle"
-                    if not FOLLOW_TARGET_POSITION_NED and detections_obj.frame_id % 30 == 0:
+                    if not FOLLOW_TARGET_POSITION_NED and frame_id % 30 == 0:
                         # moving = False
                         await drone.idle()
 
@@ -1098,6 +1105,12 @@ async def drone_controlling_thread_async(
                     f"p_max={PD_COEFF_P_MAX:.2f} ")
 
             debug_info['extra'] = extra
+            # Surface frame identity to the visualization. frame_id is the
+            # controller's monotonic counter (unaffected by camera switches);
+            # camera_id + camera_frame_id locate the underlying source frame.
+            # debug_info['frame_id'] = (frame_id, detections_obj.camera_id, detections_obj.frame_id)
+            debug_info['camera_id'] = detections_obj.camera_id
+            debug_info['camera_frame_id'] = detections_obj.frame_id
 
             # -1 means that there was no frame and no detections
             if output_queue is not None:
@@ -1112,7 +1125,9 @@ async def drone_controlling_thread_async(
                     # 'target_pos_ned_estimated' : target_estimator_3d.estimate(current_frame_timestamp_ns),
                     # 'inertia_accumuated' : target_relative_pos,
                     'move_goal' : target_relative_pos,
+                    'frame_id' : frame_id,
                     'camera_id' : detections_obj.camera_id,
+                    'camera_frame_id' : detections_obj.frame_id,
                     'frame_angular_size_deg' : FRAME_ANGLUAR_SIZE_DEG,
                 }
                 output_queue.put(output)
