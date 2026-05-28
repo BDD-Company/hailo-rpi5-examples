@@ -360,6 +360,11 @@ async def drone_controlling_thread_async(
 
     CAMERA_SWITCH_TO_WIDE_SIZE = control_config.pop('camera_switch_to_wide_size', 0.25)
     CAMERA_SWITCH_TO_ZOOM_SIZE = control_config.pop('camera_switch_to_zoom_size', 0.015)
+    # S2: EMA smoothing of target size for switching decisions.
+    # Raw per-frame bbox size jitters enough to flap the switch near a
+    # threshold; an EMA cuts that without much lag. alpha=0.3 → effective
+    # window ~3-4 frames at the controller's loop rate.
+    CAMERA_SWITCH_SIZE_EMA_ALPHA = control_config.pop('camera_switch_size_ema_alpha', 0.3)
 
 
     # DRONE_CONFIG_PREFIX = 'drone_'
@@ -439,6 +444,11 @@ async def drone_controlling_thread_async(
     # FOV in degrees of the camera that produced the CURRENT frame. Initialized
     # to the default; refreshed every iteration from the incoming Detections.
     FRAME_ANGLUAR_SIZE_DEG : XY = FRAME_ANGLUAR_SIZE_DEG_DEFAULT
+    # S2: smoothed target size, used by maybe_switch_to_another_camera to
+    # avoid flapping near the hysteresis edge. Reset on camera switch (the
+    # normalized size scale changes by ~zoom_factor) and on prolonged target
+    # loss (the previous trajectory is no longer relevant).
+    target_size_ema : XY | None = None
     takeoff_time_ns = None
     prev_angle_to_target = XY()
     skipped_detetions = 0
@@ -568,14 +578,29 @@ async def drone_controlling_thread_async(
         return best
 
     def maybe_switch_to_another_camera(target_size : XY, frame_camera_id : int):
+        nonlocal target_size_ema
         if camera_switcher is None or camera_switcher.num_cameras() <= 1:
             return
 
         current_camera_id = camera_switcher.active_id()
         if frame_camera_id != current_camera_id:
             # Switch already requested; this frame is a delayed one from the
-            # old camera. Don't re-toggle.
+            # old camera. Don't re-toggle and don't pollute the EMA with a
+            # value measured under the OLD camera's geometry.
             return
+
+        # S2: update the EMA with this frame's raw target_size, then test
+        # thresholds against the smoothed value. alpha is small enough to
+        # stay responsive (a few-frame window) but removes single-frame
+        # bbox jitter that previously caused flapping near the threshold.
+        a = CAMERA_SWITCH_SIZE_EMA_ALPHA
+        if target_size_ema is None:
+            target_size_ema = target_size
+        else:
+            target_size_ema = XY(
+                target_size_ema.x * (1 - a) + target_size.x * a,
+                target_size_ema.y * (1 - a) + target_size.y * a,
+            )
 
         # S1: decide via the auto-computed zoom_factor instead of free-text
         # `name` strings. Old code did `name == 'zoom'` / `name == 'wide'`,
@@ -586,9 +611,9 @@ async def drone_controlling_thread_async(
         # >2 cameras (it will only ever step one peer at a time).
         current_cfg : CameraConfig = camera_switcher.get_config(current_camera_id)
         target_cfg = None
-        if target_size.min_val() >= CAMERA_SWITCH_TO_WIDE_SIZE:
+        if target_size_ema.min_val() >= CAMERA_SWITCH_TO_WIDE_SIZE:
             target_cfg = _nearest_peer(current_cfg, wider=True)
-        elif target_size.max_val() <= CAMERA_SWITCH_TO_ZOOM_SIZE:
+        elif target_size_ema.max_val() <= CAMERA_SWITCH_TO_ZOOM_SIZE:
             target_cfg = _nearest_peer(current_cfg, wider=False)
 
         if target_cfg is None:
@@ -597,10 +622,13 @@ async def drone_controlling_thread_async(
             return
 
         logger.warning(
-            "Switching cameras: %s (zoom=%.2fx) -> %s (zoom=%.2fx), target_size=%s",
+            "Switching cameras: %s (zoom=%.2fx) -> %s (zoom=%.2fx), target_size_ema=%s (raw=%s)",
             current_cfg.name, current_cfg.zoom_factor,
-            target_cfg.name, target_cfg.zoom_factor, target_size,
+            target_cfg.name, target_cfg.zoom_factor, target_size_ema, target_size,
         )
+        # After we trigger a switch, the next frames will be under the new
+        # camera's geometry; the EMA's prior history is meaningless there.
+        target_size_ema = None
 
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
@@ -694,6 +722,11 @@ async def drone_controlling_thread_async(
                     target_estimator_2d.clear_history()
                     locked_track_id = None
                     prev_angle_to_target = XY()
+                    # S2: drop the smoothed target-size; the new camera's
+                    # geometry rescales every dimension by ~zoom_factor, so
+                    # carrying the old value across would mis-fire the
+                    # symmetric threshold immediately.
+                    target_size_ema = None
                     # CommandRegulator stores last input internally; reinstating
                     # the configured P/D forces it to drop its previous-sample
                     # state (next_command() initializes on first call).
@@ -1079,6 +1112,8 @@ async def drone_controlling_thread_async(
                     target_estimator_2d.clear_history()
                     target_estimator_3d.clear_history()
                     locked_track_id = None
+                    # S2: prolonged target loss → smoothed size is stale.
+                    target_size_ema = None
 
                 if seen_target:
                     if FOLLOW_TARGET_POSITION_NED:
