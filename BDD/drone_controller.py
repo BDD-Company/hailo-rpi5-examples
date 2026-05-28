@@ -358,8 +358,15 @@ async def drone_controlling_thread_async(
         logger.warning("follow_target_position_ned requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True
 
-    CAMERA_SWITCH_TO_WIDE_SIZE = control_config.pop('camera_switch_to_wide_size', 0.25)
-    CAMERA_SWITCH_TO_ZOOM_SIZE = control_config.pop('camera_switch_to_zoom_size', 0.015)
+    # Switch policy thresholds: read from camera_switcher (the single source
+    # of truth) when one is provided, else use defaults. The thresholds also
+    # determine when EMA-smoothed target size triggers a switch.
+    if camera_switcher is not None:
+        CAMERA_SWITCH_TO_WIDE_SIZE = camera_switcher.switch_to_wide_size
+        CAMERA_SWITCH_TO_ZOOM_SIZE = camera_switcher.switch_to_zoom_size
+    else:
+        CAMERA_SWITCH_TO_WIDE_SIZE = 0.25
+        CAMERA_SWITCH_TO_ZOOM_SIZE = 0.015
     # S2: EMA smoothing of target size for switching decisions.
     # Raw per-frame bbox size jitters enough to flap the switch near a
     # threshold; an EMA cuts that without much lag. alpha=0.3 → effective

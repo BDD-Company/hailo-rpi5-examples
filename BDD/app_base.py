@@ -540,7 +540,7 @@ class GStreamerApp:
                         Gst.Caps.from_string(
                             f"video/x-raw, format={camera_switcher.video_format}, "
                             f"width={camera_switcher.width}, height={camera_switcher.height}, "
-                            f"framerate={camera_switcher.target_fps}/1, pixel-aspect-ratio=1/1"
+                            f"framerate={camera_switcher.fps}/1, pixel-aspect-ratio=1/1"
                         ),
                     )
                 else:
@@ -677,7 +677,7 @@ def picamera_thread(
     if camera_switcher is not None:
         capture_width = camera_switcher.width
         capture_height = camera_switcher.height
-        capture_target_fps = camera_switcher.target_fps
+        capture_target_fps = camera_switcher.fps
         capture_video_format = camera_switcher.video_format
     else:
         capture_width = video_width
