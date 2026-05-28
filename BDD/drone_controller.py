@@ -543,27 +543,64 @@ async def drone_controlling_thread_async(
         p = copy(clamp_xy(PD_COEFF_P_MIN, p, PD_COEFF_P_MAX))
         return p
 
+    def _nearest_peer(current_cfg : CameraConfig, *, wider : bool) -> CameraConfig | None:
+        """Closest peer to `current_cfg` in the zoom_factor ordering.
+
+        wider=True  → camera with the largest zoom_factor that is still
+                       smaller than current's (i.e. one step toward wider FOV)
+        wider=False → camera with the smallest zoom_factor that is still
+                       larger than current's (i.e. one step toward more zoom)
+        """
+        best = None
+        for cfg in camera_switcher.configs():
+            if cfg.camera_id == current_cfg.camera_id:
+                continue
+            if wider:
+                if cfg.zoom_factor < current_cfg.zoom_factor and (
+                    best is None or cfg.zoom_factor > best.zoom_factor
+                ):
+                    best = cfg
+            else:
+                if cfg.zoom_factor > current_cfg.zoom_factor and (
+                    best is None or cfg.zoom_factor < best.zoom_factor
+                ):
+                    best = cfg
+        return best
+
     def maybe_switch_to_another_camera(target_size : XY, frame_camera_id : int):
         if camera_switcher is None or camera_switcher.num_cameras() <= 1:
             return
 
         current_camera_id = camera_switcher.active_id()
         if frame_camera_id != current_camera_id:
-            # NOTE: switching is already requested
+            # Switch already requested; this frame is a delayed one from the
+            # old camera. Don't re-toggle.
             return
 
-        current_camera_config : CameraConfig = camera_switcher.get_config(frame_camera_id)
-        new_camera_id = None
-        if current_camera_config.name == 'zoom' \
-                and target_size.min_val() >= CAMERA_SWITCH_TO_WIDE_SIZE:
-            new_camera_id = camera_switcher.toggle(detections_obj.camera_id)
-        elif current_camera_config.name == 'wide' \
-                and target_size.max_val() <= CAMERA_SWITCH_TO_ZOOM_SIZE:
-            new_camera_id = camera_switcher.toggle(detections_obj.camera_id)
+        # S1: decide via the auto-computed zoom_factor instead of free-text
+        # `name` strings. Old code did `name == 'zoom'` / `name == 'wide'`,
+        # which silently no-op'd the moment someone renamed a camera in app
+        # config. Now the policy is: target growing past the wide threshold
+        # → step toward a wider peer; target shrinking past the zoom
+        # threshold → step toward a more-zoomed peer. Also generalizes to
+        # >2 cameras (it will only ever step one peer at a time).
+        current_cfg : CameraConfig = camera_switcher.get_config(current_camera_id)
+        target_cfg = None
+        if target_size.min_val() >= CAMERA_SWITCH_TO_WIDE_SIZE:
+            target_cfg = _nearest_peer(current_cfg, wider=True)
+        elif target_size.max_val() <= CAMERA_SWITCH_TO_ZOOM_SIZE:
+            target_cfg = _nearest_peer(current_cfg, wider=False)
 
-        if new_camera_id is not None:
-            # Note: there might be multiple consequent similar log lines due to switching delay
-            logger.warning("Switching cameras from %s to %s", current_camera_config.name, camera_switcher.get_config(new_camera_id).name)
+        if target_cfg is None:
+            return
+        if not camera_switcher.set_active(target_cfg.camera_id):
+            return
+
+        logger.warning(
+            "Switching cameras: %s (zoom=%.2fx) -> %s (zoom=%.2fx), target_size=%s",
+            current_cfg.name, current_cfg.zoom_factor,
+            target_cfg.name, target_cfg.zoom_factor, target_size,
+        )
 
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
