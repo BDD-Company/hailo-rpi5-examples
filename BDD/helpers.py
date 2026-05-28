@@ -501,13 +501,15 @@ class CameraConfig:
     `zoom_factor` is NOT provided by the user; CameraSwitcher fills it in at
     construction time as the linear magnification relative to the widest
     camera in the set (so the widest camera always has zoom_factor = 1.0).
+
+    Resolution / framerate / video_format are NOT here on purpose: all
+    cameras feed a single shared appsrc, so they must produce identical
+    caps. CameraSwitcher holds those values once and all producers + the
+    pipeline read them from there.
     """
     camera_id : int = DEFAULT_CAMERA_ID
     name : str = ""                         # human-readable, for logs/debug
     sensor_index : int = 0                  # Picamera2 camera_num
-    width : int = 1280
-    height : int = 720
-    target_fps : int = 30
     frame_angular_size_deg : XY = field(default_factory=lambda: XY(107, 85))
     # Linear magnification relative to the widest camera (1.0 = widest).
     # Auto-filled by CameraSwitcher; do not set in app config.
@@ -567,9 +569,24 @@ class CameraSwitcher:
     (drone_controller/platform_controller) uses this to swap FOV/zoom when a
     new camera_id appears on a Detections object.
     """
-    def __init__(self, configs : list[CameraConfig], active_camera_id : int | None = None):
+    def __init__(self,
+                 configs : list[CameraConfig],
+                 *,
+                 width : int = 1280,
+                 height : int = 720,
+                 target_fps : int = 30,
+                 video_format : str = 'RGB',
+                 active_camera_id : int | None = None):
         if not configs:
             raise ValueError("CameraSwitcher requires at least one CameraConfig")
+        # All cameras share one appsrc → one set of caps. Hold them here so
+        # there is exactly one source of truth; the producer threads and the
+        # pipeline both read width/height/target_fps/video_format from this
+        # object instead of from per-camera fields.
+        self.width = width
+        self.height = height
+        self.target_fps = target_fps
+        self.video_format = video_format
         # Derive each camera's zoom factor relative to the widest camera in the
         # set. We use the tan-based linear magnification (correct for a pinhole
         # / rectilinear projection), normalized so the widest horizontal FOV
