@@ -275,6 +275,12 @@ class DroneMover():
             await drone.param.set_param_int("COM_ARM_WO_GPS", 1)
             # keep armed even if not took off for long time (1000 seconds)
             await drone.param.set_param_float("COM_DISARM_PRFLT", 1000.0)
+            # Tilted-launch path: use force_arm=True. COM_ARM_TILT / MPC_TILTMAX_AIR
+            # don't exist on this firmware, so the only way past the tilt preflight
+            # is arm_force() (MAVLink force-arm magic 21196), which skips all checks.
+            await drone.param.set_param_int("CBRK_USB_CHK", 197848)
+            await drone.param.set_param_int("CBRK_IO_SAFETY", 22027)
+            await drone.param.set_param_float("COM_ARM_IMU_ACC", 1.0)
 
             arming_exception = None
             for i in range(arm_attempts):
@@ -299,10 +305,10 @@ class DroneMover():
 
         await arm()
 
-        await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
+        await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, IDLE_THRUST))
         # it is requirement of PX4 to receive setpoints for at least 1 second before switching to offboard
         await asyncio.sleep(1)
-        await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
+        await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, IDLE_THRUST))
 
         logger.debug("Entering Offboard mode...")
         try:
