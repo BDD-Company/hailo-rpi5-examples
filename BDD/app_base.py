@@ -739,11 +739,23 @@ def picamera_thread(
             # TODO: creck that control is supported first
             picam2.set_controls(controls_dict)
 
-        merged_initial = dict(camera_config.initial_controls or {})
+        # L3: ensure AE/AWB are explicitly enabled. picam2 defaults are
+        # usually "auto" but we want guaranteed behavior — without these the
+        # inactive camera could end up frozen at a startup exposure that
+        # doesn't match the active camera's scene (wide-angle outdoor vs
+        # tele-on-sky have very different luminance), and the first frame
+        # after a switch would be wildly mis-exposed. Per-camera overrides
+        # in `initial_controls` (e.g. a fixed ExposureTime for known-bright
+        # sky targets) win over this default.
+        merged_initial : dict = {
+            'AeEnable': True,
+            'AwbEnable': True,
+        }
+        if camera_config.initial_controls:
+            merged_initial.update(camera_config.initial_controls)
         if picamera_controls_initial is not None:
             merged_initial.update(picamera_controls_initial)
-        if merged_initial:
-            apply_controls(merged_initial)
+        apply_controls(merged_initial)
 
         # GStreamer caps for the shared appsrc.
         # - Multi-camera path (camera_switcher provided): caps are set ONCE by
@@ -827,7 +839,15 @@ def picamera_thread(
                 is_active = camera_switcher.is_active(camera_id)
                 if is_active != was_active:
                     new_fps = capture_target_fps if is_active else INACTIVE_FPS
-                    apply_controls({'FrameRate': new_fps})
+                    transition_controls = {'FrameRate': new_fps}
+                    # L3: on inactive -> active, also re-assert AE/AWB so the
+                    # algorithms reconverge on the active scene under the new
+                    # (higher) cadence instead of riding the inactive estimate.
+                    # Cheap; only triggered on the flag flip.
+                    if is_active and was_active is False:
+                        transition_controls['AeEnable'] = True
+                        transition_controls['AwbEnable'] = True
+                    apply_controls(transition_controls)
                     logger.info("%s FrameRate -> %d fps (active=%s)", log_prefix, new_fps, is_active)
                     was_active = is_active
 
