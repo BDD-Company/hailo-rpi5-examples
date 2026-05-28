@@ -752,8 +752,16 @@ def picamera_thread(
         # converged for an instant switch — but at the full target_fps the
         # idle camera burned ~half the ISP/CPU budget that the active path
         # needed. Set a low FrameRate while inactive; restore on activation.
-        # Effect on latency p50 of the active path was the primary motivation.
-        INACTIVE_FPS = 5
+        #
+        # Switch-in latency is bounded by one inactive frame interval (picam2
+        # latches a new FrameRate only on the next ISP cycle). 5 fps gave a
+        # ~200 ms worst-case wait between set_active() and the first frame of
+        # the new active camera reaching inference; 15 fps brings that down to
+        # ~67 ms. With L1 above the per-inactive-frame cost is now small
+        # (capture+release only — no make_array / cvtColor / push), so we can
+        # spend the extra ISP cycles. Bonus: 3x faster AE/AWB convergence on
+        # the inactive camera, narrowing the post-switch exposure transient.
+        INACTIVE_FPS = 15
         was_active : bool | None = None  # forces the initial control push on first iteration
         logger.debug("picamera_process started")
         last_alive_log_monotonic = time.monotonic()
