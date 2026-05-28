@@ -621,26 +621,33 @@ async def drone_controlling_thread_async(
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}/cam{detections_obj.camera_id}')
 
             # Camera switch detection. On switch, refresh the per-frame FOV
-            # used for all geometry below AND drop all per-camera caches:
-            #   - target estimators (2D + 3D) hold positions captured under
+            # used for all geometry below AND drop the camera-frame caches:
+            #   - target_estimator_2d holds normalized bbox positions under
             #     the OLD camera's pinhole; reusing them after a switch would
-            #     compute a wildly wrong velocity at the discontinuity
+            #     compute a wildly wrong velocity at the discontinuity.
             #   - ByteTrack track ids are camera-local; the locked id must
-            #     be released so the next frame can establish a new lock
+            #     be released so the next frame can establish a new lock.
             #   - PD regulator history is from the old camera's angular
-            #     resolution; carrying it across yields one bogus large step
+            #     resolution; carrying it across yields one bogus large step.
+            #
+            # Deliberately KEPT across switches:
+            #   - target_estimator_3d (NED, world-frame): immune to camera
+            #     swap since project_camera_to_ned uses the per-frame FOV.
+            #     Preserving it means switch-time velocity estimate stays
+            #     continuous and the controller can keep flying the target
+            #     trajectory through the optical discontinuity. Assumes both
+            #     cameras are coaxial (no extrinsic offset); we can add a
+            #     per-camera angular offset to CameraConfig if needed.
+            #   - target_position_ned / _prev_ned / estimated_velocity_ned:
+            #     world-frame too; kept for the same reason.
             if last_camera_id is None or last_camera_id != detections_obj.camera_id:
                 if last_camera_id is not None:
                     logger.warning(
-                        "!!! CAMERA SWITCH: %s -> %s, purging estimators / track lock / PD history",
+                        "!!! CAMERA SWITCH: %s -> %s, purging 2D estimator / track lock / PD history; keeping 3D NED trajectory",
                         last_camera_id, detections_obj.camera_id,
                     )
                     target_estimator_2d.clear_history()
-                    target_estimator_3d.clear_history()
                     locked_track_id = None
-                    target_position_ned = None
-                    target_position_prev_ned = None
-                    estimated_velocity_ned = None
                     prev_angle_to_target = XY()
                     # CommandRegulator stores last input internally; reinstating
                     # the configured P/D forces it to drop its previous-sample
