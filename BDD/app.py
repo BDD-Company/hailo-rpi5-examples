@@ -459,22 +459,25 @@ def main():
         # The drone/platform controller looks up frame_angular_size_deg from
         # the active config so the wide FOV is never applied to a tele frame.
         # zoom_factor is auto-derived by CameraSwitcher from the FOVs.
+        #
+        # Resolution / fps / video_format are SHARED across all cameras (a
+        # single appsrc downstream demands identical caps); see
+        # 'cameras_shared' below.
         'cameras': [
             dict(
                 camera_id=0,
                 name='wide',
                 sensor_index=1,
-                width=1280, height=720, target_fps=30,
                 frame_angular_size_deg=XY(107, 85),
             ),
             dict(
                 camera_id=1,
                 name='zoom',
                 sensor_index=0,
-                width=1280, height=720, target_fps=30,
                 frame_angular_size_deg=XY(14, 8),
             ),
         ],
+        'cameras_shared': dict(width=1280, height=720, target_fps=30, video_format='RGB'),
         'active_camera_id': 1,
         # Legacy fallback used only when 'cameras' is empty.
         'frame_angular_size_deg' : XY(107, 85),
@@ -565,14 +568,21 @@ def main():
 
     # Build CameraSwitcher from the 'cameras' list in control_config.
     camera_dicts = control_config.pop('cameras', None) or []
+    cameras_shared = control_config.pop('cameras_shared', None) or {}
     active_camera_id = control_config.pop('active_camera_id', None)
     camera_switcher = None
     if camera_dicts:
         camera_configs = [CameraConfig(**d) for d in camera_dicts]
-        camera_switcher = CameraSwitcher(camera_configs, active_camera_id=active_camera_id)
-        logger.info("!!! Cameras configured: %s, active=%d",
+        camera_switcher = CameraSwitcher(
+            camera_configs,
+            active_camera_id=active_camera_id,
+            **cameras_shared,
+        )
+        logger.info("!!! Cameras configured: %s, active=%d, shared caps: %dx%d@%dfps %s",
                     [(c.camera_id, c.name) for c in camera_configs],
-                    camera_switcher.active_id())
+                    camera_switcher.active_id(),
+                    camera_switcher.width, camera_switcher.height,
+                    camera_switcher.target_fps, camera_switcher.video_format)
 
     app = App(
         app_callback,

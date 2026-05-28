@@ -526,6 +526,25 @@ class GStreamerApp:
             # default CameraConfig internally).
             camera_switcher = getattr(self, 'camera_switcher', None)
             if camera_switcher is not None:
+                # L4: set the shared appsrc caps ONCE, from the switcher's
+                # single source of truth, before any producer thread starts.
+                # Previously each picamera_thread set caps independently — fine
+                # while both happened to agree, but a footgun the moment they
+                # didn't. Now there's exactly one writer.
+                appsrc = self.pipeline.get_by_name("app_source")
+                if appsrc is not None:
+                    appsrc.set_property("is-live", True)
+                    appsrc.set_property("format", Gst.Format.TIME)
+                    appsrc.set_property(
+                        "caps",
+                        Gst.Caps.from_string(
+                            f"video/x-raw, format={camera_switcher.video_format}, "
+                            f"width={camera_switcher.width}, height={camera_switcher.height}, "
+                            f"framerate={camera_switcher.target_fps}/1, pixel-aspect-ratio=1/1"
+                        ),
+                    )
+                else:
+                    logger.warning("camera_switcher provided but 'app_source' appsrc not found; producer will fall back")
                 for cam_cfg in camera_switcher.configs():
                     t = threading.Thread(
                         target=picamera_thread,
@@ -649,15 +668,24 @@ def picamera_thread(
             camera_id=DEFAULT_CAMERA_ID,
             name="default",
             sensor_index=0,
-            width=video_width,
-            height=video_height,
-            target_fps=target_fps,
         )
 
+    # Single source of truth for resolution/fps/format (L4):
+    # when a CameraSwitcher is provided, everyone reads from there so all
+    # producers and the shared appsrc agree on caps. Without a switcher we
+    # fall back to the args passed into the function (legacy single-cam).
+    if camera_switcher is not None:
+        capture_width = camera_switcher.width
+        capture_height = camera_switcher.height
+        capture_target_fps = camera_switcher.target_fps
+        capture_video_format = camera_switcher.video_format
+    else:
+        capture_width = video_width
+        capture_height = video_height
+        capture_target_fps = target_fps
+        capture_video_format = video_format
+
     camera_id = camera_config.camera_id
-    capture_width = camera_config.width
-    capture_height = camera_config.height
-    capture_target_fps = camera_config.target_fps or target_fps
     log_prefix = f"[cam{camera_id}:{camera_config.name or '?'}]"
 
     appsrc: GstApp.AppSrc = pipeline.get_by_name(appsrc_name)
@@ -717,21 +745,26 @@ def picamera_thread(
         if merged_initial:
             apply_controls(merged_initial)
 
-        # Update GStreamer caps based on the captured stream. All cameras share
-        # one appsrc, so they must produce identical caps; if they don't the
-        # producer must downscale/convert in its own thread before pushing.
+        # GStreamer caps for the shared appsrc.
+        # - Multi-camera path (camera_switcher provided): caps are set ONCE by
+        #   GStreamerApp.run() from the switcher's shared config, BEFORE any
+        #   producer starts. We skip setting them here to avoid two threads
+        #   racing on the same property.
+        # - Legacy single-camera path: nobody else sets caps, so we do it here,
+        #   based on the captured stream's actual size/format.
         capture_stream = config['main']
-        format_str = 'RGB' if capture_stream['format'] == 'RGB888' else video_format
+        format_str = 'RGB' if capture_stream['format'] == 'RGB888' else capture_video_format
         width, height = capture_stream['size']
         logger.debug("%s Picamera2 configuration: width=%s, height=%s, format=%s",
                      log_prefix, width, height, format_str)
-        appsrc.set_property(
-            "caps",
-            Gst.Caps.from_string(
-                f"video/x-raw, format={format_str}, width={width}, height={height}, "
-                f"framerate={capture_target_fps}/1, pixel-aspect-ratio=1/1"
+        if camera_switcher is None:
+            appsrc.set_property(
+                "caps",
+                Gst.Caps.from_string(
+                    f"video/x-raw, format={format_str}, width={width}, height={height}, "
+                    f"framerate={capture_target_fps}/1, pixel-aspect-ratio=1/1"
+                )
             )
-        )
 
         sensor_timestamp_caps = Gst.Caps.from_string("timestamp/x-picamera2-sensor")
         unix_timestamp_caps = Gst.Caps.from_string("timestamp/x-unix")
