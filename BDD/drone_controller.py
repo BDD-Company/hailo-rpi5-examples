@@ -1033,7 +1033,8 @@ async def drone_controlling_thread_async(
                 thrust = THRUST_CRUISE
                 if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
                     thrust = THRUST_TAKEOFF
-                    logger.warning('takeoff low thrust mode: %s', thrust)
+                    # NOTE: not clamping thrust value here INTENTIONALLY
+                    logger.warning('takeoff thrust: %.2f', thrust)
                 else:
                     if THRUST_DYNAMIC:
                         if distance_to_center < 0.1:
@@ -1067,6 +1068,7 @@ async def drone_controlling_thread_async(
                             pd_coeff_p *= 1.1
                             extra += ' MEDIUM'
 
+                        thrust = clamp(THRUST_MIN, thrust, THRUST_MAX)
                         extra += f' changing thrust to: {thrust}, p to: {pd_coeff_p} '
 
 
@@ -1106,7 +1108,6 @@ async def drone_controlling_thread_async(
                 #         angle_to_target = new_angle_to_target
 
                 debug_info["mode"] = mode
-                thrust = clamp(THRUST_MIN, thrust, THRUST_MAX)
                 if not takeoff_time_ns and target_estimator.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES:
                     logger.warning("Delaying takeoff for %s frames (now have %s)", DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES, target_estimator.history_size())
                     pass
