@@ -47,19 +47,13 @@ DEBUG = False
 
 
 def drone_controlling_thread(*args, **kwargs):
-    signal_event_when_ready = kwargs.get('signal_event_when_ready')
+    # Exceptions propagate out of run() so threading.excepthook in app.py
+    # can tear the GStreamer pipeline down. Used to be caught and logged
+    # here, which left the pipeline running behind a dead drone.
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(drone_controlling_thread_async(*args, **kwargs))
-    except Exception as e:
-        logger.error("in drone event loop", exc_info=True, stack_info=True)
-        # Unblock app.run(event) so the GStreamer pipeline still comes up.
-        # Otherwise a startup failure here (e.g. no PX4 USB attached on a
-        # bench) deadlocks the main thread waiting on event.wait() and the
-        # picam/inference threads never spawn, masking unrelated issues.
-        if signal_event_when_ready is not None:
-            signal_event_when_ready.set()
     finally:
         loop.close()
 

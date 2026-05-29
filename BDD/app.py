@@ -650,6 +650,30 @@ def main():
             ),
             name = "Drone"
         )
+
+    # Uncaught crash in the control thread (e.g. drone can't connect to the
+    # FMU) used to leave the pipeline running with nothing behind it. Hook
+    # the failure: unblock the main thread waiting on `event`, then ask the
+    # GStreamer main loop to shut down so app.run() returns and main() can
+    # re-raise.
+    fatal_action_thread_error: dict = {}
+    _default_excepthook = threading.excepthook
+    def _action_thread_excepthook(args):
+        if args.thread is not action_thread:
+            _default_excepthook(args)
+            return
+        logger.error(
+            "Control thread '%s' crashed (%s: %s); shutting down application",
+            args.thread.name, args.exc_type.__name__, args.exc_value,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+        fatal_action_thread_error['error'] = args.exc_value
+        event.set()
+        GLib.idle_add(app.shutdown)
+        sys.exit(-1)
+
+    threading.excepthook = _action_thread_excepthook
+
     action_thread.start()
     app.add_shutdown_callback(lambda: detections_queue.put(STOP))
 
@@ -699,6 +723,12 @@ def main():
     print("Done !!!")
     detections_queue.put(STOP)
     action_thread.join()
+
+    # Re-raise a control-thread crash captured by the excepthook so the
+    # process exits non-zero (caller scripts / systemd / CI must be able
+    # to tell a clean stop from a drone-connect failure).
+    if 'error' in fatal_action_thread_error:
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     main()
