@@ -381,7 +381,7 @@ def main():
         'confidence_min': 0.4,
         'confidence_move': 0.3,
 
-        'thrust_takeoff' : 0.5,
+        'thrust_takeoff' : 1.0,
         'thrust_cruise' : 0.53,
         'thrust_hover' : 0.4,
 
@@ -455,7 +455,7 @@ def main():
             'height': 720,
             'fps': 30,
             'video_format': 'RGB',
-            'active_id': 1,
+            'active_id': 0,
             # Relative size of the tracked object (or bigger) that triggers switching to wide-angle camera.
             # With wide 107° / zoom 14° FOVs (zoom_factor ~11x), 0.25 on zoom -> ~0.023 on wide after the
             # switch, leaving a ~1.5x margin above switch_to_wide_size to prevent immediate flip-back.
@@ -469,21 +469,22 @@ def main():
                 dict(
                     camera_id=0,
                     name='wide',
-                    sensor_index=1,
+                    sensor_index=0,
                     frame_angular_size_deg=XY(107, 85),
                 ),
-                dict(
-                    camera_id=1,
-                    name='zoom',
-                    sensor_index=0,
-                    frame_angular_size_deg=XY(14, 8),
-                ),
+                # dict(
+                #     camera_id=1,
+                #     name='zoom',
+                #     sensor_index=0,
+                #     frame_angular_size_deg=XY(14, 8),
+                # ),
             ],
         },
 
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m': XY(1.2, 1.2),            # shahed small
+        'target_size_m' : XY(2, 2),             # large baloon
+        # 'target_size_m': XY(1.2, 1.2),            # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
         # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
@@ -493,7 +494,7 @@ def main():
         # 'inertia_correction_limits': XY(1, 1),
         # 'inertia_correction_min_speed_ms': 5,
 
-        'safe_takeoff_period_ns': 300_000_000,
+        'safe_takeoff_period_ns': 1_000_000_000,
         'delay_takeof_until_n_detection_frames' : 10,
 
         'aim_point': XY(0.5, 0.5),
