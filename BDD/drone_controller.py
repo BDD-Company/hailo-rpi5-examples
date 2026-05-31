@@ -194,6 +194,12 @@ def compute_inertia_correction(telemetry_dict, target_relative_pos, gain, min_sp
     )
 
 
+def to_XY(val):
+    if not isinstance(val, XY):
+        val = XY(val, val)
+
+    return val
+
 async def drone_controlling_thread_async(
         drone_connection_string,
         drone_config,
@@ -238,11 +244,7 @@ async def drone_controlling_thread_async(
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
 
-    PD_COEFF_P                      = control_config.pop('pd_coeff_p', XY(1, 1))
-    # P may be different along each axis, so it is carried around as an XY.
-    # Accept a plain scalar from config too and apply it to both axes.
-    if not isinstance(PD_COEFF_P, XY):
-        PD_COEFF_P = XY(PD_COEFF_P, PD_COEFF_P)
+    PD_COEFF_P                      = to_XY(control_config.pop('pd_coeff_p', XY(1, 1)))
     PD_COEFF_D                      = control_config.pop('pd_coeff_d', 0)
 
     PD_COEFF_P_DYNAMIC               = control_config.pop('pd_coeff_p_dynamic', False)
@@ -252,17 +254,9 @@ async def drone_controlling_thread_async(
     PD_COEFF_P_DYNAMIC_MIN           = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
     PD_COEFF_P_DYNAMIC_MAX           = control_config.pop('pd_coeff_p_dynamic_max', 2)
 
-    PD_COEFF_P_SAFE_MIN              = control_config.pop('pd_coeff_p_safe_min', XY(0.5, 0.5))
-    if not isinstance(PD_COEFF_P_SAFE_MIN, XY):
-        PD_COEFF_P_SAFE_MIN = XY(PD_COEFF_P_SAFE_MIN, PD_COEFF_P_SAFE_MIN)
-    PD_COEFF_P_MIN                   = control_config.pop('pd_coeff_p_min', XY(0.5, 0.5))
-    PD_COEFF_P_MAX                   = control_config.pop('pd_coeff_p_max', XY(5, 5))
-    # P bounds may be different along each axis, carried around as XY.
-    # Accept a plain scalar from config too and apply it to both axes.
-    if not isinstance(PD_COEFF_P_MIN, XY):
-        PD_COEFF_P_MIN = XY(PD_COEFF_P_MIN, PD_COEFF_P_MIN)
-    if not isinstance(PD_COEFF_P_MAX, XY):
-        PD_COEFF_P_MAX = XY(PD_COEFF_P_MAX, PD_COEFF_P_MAX)
+    PD_COEFF_P_SAFE_MIN              = to_XY(control_config.pop('pd_coeff_p_safe_min', XY(0.5, 0.5)))
+    PD_COEFF_P_MIN                   = to_XY(control_config.pop('pd_coeff_p_min', XY(0.5, 0.5)))
+    PD_COEFF_P_MAX                   = to_XY(control_config.pop('pd_coeff_p_max', XY(5, 5)))
 
     OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = control_config.pop('optical_methods_to_refine_target_size_and_center', False)
     ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = control_config.pop('adjust_aim_point_at_edge_of_frame', False)
@@ -319,10 +313,6 @@ async def drone_controlling_thread_async(
     # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
 
     ESTIMATION_3D = control_config.pop('estimation_3d', None)
-    # if ESTIMATION_3D is None:
-    #     ESTIMATION_3D = control_config.pop('estimation_use_3d', False)
-    # else:
-    #     control_config.pop('estimation_use_3d', None)
 
     ESTIMATION_3D_METHOD = VelocityMethod(control_config.pop('estimation_3d_method', None))
     ESTIMATION_3D_USE_INITIAL_VELOCITY         = control_config.pop('estimation_3d_use_initial_velocity', True)
@@ -345,7 +335,6 @@ async def drone_controlling_thread_async(
 
     AIM_POINT = control_config.pop('aim_point', XY(0.5, 0.5))
     aim_point = AIM_POINT
-    # AIM_POINT = XY(0.5, 0.5)
 
     SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
     if FOLLOW_TARGET_POSITION_NED and not ESTIMATION_3D:
@@ -366,12 +355,6 @@ async def drone_controlling_thread_async(
     # threshold; an EMA cuts that without much lag. alpha=0.3 → effective
     # window ~3-4 frames at the controller's loop rate.
     CAMERA_SWITCH_SIZE_EMA_ALPHA = control_config.pop('camera_switch_size_ema_alpha', 0.3)
-
-
-    # DRONE_CONFIG_PREFIX = 'drone_'
-    # for drone_config_key in [k for k in control_config.keys() if k.startswith(DRONE_CONFIG_PREFIX)]:
-    #     drone_config_key_stripped = drone_config_key.removeprefix(DRONE_CONFIG_PREFIX)
-    #     drone_config[drone_config_key_stripped]=control_config.pop(drone_config_key)
 
     if len(control_config) > 0:
         logger.warning("Unknown/unused config parameters: %s", control_config)
