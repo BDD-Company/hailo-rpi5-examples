@@ -350,7 +350,7 @@ async def drone_controlling_thread_async(
     else:
         CAMERA_SWITCH_TO_WIDE_SIZE = 0.25
         CAMERA_SWITCH_TO_ZOOM_SIZE = 0.015
-    # S2: EMA smoothing of target size for switching decisions.
+    # S2: Exponential Moving Average (EMA) smoothing of target size for switching decisions.
     # Raw per-frame bbox size jitters enough to flap the switch near a
     # threshold; an EMA cuts that without much lag. alpha=0.3 → effective
     # window ~3-4 frames at the controller's loop rate.
