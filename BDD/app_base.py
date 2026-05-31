@@ -237,7 +237,7 @@ class GStreamerApp:
         # Create a GLib Main Loop
         self.loop = GLib.MainLoop()
 
-    def bus_call(self, bus, message, loop):
+    def bus_call(self, bus, message : Gst.Message, loop):
         t = message.type
         if t == Gst.MessageType.EOS:
             logger.info("End-of-stream")
@@ -262,7 +262,8 @@ class GStreamerApp:
                 logger.info("pipeline state %s -> %s (pending %s)", old.value_nick, new.value_nick, pending.value_nick)
         elif t == Gst.MessageType.STREAM_STATUS:
             status_type, owner = message.parse_stream_status()
-            logger.debug("stream-status %s on %s", status_type.value_nick, owner.get_name() if owner else '?')
+            if not status_type == 'create' and not status_type == 'enter':
+                logger.debug("stream-status %s on %s", status_type.value_nick, owner.get_name() if owner else '?')
         # QOS
         elif t == Gst.MessageType.QOS:
             # Handle QoS message here
@@ -691,7 +692,7 @@ def picamera_thread(
     appsrc: GstApp.AppSrc = pipeline.get_by_name(appsrc_name)
     appsrc.set_property("is-live", True)
     appsrc.set_property("format", Gst.Format.TIME)
-    if logger.isEnabledFor(logging.DEBUG):
+    if False and logger.isEnabledFor(logging.DEBUG):
         prop_lines = []
         for pspec in appsrc.list_properties():
             if not (pspec.flags & GObject.ParamFlags.READABLE):

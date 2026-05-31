@@ -387,7 +387,7 @@ def main():
     # a `CAMERA SWITCH` warning in drone_controller, and a refreshed FOV in
     # the angle math. Production policy (e.g. switch by target distance) will
     # call the same set_active() / toggle() API.
-    arg_parser.add_argument('--camera-switch-test-s', type=float, default=None,
+    arg_parser.add_argument('--test-camera-switch-s', type=float, default=None,
                             help='Toggle active camera every N seconds (dual-camera verification only)')
 
     control_config = {
@@ -605,11 +605,11 @@ def main():
     # successful run here is direct evidence that the production switch path
     # works end-to-end (producer gate, callback dedup, controller cache purge,
     # FOV refresh). Disabled unless --camera-switch-test-s is passed.
-    switch_test_interval_s = app.options_menu.camera_switch_test_s
-    if switch_test_interval_s and camera_switcher is not None and len(camera_switcher.configs()) >= 2:
+    test_switch_interval_s = app.options_menu.test_camera_switch_s
+    if test_switch_interval_s and camera_switcher is not None and len(camera_switcher.configs()) >= 2:
         def _switch_test_thread():
             while True:
-                time.sleep(switch_test_interval_s)
+                time.sleep(test_switch_interval_s)
                 new_id = camera_switcher.toggle()
                 cfg = camera_switcher.active_config()
                 logger.warning(
@@ -617,7 +617,7 @@ def main():
                     new_id, cfg.name, cfg.frame_angular_size_deg, cfg.zoom_factor,
                 )
         threading.Thread(target=_switch_test_thread, name="camera-switch-test", daemon=True).start()
-        logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", switch_test_interval_s)
+        logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
 
     logger.info("!!! Config: %s", control_config)
     if DEBUG:
