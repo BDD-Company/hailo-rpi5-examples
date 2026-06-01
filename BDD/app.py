@@ -432,7 +432,8 @@ def main():
 
         'pd_coeff_p': XY(8, 2), # per-axis P gain (x, y)
         'pd_coeff_d': 0, #-1, # -1
-        'pd_coeff_p_safe_min': XY(0.5, 0.5),
+        # stating from platform with guides, make sure that initial takeoff is almost perpendicular
+        'pd_coeff_p_safe_min': XY(0.1, 0.1),
         'pd_coeff_p_min' : XY(0.5, 0.5),
         'pd_coeff_p_max' : XY(4, 2),
 
