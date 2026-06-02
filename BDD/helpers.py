@@ -862,7 +862,11 @@ class LoggerWithPrefix(logging.LoggerAdapter):
 
 
 def _safe_repr(value, max_length: int = 160) -> str:
-    text = str(value)
+    if type(value) == float:
+        text = "%.2f" % value
+    else:
+        text = str(value)
+
     if len(text) <= max_length:
         return text
     return text[: max_length - 3] + "..."
