@@ -49,7 +49,8 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
                     frame_rate=30, sync=True,
                     video_format='RGB',
                     do_timestamp=False,
-                    force_framerate=None):
+                    force_framerate=None,
+                    pin_source_dimensions=True):
     """
     Creates a GStreamer pipeline string for the video source with a separate fps caps
     for frame rate control.
@@ -93,6 +94,16 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
             framerate= int(force_framerate)
             framere_clause=f',framerate={framerate}/1'
 
+        # Detection mode flips the appsrc output size at runtime (640x640 tiles <-> 1280x720
+        # full frame). Pinning width/height on this source capsfilter would reject the tile
+        # caps (not-negotiated -> Internal data stream error), so when pin_source_dimensions is
+        # False we constrain format only and let the appsrc-declared caps carry the size. The
+        # pursuit-only path keeps the pin (default True) so its negotiation is byte-for-byte
+        # unchanged; the appsrc still declares the exact size either way.
+        if pin_source_dimensions:
+            dims_clause = f', width={video_width}, height={video_height}'
+        else:
+            dims_clause = ''
         source_element = (
             # `format=time` MUST be set on appsrc at pipeline-parse time, not later from
             # picamera_thread: with the lighter single-stream picam2 config, the main
@@ -103,7 +114,7 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
             # dies. Declaring it here eliminates the race regardless of thread timing.
             f'appsrc name=app_source is-live=true leaky-type=downstream format=time {do_timestamp_clause} ! '
             # 'videoflip name=videoflip video-direction=horiz ! '
-            f'video/x-raw, format={video_format}, width={video_width}, height={video_height} {framere_clause} ! '
+            f'video/x-raw, format={video_format}{dims_clause} {framere_clause} ! '
         )
     elif source_type == 'libcamera':
         framerate = int(force_framerate if force_framerate is not None else frame_rate)

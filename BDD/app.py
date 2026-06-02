@@ -389,11 +389,15 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, detection_flexible_source=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
+        # When detection mode may be enabled, the source capsfilter must not pin width/height so
+        # the appsrc can flip between the tile size and the full frame. Set before super().__init__
+        # because that builds the pipeline (get_pipeline_string reads this attribute).
+        self._detection_flexible_source = detection_flexible_source
         super().__init__(app_callback, user_data, parser)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
@@ -411,14 +415,20 @@ class App(GStreamerDetectionApp):
         video_file_name = video_file_name.stem + "_%05d" + (video_file_name.suffix if video_file_name.suffix else '.mkv')
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000_000_000
-        # Normalize to a fixed size before the encoder. In detection mode the source caps are
-        # the tile size (640x640) and flip to the full frame (1280x720) on the one-way switch to
-        # pursuit; pinning videoscale here means x264enc always sees a constant resolution and is
-        # immune to that mid-stream renegotiation (detection tiles are scaled up for recording only).
+        # Fully normalize the stream to constant caps before x264enc. In detection mode the source
+        # caps are the tile size (640x640) and flip to the full frame (1280x720) on the one-way
+        # switch to pursuit. matroskamux refuses ANY caps change after the first, and x264enc
+        # re-emits its codec_data whenever its input caps renegotiate — so it is not enough to pin
+        # width/height; we must pin format + size + framerate + pixel-aspect-ratio so x264enc's
+        # input is byte-identical across the flip and it never reconfigures the muxer. videoscale
+        # absorbs the size change, videorate the rate, videoconvert the format (detection tiles are
+        # scaled up for the debug recording only). The pursuit-only stream already matches these
+        # exact caps, so its recording is unchanged.
         return f'''
             videoscale \
-            ! video/x-raw, width={self.video_width}, height={self.video_height} \
             ! videoconvert \
+            ! videorate \
+            ! video/x-raw, format=I420, width={self.video_width}, height={self.video_height}, framerate=30/1, pixel-aspect-ratio=1/1 \
             ! x264enc \
                 key-int-max=30 \
                 bframes=0 \
@@ -712,6 +722,10 @@ def main():
     # Detection-mode config (values-only). Popped here so it is not forwarded to the
     # controller as a dict; the live FlightModeController is built below and passed explicitly.
     detection_mode_cfg = control_config.pop('detection_mode', None) or {}
+    # Determined before App creation (which builds the pipeline): detection mode flips the appsrc
+    # output caps at runtime, so the source capsfilter must be built dimension-flexible. argparse
+    # has not consumed argv yet, so peek for the CLI flag alongside the config default.
+    detection_enabled_hint = bool(detection_mode_cfg.get('enabled', False) or '--detection-mode' in sys.argv)
 
     # Build CameraSwitcher from the 'camera' dict in control_config.
     # The dict is the kwargs for CameraSwitcher except for 'cameras' which
@@ -736,7 +750,8 @@ def main():
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True)
+        record_videos=True,
+        detection_flexible_source=detection_enabled_hint)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
