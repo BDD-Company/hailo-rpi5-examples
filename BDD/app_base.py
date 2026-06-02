@@ -526,6 +526,13 @@ class GStreamerApp:
             # to the legacy single-camera launch (the producer synthesizes a
             # default CameraConfig internally).
             camera_switcher = getattr(self, 'camera_switcher', None)
+            # Detection mode (pre-flight tiling): the producer starts emitting
+            # HEF-input-sized tiles, so the shared appsrc must be negotiated at
+            # the tile size up front; the producer flips caps to the full frame
+            # size once it transitions to pursuit. When the feature is off this
+            # is None and every path below is byte-for-byte the legacy behavior.
+            flight_mode = getattr(self, 'flight_mode', None)
+            detection_feature_on = flight_mode is not None and flight_mode.enabled
             if camera_switcher is not None:
                 # L4: set the shared appsrc caps ONCE, from the switcher's
                 # single source of truth, before any producer thread starts.
@@ -536,11 +543,14 @@ class GStreamerApp:
                 if appsrc is not None:
                     appsrc.set_property("is-live", True)
                     appsrc.set_property("format", Gst.Format.TIME)
+                    out_w, out_h = camera_switcher.width, camera_switcher.height
+                    if detection_feature_on:
+                        out_w, out_h = flight_mode.tile_size
                     appsrc.set_property(
                         "caps",
                         Gst.Caps.from_string(
                             f"video/x-raw, format={camera_switcher.video_format}, "
-                            f"width={camera_switcher.width}, height={camera_switcher.height}, "
+                            f"width={out_w}, height={out_h}, "
                             f"framerate={camera_switcher.fps}/1, pixel-aspect-ratio=1/1"
                         ),
                     )
@@ -553,6 +563,7 @@ class GStreamerApp:
                         kwargs={
                             'camera_config': cam_cfg,
                             'camera_switcher': camera_switcher,
+                            'flight_mode': flight_mode,
                             'on_failure': on_picam_failure,
                         },
                         name=f"picam-{cam_cfg.camera_id}-{cam_cfg.name or 'cam'}",
@@ -560,10 +571,27 @@ class GStreamerApp:
                     self.threads.append(t)
                     t.start()
             else:
+                # Legacy single-camera. When detection mode is on we must pin the
+                # initial appsrc caps to the tile size here (the producer no longer
+                # sets full-frame caps in that case), before the pipeline PLAYs.
+                if detection_feature_on:
+                    appsrc = self.pipeline.get_by_name("app_source")
+                    if appsrc is not None:
+                        tw, th = flight_mode.tile_size
+                        appsrc.set_property("is-live", True)
+                        appsrc.set_property("format", Gst.Format.TIME)
+                        appsrc.set_property(
+                            "caps",
+                            Gst.Caps.from_string(
+                                f"video/x-raw, format={self.video_format}, "
+                                f"width={tw}, height={th}, "
+                                f"framerate=30/1, pixel-aspect-ratio=1/1"
+                            ),
+                        )
                 picam_thread = threading.Thread(
                     target=picamera_thread,
                     args=(self.pipeline, self.video_width, self.video_height, self.video_format),
-                    kwargs={'on_failure': on_picam_failure},
+                    kwargs={'on_failure': on_picam_failure, 'flight_mode': flight_mode},
                     name="picam",
                 )
                 self.threads.append(picam_thread)
@@ -638,6 +666,7 @@ def picamera_thread(
         video_format,
         camera_config=None,
         camera_switcher=None,
+        flight_mode=None,
         picamera_config=None,
         target_fps = 30,  # aligns appsrc caps with the pipeline's 30/1 -> no videorate duplication
         picamera_controls_initial = None,
@@ -717,8 +746,11 @@ def picamera_thread(
         return
     camera_model = cam_info[sensor_index]['Model']
     tuning_file = camera_config.tuning_file or f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}_noir.json"
-    logger.info("%s opening Picamera2(camera_num=%d, model=%s, tuning=%s)",
-                log_prefix, sensor_index, camera_model, tuning_file)
+    logger.info("%s opening Picamera2(camera_num=%d, model=%s)",
+                log_prefix, sensor_index, camera_model)
+
+    # NOTE: allow libcamera to load one for each camera module specifically since setting single tuning file doesn't work for multiple different camera models.
+    # os.environ["LIBCAMERA_IPA_CONFIG_PATH"] = "/usr/share/libcamera/ipa/rpi/pisp/"
 
     with Picamera2(camera_num=sensor_index, tuning=tuning_file) as picam2:
         if picamera_config is None:
@@ -770,7 +802,15 @@ def picamera_thread(
         width, height = capture_stream['size']
         logger.debug("%s Picamera2 configuration: width=%s, height=%s, format=%s",
                      log_prefix, width, height, format_str)
-        if camera_switcher is None:
+        # Detection-mode (pre-flight tiling) producer state. When the flight-mode feature is
+        # enabled and this is the detection camera, frames are split into native HEF-input
+        # tiles instead of pushed whole; run() has already negotiated appsrc at the tile size,
+        # and the producer flips caps back to the full frame on the one-way switch to pursuit.
+        detection_feature_on = flight_mode is not None and flight_mode.enabled
+        _is_detection_camera = detection_feature_on and (flight_mode.detection_camera_id == camera_id)
+        if camera_switcher is None and not detection_feature_on:
+            # Legacy single-camera: nobody else sets caps, so we do it here. (With detection
+            # mode on, run() pinned the initial tile-size caps instead.)
             appsrc.set_property(
                 "caps",
                 Gst.Caps.from_string(
@@ -783,6 +823,40 @@ def picamera_thread(
         unix_timestamp_caps = Gst.Caps.from_string("timestamp/x-unix")
         frame_id_caps = Gst.Caps.from_string("frame-id/x-picamera2")
         camera_id_caps = Gst.Caps.from_string("camera-id/x-picamera2")
+
+        # Reference-timestamp metas carrying tile identity/placement to the user callback.
+        # Each holds one uint64 in `.timestamp`; normalized origin/extent are sent as
+        # parts-per-million ints (only `.timestamp` is used — never `.duration` — so we don't
+        # depend on that field being exposed by the GI binding).
+        tile_group_caps    = Gst.Caps.from_string("tile-group/x-bdd")
+        tile_count_caps    = Gst.Caps.from_string("tile-count/x-bdd")
+        tile_index_caps    = Gst.Caps.from_string("tile-index/x-bdd")
+        tile_origin_x_caps = Gst.Caps.from_string("tile-origin-x/x-bdd")
+        tile_origin_y_caps = Gst.Caps.from_string("tile-origin-y/x-bdd")
+        tile_extent_w_caps = Gst.Caps.from_string("tile-extent-w/x-bdd")
+        tile_extent_h_caps = Gst.Caps.from_string("tile-extent-h/x-bdd")
+
+        # Output size currently negotiated on appsrc; only renegotiate on an actual change.
+        last_output_size = tuple(flight_mode.tile_size) if _is_detection_camera else (width, height)
+
+        def _ensure_output_caps(out_w, out_h):
+            nonlocal last_output_size
+            if last_output_size == (out_w, out_h):
+                return
+            appsrc.set_property("caps", Gst.Caps.from_string(
+                f"video/x-raw, format={format_str}, width={out_w}, height={out_h}, "
+                f"framerate={capture_target_fps}/1, pixel-aspect-ratio=1/1"))
+            logger.warning("%s appsrc output caps %s -> %dx%d (flight-mode transition)",
+                           log_prefix, last_output_size, out_w, out_h)
+            last_output_size = (out_w, out_h)
+
+        # Tile layout is constant for the run (capture size + config are fixed): compute once
+        # so a bad geometry fails fast at startup instead of every frame.
+        detection_tiles = None
+        if _is_detection_camera:
+            detection_tiles = flight_mode.tiles_for_frame(width, height)
+            logger.info("%s DETECTION mode: %d native tiles of %s over %dx%d frame (overlap auto-computed)",
+                        log_prefix, len(detection_tiles), flight_mode.tile_size, width, height)
 
         picam2.start()
         frame_count = 0
@@ -809,6 +883,12 @@ def picamera_thread(
         # the inactive camera, narrowing the post-switch exposure transient.
         INACTIVE_FPS = 15
         was_active : bool | None = None  # forces the initial control push on first iteration
+        # Detection-mode capture throttle. Each capture fans out into N tile inferences, so the
+        # detection camera must run slow enough that all tiles clear the pipeline before the next
+        # capture (else the leaky input queue sheds tiles and groups never complete). Restored to
+        # the full rate on the one-way switch to pursuit. None forces the initial apply.
+        detection_capture_fps = flight_mode.capture_fps if flight_mode is not None else capture_target_fps
+        was_detection : bool | None = None
         logger.debug("picamera_process started")
         last_alive_log_monotonic = time.monotonic()
         last_alive_log_frame_count = 0
@@ -851,6 +931,17 @@ def picamera_thread(
                     apply_controls(transition_controls)
                     logger.info("%s FrameRate -> %d fps (active=%s)", log_prefix, new_fps, is_active)
                     was_active = is_active
+
+            # Detection-mode FrameRate override (applied AFTER the active/inactive logic so it
+            # wins for the detection camera): slow while detecting, full rate once in pursuit.
+            # Re-applied at the one-way detection->pursuit transition (which doesn't flip is_active).
+            if _is_detection_camera:
+                now_detection = flight_mode.is_detection()
+                if now_detection != was_detection:
+                    det_rate = detection_capture_fps if now_detection else capture_target_fps
+                    apply_controls({'FrameRate': det_rate, 'AeEnable': True, 'AwbEnable': True})
+                    logger.info("%s detection-mode FrameRate -> %d fps (detecting=%s)", log_prefix, det_rate, now_detection)
+                    was_detection = now_detection
 
             capture_started_monotonic = time.monotonic()
             try:
@@ -896,64 +987,101 @@ def picamera_thread(
                     on_failure()
                 break
 
-            # Convert framontigue data if necessary
+            # Convert frame data once (shared by the whole-frame and tiled paths).
+            # Multi-camera correctness: derive buffer.pts from a process-wide monotonic clock
+            # instead of per-camera sensor TS so the pipeline sees a single monotonic stream
+            # even when the active camera switches. The original sensor TS is still attached as
+            # ref-meta so downstream sensor-latency math is unchanged.
             frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-            frame_bytes = frame.tobytes()
+            now_monotonic_ns = time.monotonic_ns()
+            base_pts_ns = _shared_pts_ns(now_monotonic_ns)
+            sensor_timestamp_ns = frame_meta.get("SensorTimestamp", None) if frame_meta is not None else None
+            if sensor_timestamp_ns is not None and first_sensor_timestamp_ns == 0:
+                first_sensor_timestamp_ns = sensor_timestamp_ns
 
-            # Drop one of the two buffer copies. The old new_wrapped(frame.tobytes())
-            # copied the bytes a SECOND time into GstMemory; new_wrapped_full instead
-            # references frame_bytes directly (transfer none) and keeps it alive by
-            # taking it as user_data with a destroy-notify. Measured ~2.5x faster than
-            # new_wrapped on dev. Signature: (flags, data, maxsize, offset, user_data,
-            # notify) — 6 args (no `size`; inferred from data length). NOTE: true
-            # zero-copy straight from the numpy array is NOT possible via PyGObject
-            # (it marshals the array param as a sequence of ints) so the one tobytes()
-            # copy is unavoidable here.
-            buffer = Gst.Buffer.new_wrapped_full(
-                Gst.MemoryFlags.READONLY, frame_bytes, len(frame_bytes), 0,
-                frame_bytes, _buffer_keepalive_noop,
-            )
+            push_error = False
+            if _is_detection_camera and flight_mode.is_detection():
+                # --- DETECTION: split the frame into NATIVE HEF-input tiles (no scaling). ---
+                # Each tile is a contiguous crop pushed as its own buffer; the user callback
+                # remaps + reaggregates them via the tile-* metas. appsrc is at the tile size.
+                _ensure_output_caps(*flight_mode.tile_size)
+                tile_count = len(detection_tiles)
+                for tile in detection_tiles:
+                    x1, y1, x2, y2 = (int(v) for v in tile.pixel_rect.to_xyxy())
+                    sub_bytes = np.ascontiguousarray(frame[y1:y2, x1:x2]).tobytes()
+                    buf = Gst.Buffer.new_wrapped_full(
+                        Gst.MemoryFlags.READONLY, sub_bytes, len(sub_bytes), 0,
+                        sub_bytes, _buffer_keepalive_noop,
+                    )
+                    if frame_meta is not None:
+                        uid = frame_count * tile_count + tile.index
+                        # Stagger PTS by tile index so 4 tiles of one capture stay strictly
+                        # monotonic (splitmuxsink requirement); uid keeps callback dedup distinct.
+                        buf.pts = base_pts_ns + tile.index
+                        buf.dts = buf.pts
+                        buf.duration = Gst.CLOCK_TIME_NONE
+                        if sensor_timestamp_ns is not None:
+                            buf.add_reference_timestamp_meta(sensor_timestamp_caps, sensor_timestamp_ns, Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(unix_timestamp_caps, now_monotonic_ns, Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(frame_id_caps, uid, Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(camera_id_caps, camera_id, Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(tile_group_caps, frame_count, Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(tile_count_caps, tile_count, Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(tile_index_caps, tile.index, Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(tile_origin_x_caps, int(round(tile.origin_norm.x * 1_000_000)), Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(tile_origin_y_caps, int(round(tile.origin_norm.y * 1_000_000)), Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(tile_extent_w_caps, int(round(tile.extent_norm.x * 1_000_000)), Gst.CLOCK_TIME_NONE)
+                        buf.add_reference_timestamp_meta(tile_extent_h_caps, int(round(tile.extent_norm.y * 1_000_000)), Gst.CLOCK_TIME_NONE)
+                        buf.offset = uid
+                    emit_start_monotonic = time.monotonic()
+                    ret = appsrc.emit('push-buffer', buf)
+                    emit_time_accum += time.monotonic() - emit_start_monotonic
+                    if ret == Gst.FlowReturn.FLUSHING:
+                        push_error = True
+                        break
+                    if ret != Gst.FlowReturn.OK:
+                        logger.error("%s Failed to push tile buffer: %s", log_prefix, ret)
+                        if on_failure is not None:
+                            on_failure()
+                        push_error = True
+                        break
+            else:
+                # --- PURSUIT / feature-off / non-detection camera: whole frame (legacy path) ---
+                # On the one-way detection->pursuit transition this flips appsrc back to the
+                # full frame caps once (a cheap renegotiation — no camera reconfigure).
+                if detection_feature_on:
+                    _ensure_output_caps(width, height)
+                frame_bytes = frame.tobytes()
+                # new_wrapped_full references frame_bytes directly (transfer none) and keeps it
+                # alive via the destroy-notify — one copy (tobytes) instead of two.
+                buffer = Gst.Buffer.new_wrapped_full(
+                    Gst.MemoryFlags.READONLY, frame_bytes, len(frame_bytes), 0,
+                    frame_bytes, _buffer_keepalive_noop,
+                )
+                if frame_meta is not None:
+                    buffer.pts = base_pts_ns
+                    buffer.dts = base_pts_ns
+                    buffer.duration = Gst.CLOCK_TIME_NONE
+                    if sensor_timestamp_ns is not None:
+                        buffer.add_reference_timestamp_meta(sensor_timestamp_caps, sensor_timestamp_ns, Gst.CLOCK_TIME_NONE)
+                    buffer.add_reference_timestamp_meta(unix_timestamp_caps, now_monotonic_ns, Gst.CLOCK_TIME_NONE)
+                    buffer.add_reference_timestamp_meta(frame_id_caps, frame_count, Gst.CLOCK_TIME_NONE)
+                    # Tag each buffer with the producing camera so the user-callback can populate
+                    # Detections.camera_id (and downstream caches purge on a camera switch).
+                    buffer.add_reference_timestamp_meta(camera_id_caps, camera_id, Gst.CLOCK_TIME_NONE)
+                    buffer.offset = frame_count
+                emit_start_monotonic = time.monotonic()
+                ret = appsrc.emit('push-buffer', buffer)
+                emit_time_accum += time.monotonic() - emit_start_monotonic
+                if ret == Gst.FlowReturn.FLUSHING:
+                    push_error = True
+                elif ret != Gst.FlowReturn.OK:
+                    logger.error("%s Failed to push buffer: %s", log_prefix, ret)
+                    if on_failure is not None:
+                        on_failure()
+                    push_error = True
 
-            # Set buffer PTS and duration
-            # buffer_duration = Gst.util_uint64_scale_int(1, Gst.SECOND, target_fps)
-
-            if frame_meta is not None:
-                sensor_timestamp_ns = frame_meta.get("SensorTimestamp", None)
-                # Multi-camera correctness: derive buffer.pts from a process-
-                # wide monotonic clock instead of per-camera sensor TS so the
-                # pipeline sees a single monotonic stream even when the active
-                # camera switches. The original sensor TS is still attached
-                # as ref-meta so downstream sensor-latency math is unchanged.
-                now_monotonic_ns = time.monotonic_ns()
-                frame_timestamp_ns = _shared_pts_ns(now_monotonic_ns)
-                if sensor_timestamp_ns is not None and first_sensor_timestamp_ns == 0:
-                    first_sensor_timestamp_ns = sensor_timestamp_ns
-
-                buffer.pts = frame_timestamp_ns
-                buffer.dts = frame_timestamp_ns
-                buffer.duration = Gst.CLOCK_TIME_NONE ## ?
-
-                if sensor_timestamp_ns is not None:
-                    buffer.add_reference_timestamp_meta(sensor_timestamp_caps, sensor_timestamp_ns, Gst.CLOCK_TIME_NONE)
-                buffer.add_reference_timestamp_meta(unix_timestamp_caps, now_monotonic_ns, Gst.CLOCK_TIME_NONE)
-                buffer.add_reference_timestamp_meta(frame_id_caps, frame_count, Gst.CLOCK_TIME_NONE)
-                # Tag each buffer with the producing camera so the user-callback
-                # can populate Detections.camera_id (and so downstream caches
-                # can be purged the moment a different camera's frame arrives).
-                buffer.add_reference_timestamp_meta(camera_id_caps, camera_id, Gst.CLOCK_TIME_NONE)
-
-                buffer.offset = frame_count
-
-            # Push the buffer to appsrc
-            emit_start_monotonic = time.monotonic()
-            ret = appsrc.emit('push-buffer', buffer)
-            emit_time_accum += time.monotonic() - emit_start_monotonic
-            if ret == Gst.FlowReturn.FLUSHING:
-                break
-            if ret != Gst.FlowReturn.OK:
-                logger.error("%s Failed to push buffer: %s", log_prefix, ret)
-                if on_failure is not None:
-                    on_failure()
+            if push_error:
                 break
             processing_time_accum += time.monotonic() - proc_start_monotonic
             frame_count += 1

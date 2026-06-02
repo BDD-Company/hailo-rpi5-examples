@@ -11,6 +11,7 @@ import os
 import sys
 import datetime
 import time
+import math
 
 import hailo
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
@@ -30,6 +31,7 @@ from bytetrack import BYTETracker
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
 from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
+from helpers import FlightModeController, remap_tile_bbox
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
@@ -66,6 +68,84 @@ sensor_timestamp_caps = Gst.Caps.from_string("timestamp/x-picamera2-sensor")
 unix_timestamp_caps = Gst.Caps.from_string("timestamp/x-unix")
 frame_id_caps = Gst.Caps.from_string("frame-id/x-picamera2")
 camera_id_caps = Gst.Caps.from_string("camera-id/x-picamera2")
+
+# Detection-mode tile metadata (set by picamera_thread for tiled buffers).
+tile_group_caps    = Gst.Caps.from_string("tile-group/x-bdd")
+tile_count_caps    = Gst.Caps.from_string("tile-count/x-bdd")
+tile_index_caps    = Gst.Caps.from_string("tile-index/x-bdd")
+tile_origin_x_caps = Gst.Caps.from_string("tile-origin-x/x-bdd")
+tile_origin_y_caps = Gst.Caps.from_string("tile-origin-y/x-bdd")
+tile_extent_w_caps = Gst.Caps.from_string("tile-extent-w/x-bdd")
+tile_extent_h_caps = Gst.Caps.from_string("tile-extent-h/x-bdd")
+
+# Per-capture tile reassembly buffer, keyed by (camera_id, group_id). In detection
+# mode the producer emits one buffer per 640x640 tile; the callback remaps each tile's
+# detections to full-frame coords and accumulates them here until all tiles of the
+# capture have arrived, then emits ONE merged Detections to the control queue.
+_tile_groups: dict = {}
+
+# Engaged by --simulate-detections: overlay a synthetic moving target on top of the
+# (real, possibly empty) inference output so the full capture->infer->control path can be
+# exercised on a bench with no real object. Set in main().
+SIMULATE_DETECTIONS = False
+
+
+def _read_meta_ts(buffer: Gst.Buffer, caps: Gst.Caps, default=None):
+    """Return the uint64 `.timestamp` of a reference-timestamp meta, or `default` if absent."""
+    m = buffer.get_reference_timestamp_meta(caps)
+    return int(m.timestamp) if m is not None else default
+
+
+def _synthetic_detection(phase: float) -> Detection:
+    """Deterministic, slowly-moving synthetic target in normalized coords (for --simulate)."""
+    cx = 0.5 + 0.18 * math.sin(phase)
+    cy = 0.5 + 0.18 * math.cos(phase * 0.7)
+    half = 0.03
+    return Detection(bbox=Rect.from_xyxy(cx - half, cy - half, cx + half, cy + half),
+                     confidence=0.8, track_id=None)
+
+
+def _iou(a: Rect, b: Rect) -> float:
+    inter = a.intersection(b).area()
+    union = a.area() + b.area() - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _nms_merge(dets: list, iou_thresh: float = 0.5) -> list:
+    """Greedy NMS to drop cross-tile duplicates (the y-overlap band is large, so a target
+    near the seam is detected in two tiles). Keeps the highest-confidence box per cluster."""
+    kept: list = []
+    for d in sorted(dets, key=lambda d: d.confidence, reverse=True):
+        if all(_iou(d.bbox, k.bbox) <= iou_thresh for k in kept):
+            kept.append(d)
+    return kept
+
+
+def _emit_tile_group(user_data, camera_id: int, group_id: int, group: dict):
+    merged = _nms_merge(group['dets'])
+    user_data.detections_queue.put(
+        Detections(group_id, None, merged, meta=group['meta'], camera_id=camera_id)
+    )
+
+
+def _accumulate_tile_group(user_data, camera_id, group_id, tile_count, remapped, meta):
+    """Collect a tile's remapped detections; emit the merged capture once all tiles arrive.
+    Older incomplete groups for the same camera are flushed when a newer group appears so a
+    dropped tile can never stall reassembly."""
+    for k in list(_tile_groups.keys()):
+        if k[0] == camera_id and k[1] < group_id:
+            _emit_tile_group(user_data, k[0], k[1], _tile_groups.pop(k))
+    key = (camera_id, group_id)
+    group = _tile_groups.get(key)
+    if group is None:
+        group = {'seen': 0, 'dets': [], 'meta': meta}
+        _tile_groups[key] = group
+    group['seen'] += 1
+    group['dets'].extend(remapped)
+    group['meta'] = meta
+    if group['seen'] >= tile_count:
+        _tile_groups.pop(key, None)
+        _emit_tile_group(user_data, camera_id, group_id, group)
 
 
 def normalized_timestamp(ts):
@@ -250,7 +330,9 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             [i for i in range(len(raw_dets)) if i not in track_id_map],
         )
 
-    # Construct immutable Detection objects with track_id set at creation time
+    # Construct immutable Detection objects with track_id set at creation time. For a tiled
+    # (detection-mode) buffer these coords are TILE-LOCAL [0..1]; for a whole frame they are
+    # already full-frame [0..1].
     detections_list = [
         Detection(
             bbox=rect,
@@ -260,16 +342,45 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         for i, (rect, conf) in enumerate(raw_dets)
     ]
 
-    # if len(detections) != 0:
+    meta = FrameMetadata(
+        capture_timestamp_ns=sensor_timestamp_ns,
+        detection_start_timestamp_ns=detection_start_timestamp_ns,
+        detection_end_timestamp_ns=detection_end_timestamp_ns,
+    )
+
+    # Detection-mode tiled buffer: remap to full-frame coords and reassemble the 2x2 capture.
+    group_id = _read_meta_ts(buffer, tile_group_caps)
+    tile_count = _read_meta_ts(buffer, tile_count_caps, 1)
+    if group_id is not None and tile_count and tile_count > 1:
+        tile_index = _read_meta_ts(buffer, tile_index_caps, 0)
+        origin = XY(_read_meta_ts(buffer, tile_origin_x_caps, 0) / 1_000_000,
+                    _read_meta_ts(buffer, tile_origin_y_caps, 0) / 1_000_000)
+        extent = XY(_read_meta_ts(buffer, tile_extent_w_caps, 1_000_000) / 1_000_000,
+                    _read_meta_ts(buffer, tile_extent_h_caps, 1_000_000) / 1_000_000)
+
+        # Inject the synthetic target into tile 0 (local coords) BEFORE remap so the full
+        # remap + reassemble path is exercised with a non-empty box.
+        if SIMULATE_DETECTIONS and tile_index == 0:
+            detections_list.append(_synthetic_detection(group_id / 15.0))
+
+        remapped = [
+            Detection(bbox=remap_tile_bbox(d.bbox, origin, extent),
+                      confidence=d.confidence, track_id=d.track_id, class_id=d.class_id)
+            for d in detections_list
+        ]
+        _accumulate_tile_group(user_data, camera_id, group_id, tile_count, remapped, meta)
+        return Gst.PadProbeReturn.OK
+
+    # Whole-frame buffer (pursuit / detection-mode off): emit directly.
+    if SIMULATE_DETECTIONS:
+        detections_list.append(_synthetic_detection(frame_id / 15.0))
+
     user_data.detections_queue.put(
         Detections(
             frame_id,
             frame,
             detections_list,
-            meta = FrameMetadata(
-                capture_timestamp_ns=sensor_timestamp_ns,
-                detection_start_timestamp_ns = detection_start_timestamp_ns,
-                detection_end_timestamp_ns=detection_end_timestamp_ns),
+            meta=meta,
             camera_id=camera_id,
         )
     )
@@ -300,8 +411,14 @@ class App(GStreamerDetectionApp):
         video_file_name = video_file_name.stem + "_%05d" + (video_file_name.suffix if video_file_name.suffix else '.mkv')
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000_000_000
+        # Normalize to a fixed size before the encoder. In detection mode the source caps are
+        # the tile size (640x640) and flip to the full frame (1280x720) on the one-way switch to
+        # pursuit; pinning videoscale here means x264enc always sees a constant resolution and is
+        # immune to that mid-stream renegotiation (detection tiles are scaled up for recording only).
         return f'''
-            videoconvert \
+            videoscale \
+            ! video/x-raw, width={self.video_width}, height={self.video_height} \
+            ! videoconvert \
             ! x264enc \
                 key-int-max=30 \
                 bframes=0 \
@@ -376,6 +493,20 @@ def main():
     # call the same set_active() / toggle() API.
     arg_parser.add_argument('--test-camera-switch-s', type=float, default=None,
                             help='Toggle active camera every N seconds (dual-camera verification only)')
+    # Live annotated preview. Adds an OpenCVShowImageSink to the debug MultiSink
+    # so the recorded frames are also shown in a window. Requires a display
+    # (bdd.sh exports DISPLAY=:0); harmless to omit on headless runs.
+    arg_parser.add_argument('--preview', action='store_true',
+                            help='Show a live annotated preview window (OpenCVShowImageSink); requires a display')
+    # Pre-flight detection mode. When on, the drone arms but stays grounded and scans a 2x2
+    # grid of native HEF-input tiles (wider search) until N consecutive detections establish a
+    # trajectory, then switches to the in-flight pursuit path. Off by default (legacy behavior).
+    arg_parser.add_argument('--detection-mode', action='store_true',
+                            help='Enable pre-flight detection mode (tiled search before pursuit)')
+    arg_parser.add_argument('--detection-camera-id', type=int, default=None,
+                            help='Camera id used to scan in detection mode (default: config / 0)')
+    arg_parser.add_argument('--simulate-detections', action='store_true',
+                            help='Overlay a synthetic moving target on real inference output (bench testing)')
 
     control_config = {
         'confidence_min': 0.4,
@@ -476,7 +607,7 @@ def main():
                 # dict(
                 #     camera_id=1,
                 #     name='zoom',
-                #     sensor_index=0,
+                #     sensor_index=1,
                 #     frame_angular_size_deg=XY(14, 8),
                 # ),
             ],
@@ -497,6 +628,24 @@ def main():
 
         'safe_takeoff_period_ns': 1_000_000_000,
         'delay_takeof_until_n_detection_frames' : 10,
+
+        # Pre-flight detection mode (values-only; the live FlightModeController is built from
+        # this and passed explicitly, never embedded in a config dict). When enabled, the drone
+        # scans `tiles_x`x`tiles_y` native `tile_size` (= HEF input) crops per frame; overlap is
+        # auto-computed from the frame/tile sizes. After `switch_after_consecutive_detections`
+        # consecutive detections it switches to pursuit and takes off.
+        'detection_mode': {
+            'enabled': False,
+            'camera_id': 0,
+            'tiles_x': 2,
+            'tiles_y': 2,
+            'tile_size': (640, 640),
+            'capture_fps': 10,   # camera runs slow so all tiles/capture clear the pipeline
+            'switch_after_consecutive_detections': 10,
+        },
+        # Pursuit: how long the target may stay out of sight (s) before reverting to a level
+        # loiter (hover); within this window the controller keeps flying the estimated trajectory.
+        'pursuit_target_lost_tolerance_s': 1.0,
 
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
@@ -560,6 +709,10 @@ def main():
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True
 
+    # Detection-mode config (values-only). Popped here so it is not forwarded to the
+    # controller as a dict; the live FlightModeController is built below and passed explicitly.
+    detection_mode_cfg = control_config.pop('detection_mode', None) or {}
+
     # Build CameraSwitcher from the 'camera' dict in control_config.
     # The dict is the kwargs for CameraSwitcher except for 'cameras' which
     # is the list of per-camera dicts (each one a CameraConfig kwargs).
@@ -587,6 +740,38 @@ def main():
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
+
+    # Build the FlightModeController (live object — passed explicitly to producer + controller,
+    # never embedded in a config dict). CLI flags override the values-only config block.
+    fm_enabled = bool(detection_mode_cfg.get('enabled', False) or app.options_menu.detection_mode)
+    fm_camera_id = app.options_menu.detection_camera_id
+    if fm_camera_id is None:
+        fm_camera_id = detection_mode_cfg.get('camera_id', DEFAULT_CAMERA_ID)
+    flight_mode = FlightModeController(
+        enabled=fm_enabled,
+        detection_camera_id=fm_camera_id,
+        tiles_x=detection_mode_cfg.get('tiles_x', 2),
+        tiles_y=detection_mode_cfg.get('tiles_y', 2),
+        tile_size=detection_mode_cfg.get('tile_size', (640, 640)),
+        capture_fps=detection_mode_cfg.get('capture_fps', 10),
+        switch_after_consecutive_detections=detection_mode_cfg.get('switch_after_consecutive_detections', 10),
+    )
+    # Picked up by GStreamerApp.run() and passed to each picamera_thread.
+    app.flight_mode = flight_mode
+    global SIMULATE_DETECTIONS
+    SIMULATE_DETECTIONS = bool(app.options_menu.simulate_detections)
+    if flight_mode.enabled:
+        if camera_switcher is not None:
+            if camera_switcher.get_config(flight_mode.detection_camera_id) is not None:
+                camera_switcher.set_active(flight_mode.detection_camera_id)
+            else:
+                logger.error("!!! detection_camera_id=%d not in configured cameras %s; detection mode may get no frames",
+                             flight_mode.detection_camera_id, [c.camera_id for c in camera_switcher.configs()])
+        logger.warning("!!! DETECTION MODE ENABLED: camera_id=%d, %dx%d tiles of %s, switch after %d consecutive detections; simulate=%s",
+                       flight_mode.detection_camera_id, flight_mode.tiles_x, flight_mode.tiles_y,
+                       flight_mode.tile_size, flight_mode.switch_after_consecutive_detections, SIMULATE_DETECTIONS)
+    else:
+        logger.info("!!! Detection mode OFF (pursuit-only behavior); simulate=%s", SIMULATE_DETECTIONS)
 
     # Optional dual-camera switching verification harness. The thread drives
     # the same CameraSwitcher.toggle() that production policy will use, so a
@@ -633,6 +818,7 @@ def main():
                 output_queue= output_queue,
                 signal_event_when_ready= event,
                 camera_switcher= camera_switcher,
+                flight_mode= flight_mode,
             )
         )
     else:
@@ -649,6 +835,7 @@ def main():
                 output_queue= output_queue,
                 signal_event_when_ready= event,
                 camera_switcher= camera_switcher,
+                flight_mode= flight_mode,
             ),
             name = "Drone"
         )
@@ -679,15 +866,18 @@ def main():
     action_thread.start()
     app.add_shutdown_callback(lambda: detections_queue.put(STOP))
 
-    sink = MultiSink([
+    sinks = [
         # RtspStreamerSink(30, 8554),
         RecorderSink(30,
             "./_DEBUG",
             segment_seconds=10,
             filename_base=f"debug_{start_time_str}",
         ),
-        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
-    ])
+    ]
+    if app.options_menu.preview:
+        logger.info("!!! Preview enabled: adding OpenCVShowImageSink to debug sink")
+        sinks.append(OpenCVShowImageSink(window_title='DEBUG IMAGE'))
+    sink = MultiSink(sinks)
 
     output_thread = threading.Thread(
         target = debug_output_thread,
