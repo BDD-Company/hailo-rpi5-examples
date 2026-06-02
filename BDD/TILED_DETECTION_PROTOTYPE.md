@@ -66,6 +66,37 @@ Tile size is fixed at the HEF input (640). For native (no-upscale) tiles, the pr
 2028×1080@75, 2028×1520@54, 4056×2160@20). Bigger frame ⇒ more tiles ⇒ lower FPS (≈ 2× tiles → ½ FPS),
 because cost scales with tile count, not pixels.
 
+## LATENCY (the metric that actually decides this — capture→detection)
+
+For this app, **capture→command latency is THE factor**, not FPS. Measured at 15 fps (source kept
+*below* pipeline capacity so latency is pure processing, no queue-wait), capture→detection (the
+aggregator emits the bypass frame carrying the original capture PTS once all tiles are inferred+merged):
+
+| config | mean ms | p50 | p95 |
+|--------|--------:|----:|----:|
+| 1×1 1280×720 (no tiling) | 22 | 18 | 37 |
+| 2×2 b1 (≈ producer-side: 4 tiles serial) | 67 | 60 | 99 |
+| **2×2 b4 (native cropper, batched)** | **57** | **52** | **91** |
+| 2×2 b8 | 55 | 51 | 86 |
+| 3×3 b9 (saturated at 15 fps → inflated) | 188 | 185 | 293 |
+
+**Counter-intuitive but decisive: for TILED detection, a larger batch LOWERS latency.** The decision
+needs all N tiles, so batch-4 infers all 4 in one 24.5 ms shot vs four serial 12.6 ms inferences (≈50 ms)
+for batch-1. So the native cropper (batch=tiles) beats the producer-side (batch-1) on latency by
+~10–15% — *and* the producer-side adds Python remap/NMS/reassembly on the GIL-bound callback that the C
+aggregator avoids, so the real gap is larger.
+
+Tiling itself roughly **triples** latency vs whole-frame (52 vs 18 ms p50) — that's the price of the
+wider search; 3×3 (~185 ms) is too slow for the control loop. **If tiling is used, 2×2 + batch-4 via the
+cropper is the lowest-latency way to do it.**
+
+### Don't throttle the detection pipeline
+The producer-side mode's `capture_fps=10` cap is a WORKAROUND: 4 separate tile-buffers/capture into a
+shared appsrc means a saturated leaky queue sheds *individual tiles* → broken groups. It artificially
+limits detections/sec and should go. The cropper path fixes this structurally — it sheds *whole frames*
+(one frame in, tiles generated internally), so it runs **unthrottled** at the pipeline's natural max with
+no broken groups. Run it at the knee (feed = processing rate): max detections/sec AND min latency.
+
 ## NV12-direct: measured, and it's a DEAD END (it's slower)
 
 Hypothesis was to feed the cropper NV12 (12 bpp vs RGB 24) so the resize moves half the bytes. Measured
@@ -96,9 +127,13 @@ The format lever is exhausted (NV12 loses). The resize itself is the irreducible
    hailotilecropper. Without this, ~20–28 fps (2×2) is the ceiling regardless of NPU.
 4. **batch-size (4–8)** and a **Hailo-8** only matter once the pipeline is NPU-bound — it is not here.
 
-Bottom line: the native-cropper path tops out near the current producer-side detection mode on this
-hardware (both CPU-resize-bound). The cropper buys cleaner cross-tile NMS and native batching, not a
-step change in FPS — worth it for code simplicity, not for speed.
+Bottom line (revised after the latency measurement): on **FPS** the cropper path is near the
+producer-side mode (both CPU-resize-bound), BUT on **latency — the metric that matters here — the
+cropper (2×2, batch-4) wins**: ~52 ms p50 vs ~60 ms for batch-1/producer-side, plus it drops the
+producer-side's Python reassembly and removes the need for the `capture_fps` throttle (whole-frame
+shedding). So for a latency-critical decision loop the native cropper IS the better path — recommend
+integrating it at **2×2 / RGB / batch-4**, run unthrottled at the knee. (Tiling still ~3× the
+whole-frame latency; that trade is a separate product call about search-area vs decision freshness.)
 
 ## Camera path
 
