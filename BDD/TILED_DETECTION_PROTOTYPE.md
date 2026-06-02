@@ -66,14 +66,39 @@ Tile size is fixed at the HEF input (640). For native (no-upscale) tiles, the pr
 2028×1080@75, 2028×1520@54, 4056×2160@20). Bigger frame ⇒ more tiles ⇒ lower FPS (≈ 2× tiles → ½ FPS),
 because cost scales with tile count, not pixels.
 
+## NV12-direct: measured, and it's a DEAD END (it's slower)
+
+Hypothesis was to feed the cropper NV12 (12 bpp vs RGB 24) so the resize moves half the bytes. Measured
+back-to-back (same thermal state, `--lean`):
+
+| config | RGB | NV12 |
+|--------|----:|-----:|
+| 2×2 1332×990 batch4 | **28.2 fps** (112 inf/s) | 18.7 fps (74) |
+| 3×3 1920×1080 batch9 | **12.2 fps** (110) | 8.9 fps (80) |
+| 1×1 1280×720 (no tiling) | 59.6 | 59.2 (equal) |
+
+**NV12 is ~34% SLOWER for tiling.** The hailotilecropper preserves format, so every tile pays a
+YUV→RGB colour convert (the model needs RGB) and that per-tile convert costs more than the cheaper NV12
+resize saves. With RGB the per-tile convert is a passthrough (~free), so the resize is the only cost.
+At 1×1 (no tiling) they're equal, confirming it's the per-tile convert that hurts. **Keep RGB.**
+
+(FPS varies ±~25% with the uncooled Pi5's thermal throttling, so all comparisons here are back-to-back;
+the 28-vs-22 spread between sweeps above is mostly temperature.)
+
 ## To actually go faster (future work, in rough order of payoff)
 
-1. **Move the tile resize off the CPU.** The Pi5 has no usable GPU path for GStreamer videoscale, but the
-   ISP/`pisp` can produce multiple downscaled outputs; or feed `hailotilecropper` NV12 directly (it
-   accepts NV12 — skip the full-frame RGB convert) and convert only per-tile. Cuts the dominant cost.
-2. **Fewer, larger tiles** when detection range allows — 2×2 is 2× the FPS of 3×3.
-3. **Smaller overlap** (less redundant pixels to scale).
-4. Only then does **batch-size (4–8)** pay off, and only a **Hailo-8** lifts the NPU ceiling.
+The format lever is exhausted (NV12 loses). The resize itself is the irreducible CPU cost, so:
+
+1. **Fewer, larger tiles** when detection range allows — 2×2 is ~2× the FPS of 3×3.
+2. **Smaller overlap** (fewer redundant pixels to scale).
+3. **Offload the resize from the CPU** — the only structural win, and the hard one: Pi5 GStreamer has no
+   GPU videoscale; the `pisp` ISP can emit downscaled outputs but that isn't exposed through
+   hailotilecropper. Without this, ~20–28 fps (2×2) is the ceiling regardless of NPU.
+4. **batch-size (4–8)** and a **Hailo-8** only matter once the pipeline is NPU-bound — it is not here.
+
+Bottom line: the native-cropper path tops out near the current producer-side detection mode on this
+hardware (both CPU-resize-bound). The cropper buys cleaner cross-tile NMS and native batching, not a
+step change in FPS — worth it for code simplicity, not for speed.
 
 ## Camera path
 
@@ -89,6 +114,7 @@ wrapper) rather than libcamerasrc.
 
 Add a `hailotilecropper`-based inference wrapper as an alternative to `INFERENCE_PIPELINE_WRAPPER` in
 [pipelines.py](pipelines.py), selected when detection mode is on; the picamera2 producer pushes whole
-frames at the larger size, and the existing detection→pursuit caps flip (640-tile vs full-frame) is
-replaced by a cropper-vs-whole-buffer wrapper choice. Given the CPU-bound result, prioritize the NV12
-no-full-convert path (#1 above) over batching.
+frames at the larger size (RGB — NV12 loses, see above), and the existing detection→pursuit caps flip
+(640-tile vs full-frame) is replaced by a cropper-vs-whole-buffer wrapper choice. Don't expect a FPS
+win (both paths are CPU-resize-bound); do it for the native cross-tile NMS + simpler producer, and use
+2×2 with minimal overlap to stay nearest the 60 fps whole-frame ceiling.
