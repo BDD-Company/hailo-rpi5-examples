@@ -1214,6 +1214,9 @@ class GStreamerDetectionApp(GStreamerApp):
                 video_height=self.video_height,
                 frame_rate=self.frame_rate,
                 sync=self.sync,
+                # Detection mode flips appsrc caps between the tile size and the full frame at
+                # runtime; don't pin width/height on the source capsfilter so both negotiate.
+                pin_source_dimensions=not getattr(self, '_detection_flexible_source', False),
                 # do_timestamp=True
         )
         detection_pipeline = INFERENCE_PIPELINE(
