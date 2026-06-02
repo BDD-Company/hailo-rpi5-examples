@@ -31,7 +31,7 @@ from bytetrack import BYTETracker
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
 from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
-from helpers import FlightModeController, remap_tile_bbox
+from flight_mode import FlightModeController, remap_tile_bbox
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
