@@ -1,6 +1,33 @@
 # How to launch bdd python app on raspberry pi and analyze logs
 
-Raspberry pi is usually connected to the same local network and thus accessible via `bdd-sd9.local` hostname. From this developer machine one can log into the rpi box with user `bdd`, using the ssh key already loaded into the ssh-agent.
+Raspberry pi is usually connected to the same local network and thus accessible via `bdd-sd9.local` hostname (alt: `172.20.1.80`). From this developer machine one can log into the rpi box with user `bdd`, using the ssh key already loaded into the ssh-agent.
+
+## The Pi is ephemeral — recover it yourself after a reboot
+
+`~/hailo-rpi5-examples/` (the `BDD/` and `scripts/` source trees) and `~/models/` live on **tmpfs and are wiped on every reboot** (see the `bdd-sd9-deploy-model` memory). This is normal, not a fault: after a reboot the Pi comes up with an empty `~/models/` and a `~/bdd.sh` symlink whose target (`~/hailo-rpi5-examples/scripts/bdd.sh`) does not exist yet. You are expected to restore this state autonomously — do NOT ask the user to fix it. The full recovery is exactly steps 2 (models) + 4 (sources) below; run both, in either order, then launch.
+
+Symptoms that mean "the Pi was rebooted, re-deploy":
+- `~/models/` is empty / missing the HEF(s).
+- `readlink -f ~/bdd.sh` resolves but `test -x ~/bdd.sh` fails (dangling symlink — `scripts/` not synced yet).
+- `~/hailo-rpi5-examples/scripts/` does not exist.
+
+One-shot recovery (idempotent — safe to run even when not needed):
+```
+# 1. Models: upload BOTH models from the local _MODELS store (step 2 details the why).
+scp /media/Pets/BDD/_MODELS/2026-04-07_11n_ball_v2.hef \
+    /media/Pets/BDD/_MODELS/2026-05-23_11n_sh_v6.hef \
+    bdd@bdd-sd9.local:/home/bdd/models/
+# 2. Sources: rsync BDD/ + scripts/ (this re-creates scripts/bdd.sh, fixing the ~/bdd.sh symlink).
+cd /media/Pets/BDD && rsync -v --mkpath -rc \
+  --exclude='*venv*' --exclude=doc --exclude='*__pycache__*' \
+  --exclude='**/.*' --exclude='*test_data/**' --exclude=community_projects/ \
+  --exclude='_DEBUG/' --exclude='*/**.mp4' \
+  --include='*.py' --include='*.sh' --chmod=+x \
+  /media/Pets/BDD/hailo-rpi5-examples bdd@bdd-sd9.local:
+# 3. Verify
+ssh bdd@bdd-sd9.local 'ls ~/models/ && readlink -f ~/bdd.sh && test -x ~/bdd.sh && echo "bdd.sh OK"'
+```
+`./bdd.sh` works the moment `scripts/bdd.sh` exists, because `~/bdd.sh` is a symlink to it that survives reboots (only its target, on tmpfs, is lost). The set of models to keep on the Pi is whatever lives in `/media/Pets/BDD/_MODELS/` and is referenced by `scripts/bdd.sh`'s `HAILO_MODEL`; the two listed above are the current working pair (a `ball` and a `sh` model). If the user uploads new models, they land in `/media/Pets/BDD/_MODELS/` — re-scp them too.
 
 ## Safety precheck
 
@@ -10,10 +37,16 @@ The BDD app connects to PX4 over USB and **arms the motors** as part of its star
 
 1. **SSH connectivity** — `ssh bdd@bdd-sd9.local` (expect `bdd-sd9` hostname). If this fails, nothing below will work.
 
-2. **Copy the model file referenced by `scripts/bdd.sh`** to the rpi. The HEF name in `bdd.sh`'s `HAILO_MODEL` is the source of truth and is updated occasionally; don't hard-code an old name. Resolve and copy in one go:
+2. **Copy the model file(s) to the rpi.** At minimum copy the HEF referenced by `bdd.sh`'s `HAILO_MODEL` (the source of truth, updated occasionally — don't hard-code an old name). After a reboot, also re-upload the full current working set (both the `ball` and `sh` models) so a quick `HAILO_MODEL` edit doesn't 404. Resolve-and-copy the referenced one:
    ```
    HEF=$(awk -F\" '/^export HAILO_MODEL=/{print $2}' /media/Pets/BDD/hailo-rpi5-examples/scripts/bdd.sh | xargs -n1 basename)
    scp "/media/Pets/BDD/_MODELS/$HEF" bdd@bdd-sd9.local:/home/bdd/models/
+   ```
+   Or upload the current pair in one go (see the reboot-recovery section above):
+   ```
+   scp /media/Pets/BDD/_MODELS/2026-04-07_11n_ball_v2.hef \
+       /media/Pets/BDD/_MODELS/2026-05-23_11n_sh_v6.hef \
+       bdd@bdd-sd9.local:/home/bdd/models/
    ```
    Failure mode if you skip this: HailoRT logs `HAILO_OPEN_FILE_FAILURE` during pipeline startup and the Hailo plugin segfaults during state transition — the app dies in <1 s, and on libcamerasrc paths it can leave mavsdk telemetry callbacks piling up for minutes as the slow async shutdown drains.
 
