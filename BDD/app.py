@@ -389,15 +389,18 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, detection_flexible_source=False):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, flight_mode=None):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
-        # When detection mode may be enabled, the source capsfilter must not pin width/height so
-        # the appsrc can flip between the tile size and the full frame. Set before super().__init__
-        # because that builds the pipeline (get_pipeline_string reads this attribute).
-        self._detection_flexible_source = detection_flexible_source
+        # Set BEFORE super().__init__ because that builds the pipeline: get_pipeline_string reads
+        # flight_mode to choose the dual-branch cropper detection pipeline, and
+        # _detection_flexible_source so the source capsfilter doesn't pin width/height (producer
+        # engine flips appsrc caps between tile and full frame; cropper engine uses a constant
+        # whole-frame size). run()/picamera_thread pick up the same flight_mode.
+        self.flight_mode = flight_mode
+        self._detection_flexible_source = bool(flight_mode is not None and flight_mode.enabled)
         super().__init__(app_callback, user_data, parser)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
@@ -515,6 +518,9 @@ def main():
                             help='Enable pre-flight detection mode (tiled search before pursuit)')
     arg_parser.add_argument('--detection-camera-id', type=int, default=None,
                             help='Camera id used to scan in detection mode (default: config / 0)')
+    arg_parser.add_argument('--detection-engine', choices=['producer', 'cropper'], default=None,
+                            help="Detection tiling engine: 'producer' (square tiles, batch-1) or "
+                                 "'cropper' (hailotilecropper, batched, unthrottled)")
     arg_parser.add_argument('--simulate-detections', action='store_true',
                             help='Overlay a synthetic moving target on real inference output (bench testing)')
 
@@ -647,10 +653,17 @@ def main():
         'detection_mode': {
             'enabled': False,
             'camera_id': 0,
+            # 'producer' = picamera crops square HEF tiles, batch-1, callback reassembly (throttled);
+            # 'cropper'  = picamera pushes whole frame_size frames, pipeline hailotilecropper +
+            #              BATCHED hailonet + hailotileaggregator, unthrottled, switch via valve flip.
+            'engine': 'producer',
             'tiles_x': 2,
             'tiles_y': 2,
-            'tile_size': (640, 640),
-            'capture_fps': 10,   # camera runs slow so all tiles/capture clear the pipeline
+            'overlap': 0.1,                 # cropper engine: tile overlap fraction
+            'tile_size': (640, 640),        # producer engine: square native tile (= HEF input)
+            'capture_fps': 10,              # producer engine: throttle so all tiles/capture clear
+            'frame_size': (1332, 990),      # cropper engine: whole-frame size before tiling
+            'batch_size': None,             # cropper engine: hailonet batch (default = tiles_x*tiles_y)
             'switch_after_consecutive_detections': 10,
         },
         # Pursuit: how long the target may stay out of sight (s) before reverting to a level
@@ -722,10 +735,6 @@ def main():
     # Detection-mode config (values-only). Popped here so it is not forwarded to the
     # controller as a dict; the live FlightModeController is built below and passed explicitly.
     detection_mode_cfg = control_config.pop('detection_mode', None) or {}
-    # Determined before App creation (which builds the pipeline): detection mode flips the appsrc
-    # output caps at runtime, so the source capsfilter must be built dimension-flexible. argparse
-    # has not consumed argv yet, so peek for the CLI flag alongside the config default.
-    detection_enabled_hint = bool(detection_mode_cfg.get('enabled', False) or '--detection-mode' in sys.argv)
 
     # Build CameraSwitcher from the 'camera' dict in control_config.
     # The dict is the kwargs for CameraSwitcher except for 'cameras' which
@@ -743,6 +752,29 @@ def main():
                     camera_switcher.fps, camera_switcher.video_format,
                     camera_switcher.switch_to_wide_size, camera_switcher.switch_to_zoom_size)
 
+    # Build the FlightModeController BEFORE App() — App.__init__ builds the pipeline, and
+    # get_pipeline_string needs flight_mode to choose the dual-branch cropper detection pipeline.
+    # CLI flags override the values-only config block; parse_known_args because App adds more args.
+    early_opts, _ = arg_parser.parse_known_args()
+    fm_enabled = bool(detection_mode_cfg.get('enabled', False) or early_opts.detection_mode)
+    fm_camera_id = early_opts.detection_camera_id
+    if fm_camera_id is None:
+        fm_camera_id = detection_mode_cfg.get('camera_id', DEFAULT_CAMERA_ID)
+    fm_engine = early_opts.detection_engine or detection_mode_cfg.get('engine', 'producer')
+    flight_mode = FlightModeController(
+        enabled=fm_enabled,
+        detection_camera_id=fm_camera_id,
+        engine=fm_engine,
+        tiles_x=detection_mode_cfg.get('tiles_x', 2),
+        tiles_y=detection_mode_cfg.get('tiles_y', 2),
+        overlap=detection_mode_cfg.get('overlap', 0.1),
+        tile_size=detection_mode_cfg.get('tile_size', (640, 640)),
+        capture_fps=detection_mode_cfg.get('capture_fps', 10),
+        frame_size=detection_mode_cfg.get('frame_size', (1332, 990)),
+        batch_size=detection_mode_cfg.get('batch_size', None),
+        switch_after_consecutive_detections=detection_mode_cfg.get('switch_after_consecutive_detections', 10),
+    )
+
     app = App(
         app_callback,
         user_data,
@@ -751,28 +783,11 @@ def main():
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
         record_videos=True,
-        detection_flexible_source=detection_enabled_hint)
+        flight_mode=flight_mode)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
 
-    # Build the FlightModeController (live object — passed explicitly to producer + controller,
-    # never embedded in a config dict). CLI flags override the values-only config block.
-    fm_enabled = bool(detection_mode_cfg.get('enabled', False) or app.options_menu.detection_mode)
-    fm_camera_id = app.options_menu.detection_camera_id
-    if fm_camera_id is None:
-        fm_camera_id = detection_mode_cfg.get('camera_id', DEFAULT_CAMERA_ID)
-    flight_mode = FlightModeController(
-        enabled=fm_enabled,
-        detection_camera_id=fm_camera_id,
-        tiles_x=detection_mode_cfg.get('tiles_x', 2),
-        tiles_y=detection_mode_cfg.get('tiles_y', 2),
-        tile_size=detection_mode_cfg.get('tile_size', (640, 640)),
-        capture_fps=detection_mode_cfg.get('capture_fps', 10),
-        switch_after_consecutive_detections=detection_mode_cfg.get('switch_after_consecutive_detections', 10),
-    )
-    # Picked up by GStreamerApp.run() and passed to each picamera_thread.
-    app.flight_mode = flight_mode
     global SIMULATE_DETECTIONS
     SIMULATE_DETECTIONS = bool(app.options_menu.simulate_detections)
     if flight_mode.enabled:
@@ -782,9 +797,17 @@ def main():
             else:
                 logger.error("!!! detection_camera_id=%d not in configured cameras %s; detection mode may get no frames",
                              flight_mode.detection_camera_id, [c.camera_id for c in camera_switcher.configs()])
-        logger.warning("!!! DETECTION MODE ENABLED: camera_id=%d, %dx%d tiles of %s, switch after %d consecutive detections; simulate=%s",
-                       flight_mode.detection_camera_id, flight_mode.tiles_x, flight_mode.tiles_y,
-                       flight_mode.tile_size, flight_mode.switch_after_consecutive_detections, SIMULATE_DETECTIONS)
+        if flight_mode.engine == 'cropper':
+            logger.warning("!!! DETECTION MODE ENABLED [cropper]: camera_id=%d, %dx%d tiling of %s frame, batch=%d, "
+                           "switch after %d consecutive detections; simulate=%s",
+                           flight_mode.detection_camera_id, flight_mode.tiles_x, flight_mode.tiles_y,
+                           flight_mode.frame_size, flight_mode.batch_size,
+                           flight_mode.switch_after_consecutive_detections, SIMULATE_DETECTIONS)
+        else:
+            logger.warning("!!! DETECTION MODE ENABLED [producer]: camera_id=%d, %dx%d tiles of %s, "
+                           "switch after %d consecutive detections; simulate=%s",
+                           flight_mode.detection_camera_id, flight_mode.tiles_x, flight_mode.tiles_y,
+                           flight_mode.tile_size, flight_mode.switch_after_consecutive_detections, SIMULATE_DETECTIONS)
     else:
         logger.info("!!! Detection mode OFF (pursuit-only behavior); simulate=%s", SIMULATE_DETECTIONS)
 
