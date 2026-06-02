@@ -23,9 +23,11 @@ from hailo_apps.hailo_app_python.core.common.defines import DETECTION_APP_TITLE,
 # from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import DISPLAY_PIPELINE
 
 from pipelines import (
+    QUEUE,
     SOURCE_PIPELINE,
     INFERENCE_PIPELINE,
     INFERENCE_PIPELINE_WRAPPER,
+    TILING_INFERENCE_PIPELINE_WRAPPER,
     TRACKER_PIPELINE,
     USER_CALLBACK_PIPELINE,
     DISPLAY_PIPELINE
@@ -533,6 +535,9 @@ class GStreamerApp:
             # is None and every path below is byte-for-byte the legacy behavior.
             flight_mode = getattr(self, 'flight_mode', None)
             detection_feature_on = flight_mode is not None and flight_mode.enabled
+            # Cropper engine pushes constant whole frames (the pipeline tiles them); producer-side
+            # tiling instead pushes tile-sized buffers and flips caps at the switch.
+            cropper_engine = detection_feature_on and getattr(flight_mode, 'engine', 'producer') == 'cropper'
             if camera_switcher is not None:
                 # L4: set the shared appsrc caps ONCE, from the switcher's
                 # single source of truth, before any producer thread starts.
@@ -544,7 +549,9 @@ class GStreamerApp:
                     appsrc.set_property("is-live", True)
                     appsrc.set_property("format", Gst.Format.TIME)
                     out_w, out_h = camera_switcher.width, camera_switcher.height
-                    if detection_feature_on:
+                    if cropper_engine:
+                        out_w, out_h = flight_mode.frame_size
+                    elif detection_feature_on:
                         out_w, out_h = flight_mode.tile_size
                     appsrc.set_property(
                         "caps",
@@ -577,7 +584,7 @@ class GStreamerApp:
                 if detection_feature_on:
                     appsrc = self.pipeline.get_by_name("app_source")
                     if appsrc is not None:
-                        tw, th = flight_mode.tile_size
+                        tw, th = flight_mode.frame_size if cropper_engine else flight_mode.tile_size
                         appsrc.set_property("is-live", True)
                         appsrc.set_property("format", Gst.Format.TIME)
                         appsrc.set_property(
@@ -715,6 +722,14 @@ def picamera_thread(
         capture_target_fps = target_fps
         capture_video_format = video_format
 
+    # Cropper detection engine: the producer just pushes WHOLE frames (the hailotilecropper tiles
+    # them in the pipeline). Capture at the detection frame size for both modes (constant — no
+    # runtime caps flip, FOV identical across the switch) and let the pipeline valves switch modes.
+    _cropper_engine = (flight_mode is not None and flight_mode.enabled
+                       and getattr(flight_mode, 'engine', 'producer') == 'cropper')
+    if _cropper_engine:
+        capture_width, capture_height = flight_mode.frame_size
+
     camera_id = camera_config.camera_id
     log_prefix = f"[cam{camera_id}:{camera_config.name or '?'}]"
 
@@ -808,6 +823,10 @@ def picamera_thread(
         # and the producer flips caps back to the full frame on the one-way switch to pursuit.
         detection_feature_on = flight_mode is not None and flight_mode.enabled
         _is_detection_camera = detection_feature_on and (flight_mode.detection_camera_id == camera_id)
+        # Producer-side (legacy) tiling vs cropper engine. Cropper engine pushes WHOLE frames
+        # (pipeline tiles them) at a constant size, so none of the tile-emit / caps-flip / throttle
+        # machinery below runs for it — only the one-time valve flip at the detection->pursuit switch.
+        producer_tiling = detection_feature_on and not _cropper_engine
         if camera_switcher is None and not detection_feature_on:
             # Legacy single-camera: nobody else sets caps, so we do it here. (With detection
             # mode on, run() pinned the initial tile-size caps instead.)
@@ -837,7 +856,9 @@ def picamera_thread(
         tile_extent_h_caps = Gst.Caps.from_string("tile-extent-h/x-bdd")
 
         # Output size currently negotiated on appsrc; only renegotiate on an actual change.
-        last_output_size = tuple(flight_mode.tile_size) if _is_detection_camera else (width, height)
+        # (Cropper engine and non-detection cameras emit the full capture frame; legacy producer
+        # tiling starts at the tile size and flips to full frame on the switch.)
+        last_output_size = tuple(flight_mode.tile_size) if (_is_detection_camera and producer_tiling) else (width, height)
 
         def _ensure_output_caps(out_w, out_h):
             nonlocal last_output_size
@@ -853,10 +874,16 @@ def picamera_thread(
         # Tile layout is constant for the run (capture size + config are fixed): compute once
         # so a bad geometry fails fast at startup instead of every frame.
         detection_tiles = None
-        if _is_detection_camera:
+        if _is_detection_camera and producer_tiling:
             detection_tiles = flight_mode.tiles_for_frame(width, height)
-            logger.info("%s DETECTION mode: %d native tiles of %s over %dx%d frame (overlap auto-computed)",
+            logger.info("%s DETECTION mode (producer tiling): %d native tiles of %s over %dx%d frame",
                         log_prefix, len(detection_tiles), flight_mode.tile_size, width, height)
+        elif _is_detection_camera and _cropper_engine:
+            logger.info("%s DETECTION mode (cropper engine): pushing whole %dx%d frames; pipeline tiles %dx%d",
+                        log_prefix, width, height, flight_mode.tiles_x, flight_mode.tiles_y)
+
+        # One-time detection->pursuit valve flip (cropper engine only); see the loop below.
+        _valves_flipped = False
 
         picam2.start()
         frame_count = 0
@@ -935,13 +962,30 @@ def picamera_thread(
             # Detection-mode FrameRate override (applied AFTER the active/inactive logic so it
             # wins for the detection camera): slow while detecting, full rate once in pursuit.
             # Re-applied at the one-way detection->pursuit transition (which doesn't flip is_active).
-            if _is_detection_camera:
+            # Producer-tiling only — the cropper engine runs UNTHROTTLED at the pipeline's natural max.
+            if _is_detection_camera and producer_tiling:
                 now_detection = flight_mode.is_detection()
                 if now_detection != was_detection:
                     det_rate = detection_capture_fps if now_detection else capture_target_fps
                     apply_controls({'FrameRate': det_rate, 'AeEnable': True, 'AwbEnable': True})
                     logger.info("%s detection-mode FrameRate -> %d fps (detecting=%s)", log_prefix, det_rate, now_detection)
                     was_detection = now_detection
+
+            # Cropper engine: flip the pipeline valves once at the detection->pursuit switch. This IS
+            # the mode change for that engine (the producer keeps pushing identical whole frames).
+            # Do it on the GLib main loop via idle_add — manipulating pipeline elements (and the Hailo
+            # plugins behind the valves) from this producer thread mid-stream can segfault.
+            if _cropper_engine and _is_detection_camera and not _valves_flipped and flight_mode.is_pursuit():
+                _valves_flipped = True
+                def _flip_valves(_pipeline=pipeline, _log_prefix=log_prefix):
+                    det_valve = _pipeline.get_by_name("detection_valve")
+                    pursuit_valve = _pipeline.get_by_name("pursuit_valve")
+                    if det_valve is not None and pursuit_valve is not None:
+                        pursuit_valve.set_property("drop", False)
+                        det_valve.set_property("drop", True)
+                        logger.warning("%s VALVE FLIP: detection -> pursuit (tiling branch off, whole-frame branch on)", _log_prefix)
+                    return False
+                GLib.idle_add(_flip_valves)
 
             capture_started_monotonic = time.monotonic()
             try:
@@ -1000,8 +1044,8 @@ def picamera_thread(
                 first_sensor_timestamp_ns = sensor_timestamp_ns
 
             push_error = False
-            if _is_detection_camera and flight_mode.is_detection():
-                # --- DETECTION: split the frame into NATIVE HEF-input tiles (no scaling). ---
+            if _is_detection_camera and producer_tiling and flight_mode.is_detection():
+                # --- DETECTION (producer-side tiling): split into NATIVE HEF-input tiles (no scaling). ---
                 # Each tile is a contiguous crop pushed as its own buffer; the user callback
                 # remaps + reaggregates them via the tile-* metas. appsrc is at the tile size.
                 _ensure_output_caps(*flight_mode.tile_size)
@@ -1219,14 +1263,48 @@ class GStreamerDetectionApp(GStreamerApp):
                 pin_source_dimensions=not getattr(self, '_detection_flexible_source', False),
                 # do_timestamp=True
         )
-        detection_pipeline = INFERENCE_PIPELINE(
-            hef_path=self.hef_path,
-            post_process_so=self.post_process_so,
-            post_function_name=self.post_function_name,
-            batch_size=self.batch_size,
-            config_json=self.labels_json,
-            additional_params=self.thresholds_str)
-        detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
+        def _inference(batch_size, name):
+            return INFERENCE_PIPELINE(
+                hef_path=self.hef_path,
+                post_process_so=self.post_process_so,
+                post_function_name=self.post_function_name,
+                batch_size=batch_size,
+                config_json=self.labels_json,
+                additional_params=self.thresholds_str,
+                name=name)
+
+        # Cropper detection engine: a parallel detection-only branch (hailotilecropper + batched
+        # hailonet + hailotileaggregator) alongside the whole-frame pursuit branch, gated by valves
+        # and merged by a funnel; the FlightModeController flips the valves at the detection->pursuit
+        # transition (no camera gap). Both branches output the original full-res frame with full-frame
+        # detections, so the funnel caps are constant and the user callback is mode-agnostic. When the
+        # cropper engine is off, the pipeline is exactly the single whole-frame wrapper as before.
+        flight_mode = getattr(self, 'flight_mode', None)
+        cropper_engine = (flight_mode is not None and flight_mode.enabled
+                          and getattr(flight_mode, 'engine', 'producer') == 'cropper')
+        if cropper_engine:
+            tiles = flight_mode.tiles_x * flight_mode.tiles_y
+            det_wrapper = TILING_INFERENCE_PIPELINE_WRAPPER(
+                _inference(batch_size=tiles, name='det_inference'),
+                tiles_x=flight_mode.tiles_x, tiles_y=flight_mode.tiles_y,
+                overlap=flight_mode.overlap, name='det_wrapper')
+            pursuit_wrapper = INFERENCE_PIPELINE_WRAPPER(
+                _inference(batch_size=1, name='pursuit_inference'), name='pursuit_wrapper')
+            # source -> input_tee -> {det valve -> tiling} + {pursuit valve -> whole} -> funnel.
+            # Start in detection: det valve open, pursuit valve closed.
+            detection_pipeline_wrapper = (
+                f'tee name=input_tee '
+                f'input_tee. ! {QUEUE(name="det_branch_q", leaky="no", max_size_buffers=3)} ! '
+                f'valve name=detection_valve drop=false ! {det_wrapper} ! '
+                f'{QUEUE(name="det_out_q", leaky="no")} ! funnel name=inference_funnel '
+                f'input_tee. ! {QUEUE(name="pursuit_branch_q", leaky="no", max_size_buffers=3)} ! '
+                f'valve name=pursuit_valve drop=true ! {pursuit_wrapper} ! '
+                f'{QUEUE(name="pursuit_out_q", leaky="no")} ! inference_funnel. '
+                f'inference_funnel. '
+            )
+        else:
+            detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(
+                _inference(batch_size=self.batch_size, name='inference'))
 
         tracker_pipeline = ''
         if False:

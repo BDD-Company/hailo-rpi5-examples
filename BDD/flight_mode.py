@@ -100,21 +100,32 @@ class FlightModeController:
     def __init__(self, *,
                  enabled : bool = False,
                  detection_camera_id : int = DEFAULT_CAMERA_ID,
+                 engine : str = 'producer',
                  tiles_x : int = 2,
                  tiles_y : int = 2,
+                 overlap : float = 0.1,
                  tile_size : tuple[int, int] = (640, 640),
                  capture_fps : int = 10,
+                 frame_size : tuple[int, int] = (1332, 990),
+                 batch_size : int | None = None,
                  switch_after_consecutive_detections : int = 10):
         self._enabled = bool(enabled)
         self._detection_camera_id = detection_camera_id
+        # Detection engine:
+        #   'producer' — the picamera thread crops square HEF-input tiles and pushes them as
+        #     separate buffers, reassembled in the callback (batch-1). Needs the capture_fps
+        #     throttle (tile-shedding) and a caps flip at the switch.
+        #   'cropper'  — the picamera thread pushes WHOLE `frame_size` frames; the pipeline's
+        #     hailotilecropper tiles them and a BATCHED hailonet (batch_size = tiles) infers them,
+        #     hailotileaggregator reassembles. Runs unthrottled; the switch is a pipeline valve flip.
+        self._engine = engine
         self._tiles_x = int(tiles_x)
         self._tiles_y = int(tiles_y)
+        self._overlap = float(overlap)
         self._tile_size = (int(tile_size[0]), int(tile_size[1]))
-        # Detection-mode capture rate. Each capture fans out into tiles_x*tiles_y inferences,
-        # so the camera must run slow enough that all tiles of one capture clear the pipeline
-        # before the next capture (otherwise the leaky input queue sheds tiles and groups never
-        # complete). The user accepts ~10 fps in this mode.
         self._capture_fps = int(capture_fps)
+        self._frame_size = (int(frame_size[0]), int(frame_size[1]))
+        self._batch_size = int(batch_size) if batch_size else self._tiles_x * self._tiles_y
         self._switch_after = int(switch_after_consecutive_detections)
         self._mode = FlightMode.DETECTION if self._enabled else FlightMode.PURSUIT
         self._lock = threading.Lock()
@@ -147,6 +158,22 @@ class FlightModeController:
     @property
     def detection_camera_id(self) -> int:
         return self._detection_camera_id
+
+    @property
+    def engine(self) -> str:
+        return self._engine
+
+    @property
+    def overlap(self) -> float:
+        return self._overlap
+
+    @property
+    def frame_size(self) -> tuple[int, int]:
+        return self._frame_size
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
 
     @property
     def tiles_x(self) -> int:

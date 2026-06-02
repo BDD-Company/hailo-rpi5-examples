@@ -307,6 +307,34 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
     return inference_wrapper_pipeline
 
 
+def TILING_INFERENCE_PIPELINE_WRAPPER(inner_pipeline, tiles_x=2, tiles_y=2, overlap=0.1,
+                                      iou_threshold=0.3, border_threshold=0.1,
+                                      bypass_max_size_buffers=4, name='tiling_wrapper'):
+    """Wrap `inner_pipeline` (a batched INFERENCE_PIPELINE) with hailotilecropper +
+    hailotileaggregator: the cropper splits each frame into a tiles_x*tiles_y grid (scaled to the
+    network input), the inner pipeline infers them as a BATCH (set its hailonet batch-size to
+    tiles_x*tiles_y), and the aggregator reassembles them onto the original frame with cross-tile
+    NMS. Output is the original-resolution frame carrying full-frame detections — same shape as
+    INFERENCE_PIPELINE_WRAPPER, so it is interchangeable downstream.
+
+    Like the whole-buffer wrapper, src_0 is the bypass (original frame) → agg.sink_0, src_1 is the
+    tiles → inner inference → agg.sink_1. The tile-branch queues MUST be non-leaky (the aggregator
+    pairs the bypass with all N*M tiles by buffer; a dropped tile desyncs it forever) — the inner
+    INFERENCE_PIPELINE already defaults internal_leaky='no'. flatten-detections moves per-tile
+    detections up to the frame ROI so downstream sees a normal detection list."""
+    return (
+        f'{QUEUE(name=f"{name}_input_q")} ! '
+        f'hailotilecropper name={name}_crop internal-offset=true '
+        f'tiles-along-x-axis={tiles_x} tiles-along-y-axis={tiles_y} '
+        f'overlap-x-axis={overlap} overlap-y-axis={overlap} '
+        f'hailotileaggregator name={name}_agg flatten-detections=true '
+        f'iou-threshold={iou_threshold} border-threshold={border_threshold} '
+        f'{name}_crop. ! {QUEUE(max_size_buffers=bypass_max_size_buffers, leaky="no", name=f"{name}_bypass_q")} ! {name}_agg.sink_0 '
+        f'{name}_crop. ! {inner_pipeline} ! {name}_agg.sink_1 '
+        f'{name}_agg. ! {QUEUE(name=f"{name}_output_q")} '
+    )
+
+
 def USER_CALLBACK_PIPELINE(name='identity_callback'):
     """
     Creates a GStreamer pipeline string for the user callback element.
