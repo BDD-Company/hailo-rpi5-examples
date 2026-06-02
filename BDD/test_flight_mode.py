@@ -7,16 +7,14 @@ Pure-Python (no hailo/picamera/gi), so it runs on the dev machine and on the Pi 
 
 import threading
 
-from helpers import (
+from helpers import XY, Rect, DEFAULT_CAMERA_ID
+from flight_mode import (
     FlightMode,
     FlightModeController,
     Tile,
-    XY,
-    Rect,
     tile_layout,
     remap_tile_bbox,
     _axis_positions,
-    DEFAULT_CAMERA_ID,
 )
 
 
