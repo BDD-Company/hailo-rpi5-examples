@@ -207,7 +207,8 @@ async def drone_controlling_thread_async(
         control_config = {},
         output_queue = None,
         signal_event_when_ready = None,
-        camera_switcher : CameraSwitcher | None = None
+        camera_switcher : CameraSwitcher | None = None,
+        flight_mode = None
     ):
     # from math import radians
 
@@ -331,6 +332,13 @@ async def drone_controlling_thread_async(
 
     DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.pop('delay_takeof_until_n_detection_frames', 3)
 
+    # Pre-flight detection mode: stay grounded until SWITCH_AFTER consecutive detections build a
+    # trajectory, then switch to pursuit. PURSUIT_TARGET_LOST_TOLERANCE: how long the target may
+    # be out of sight (in flight) before reverting from estimated-trajectory chase to a level loiter.
+    SWITCH_AFTER_CONSECUTIVE = flight_mode.switch_after_consecutive_detections if flight_mode is not None else 0
+    PURSUIT_TARGET_LOST_TOLERANCE_S = control_config.pop('pursuit_target_lost_tolerance_s', 1.0)
+    PURSUIT_TARGET_LOST_TOLERANCE_NS = int(PURSUIT_TARGET_LOST_TOLERANCE_S * 1_000_000_000)
+
     BYTETRACK_TARGET_LOCK = control_config.pop('bytetrack_target_lock', True)
 
     AIM_POINT = control_config.pop('aim_point', XY(0.5, 0.5))
@@ -364,6 +372,10 @@ async def drone_controlling_thread_async(
     distance_r *= distance_r
     seen_target = False
     last_seen_target_at_frame = 0
+    # Detection-mode transition counter (consecutive frames with a qualifying detection) and the
+    # wall-clock time the target was last actually seen (for the pursuit loss-tolerance window).
+    consecutive_detections = 0
+    last_target_seen_ns = 0
     # Monotonic per-iteration counter. Incremented for every frame dequeued
     # from detections_queue, so it does NOT reset across camera switches —
     # unlike detections_obj.frame_id, which is the camera-local index and
@@ -655,11 +667,11 @@ async def drone_controlling_thread_async(
                 # No detections, not even frame with ID
                 skipped_detetions += 1
 
-                # It is OK to have occasionally no frames from the queue
-                # however, long streaks of no frames could cause a crash.
-                # 30 is arbitrary, with the wait timeout of .01 of detections_queue.get above
-                # that constitutes 0.3 seconds without any commands.
-                if moving and skipped_detetions > 30:
+                # It is OK to have occasionally no frames from the queue; long streaks must not
+                # leave the drone flying a stale setpoint. Once the target has been out of sight
+                # longer than the pursuit tolerance, hover (level loiter); within the tolerance
+                # the last setpoint rides. (In detection mode moving=False, so this never fires.)
+                if moving and (time.monotonic_ns() - last_target_seen_ns) >= PURSUIT_TARGET_LOST_TOLERANCE_NS:
                     # % 10 is to limit the number of commands sent to drone per second
                     if skipped_detetions % 10 == 0:
                         # hover to allow drone to iether recover detection and pursuit
@@ -685,6 +697,9 @@ async def drone_controlling_thread_async(
 
             update_timestamps()
             frame_id += 1
+            # Pre-flight detection vs in-flight pursuit. Recomputed each frame from the shared
+            # FlightModeController; the detection->pursuit switch (below) is one-way per mission.
+            in_detection = flight_mode is not None and flight_mode.is_detection()
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{frame_id:04}')
             logger.debug(f"frame cam{detections_obj.camera_id}#{detections_obj.frame_id:04}")
 
@@ -814,6 +829,8 @@ async def drone_controlling_thread_async(
 
                 seen_target = True
                 last_seen_target_at_frame = frame_id
+                consecutive_detections += 1
+                last_target_seen_ns = time.monotonic_ns()
                 delay_between_detections_ns = update_timestamps_on_detection()
 
                 aim_point = copy(AIM_POINT)
@@ -821,7 +838,7 @@ async def drone_controlling_thread_async(
                 target_size = detection.bbox.size
                 target_center = detection.bbox.center
 
-                if OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER:
+                if OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER and detections_obj.frame is not None:
                     optical_object_info = OpticalObjectInfo(detections_obj.frame, detection.bbox)
                     target_size = optical_object_info.object_size() or target_size
                     target_center = optical_object_info.object_circle_center() or target_center
@@ -1091,26 +1108,43 @@ async def drone_controlling_thread_async(
                 #         angle_to_target = new_angle_to_target
 
                 debug_info["mode"] = mode
-                if not takeoff_time_ns and target_estimator.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES:
-                    logger.warning("Delaying takeoff for %s frames (now have %s)", DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES, target_estimator.history_size())
-                    pass
-                else:
-                    if FOLLOW_TARGET_POSITION_NED and target_position_ned:
-                        mode += " NED "
-                        debug_info["mode"] = mode
-                        await drone.move_to_target_ned(target_position_ned, telemetry_dict)
-                        moving = True
+                # Pre-flight detection: keep accumulating the trajectory but stay GROUNDED (no
+                # takeoff/move commands) until SWITCH_AFTER_CONSECUTIVE consecutive detections
+                # establish a trajectory, then flip to pursuit (one-way) and fall through to take off.
+                if in_detection:
+                    if consecutive_detections >= SWITCH_AFTER_CONSECUTIVE and target_estimator.history_size() >= SWITCH_AFTER_CONSECUTIVE:
+                        if flight_mode.switch_to_pursuit():
+                            logger.warning(
+                                "!!! SWITCHING TO PURSUIT MODE: %d consecutive detections, trajectory ready (estimator history=%d)",
+                                consecutive_detections, target_estimator.history_size())
+                        in_detection = False  # take off on this very frame
                     else:
-                        # NOTE: perfroming conversion from camera referene frame to done's FRD
-                        await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust, current_telemetry=telemetry_dict)
-                        moving = True
+                        debug_info["mode"] = f"DETECTION (grounded) {consecutive_detections}/{SWITCH_AFTER_CONSECUTIVE}"
+                        logger.warning("Detection mode: %d/%d consecutive detections, staying grounded",
+                                       consecutive_detections, SWITCH_AFTER_CONSECUTIVE)
 
-                    if moving and takeoff_time_ns is None:
-                        takeoff_time_ns = time.monotonic_ns()
-                        # logger.info("!!! IN AIR since: %s", takeoff_time_ns)
+                if not in_detection:
+                    if not takeoff_time_ns and target_estimator.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES:
+                        logger.warning("Delaying takeoff for %s frames (now have %s)", DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES, target_estimator.history_size())
+                        pass
+                    else:
+                        if FOLLOW_TARGET_POSITION_NED and target_position_ned:
+                            mode += " NED "
+                            debug_info["mode"] = mode
+                            await drone.move_to_target_ned(target_position_ned, telemetry_dict)
+                            moving = True
+                        else:
+                            # NOTE: perfroming conversion from camera referene frame to done's FRD
+                            await drone.move_to_target_zenith_async(roll_degree=-angle_to_target.x, pitch_degree=angle_to_target.y, thrust=thrust, current_telemetry=telemetry_dict)
+                            moving = True
+
+                        if moving and takeoff_time_ns is None:
+                            takeoff_time_ns = time.monotonic_ns()
+                            # logger.info("!!! IN AIR since: %s", takeoff_time_ns)
 
             else:
                 # IF no detection or NONE of the detections has big confidence
+                consecutive_detections = 0  # a miss breaks the detection-mode consecutive streak
                 if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES and target_estimator_2d.history_size() > 0:
                     logger.warning("!!! CLEARING HISTORY")
                     target_estimator_2d.clear_history()
@@ -1119,8 +1153,17 @@ async def drone_controlling_thread_async(
                     # S2: prolonged target loss → smoothed size is stale.
                     target_size_ema = None
 
-                if seen_target:
-                    if FOLLOW_TARGET_POSITION_NED:
+                if in_detection:
+                    # Pre-flight: stay grounded; just keep waiting for the target to (re)appear.
+                    debug_info["mode"] = "DETECTION (grounded, no target)"
+                elif seen_target:
+                    # In pursuit: tolerate losing the target for PURSUIT_TARGET_LOST_TOLERANCE_S,
+                    # flying the estimated/faded trajectory; past that, revert to a level loiter.
+                    lost_for_ns = time.monotonic_ns() - last_target_seen_ns
+                    if lost_for_ns >= PURSUIT_TARGET_LOST_TOLERANCE_NS:
+                        await drone.standstill(THRUST_HOVER)
+                        debug_info["mode"] = f"loiter (target lost {lost_for_ns / 1e9:.2f}s)"
+                    elif FOLLOW_TARGET_POSITION_NED:
                         if target_position_prev_ned is not None:
                             await drone.move_to_target_ned(target_position_prev_ned, telemetry_dict)
                             moving = True
@@ -1134,12 +1177,10 @@ async def drone_controlling_thread_async(
                         await drone.move_to_target_zenith_async(roll_degree=-prev_angle_to_target.x, pitch_degree=prev_angle_to_target.y, thrust=thrust, current_telemetry=telemetry_dict)
                         # Just t visualize the point we are moving to
                         target_relative_pos = prev_angle_to_target.divided_by_XY(FRAME_ANGLUAR_SIZE_DEG)
-                        # await drone.standstill()
-                        # moving = False
-                        debug_info["mode"] = "hover"
+                        debug_info["mode"] = f"pursuit (target lost {lost_for_ns / 1e9:.2f}s)"
                 else:
                     debug_info["mode"] = "idle"
-                    if not FOLLOW_TARGET_POSITION_NED and frame_id % 30 == 0:
+                    if not in_detection and not FOLLOW_TARGET_POSITION_NED and frame_id % 30 == 0:
                         # moving = False
                         await drone.idle()
 

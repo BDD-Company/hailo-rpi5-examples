@@ -33,7 +33,7 @@ def platform_controlling_thread(*args, **kwargs):
         loop.close()
 
 
-async def platform_controlling_thread_async(platform_connection_string, platform_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None, camera_switcher : CameraSwitcher | None = None):
+async def platform_controlling_thread_async(platform_connection_string, platform_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None, camera_switcher : CameraSwitcher | None = None, flight_mode = None):
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
     global global_logger
     logger = global_logger
