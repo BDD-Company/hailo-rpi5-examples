@@ -59,17 +59,22 @@ def parse_grid(s: str) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
-def build_source(source: str, width: int, height: int, fps: int) -> str:
-    """RGB source at width x height @ fps. 'test' = synthetic (compute ceiling), 'camera' =
-    libcamerasrc (real imx477; simplest camera path for a prototype — not the app's picamera2
-    appsrc low-latency path)."""
-    caps = f"video/x-raw,format=RGB,width={width},height={height},framerate={fps}/1"
+def build_source(source: str, width: int, height: int, fps: int, fmt: str = "RGB") -> str:
+    """Source at width x height @ fps in `fmt` (RGB or NV12) feeding the hailotilecropper.
+
+    NOTE (measured): fmt=NV12 is ~34% SLOWER for tiling, not faster. The cropper preserves format,
+    so each tile pays a YUV->RGB colour convert (the model needs RGB), and that per-tile convert
+    costs more than the half-byte NV12 resize saves. With RGB the per-tile convert is a passthrough
+    (~free) and the resize is the only cost. Keep RGB. 'test' = synthetic (compute ceiling);
+    'camera' = libcamerasrc (real imx477; not the app's picamera2/appsrc low-latency path)."""
+    caps = f"video/x-raw,format={fmt},width={width},height={height},framerate={fps}/1"
     if source == "test":
         return f"videotestsrc is-live=true ! {caps}"
     if source == "camera":
-        # Pin format=NV12: without an explicit processed format libcamerasrc negotiates raw
-        # Bayer (SBGGR16) at an exact sensor-mode size and videoconvert can't debayer it. NV12 is
-        # the ISP-native processed output; convert to RGB for the cropper/model.
+        # libcamerasrc emits NV12 from the ISP (without an explicit processed format it negotiates
+        # raw Bayer at exact sensor-mode sizes). Feed NV12 straight through, or convert to RGB.
+        if fmt == "NV12":
+            return f"libcamerasrc ! {caps}"
         return (f"libcamerasrc ! video/x-raw,format=NV12,width={width},height={height},framerate={fps}/1 ! "
                 f"videoconvert n-threads=4 ! {caps}")
     raise ValueError(f"unknown source {source!r}")
@@ -77,7 +82,8 @@ def build_source(source: str, width: int, height: int, fps: int) -> str:
 
 def build_pipeline(hef: str, so: str, source_str: str,
                    tiles_x: int, tiles_y: int, overlap: float,
-                   model_size: int, batch_size: int, lean: bool = False) -> str:
+                   model_size: int, batch_size: int, lean: bool = False,
+                   fmt: str = "RGB") -> str:
     """Tiling detection pipeline. cropper.src_0 = bypass -> agg.sink_0; cropper.src_1 = tiles ->
     scale/convert -> batched hailonet -> hailofilter -> agg.sink_1. The tile-branch queues are
     NON-leaky: hailotileaggregator pairs the bypass with all N*M tiles by buffer, so dropping a
@@ -89,16 +95,19 @@ def build_pipeline(hef: str, so: str, source_str: str,
     scale/convert is the pipeline bottleneck, so this is the main throughput lever."""
     nms = ("nms-score-threshold=0.3 nms-iou-threshold=0.45 "
            "output-format-type=HAILO_FORMAT_TYPE_FLOAT32")
+    # hailotilecropper only crops+scales; it preserves pixel format (its output format MUST equal
+    # its input). Pin the tile-branch start to the cropper's input format so the model's RGB
+    # requirement doesn't try to renegotiate the cropper output ("Input and output caps have
+    # different formats"); the NV12->RGB convert then happens per (small) tile.
+    fmt_pin = f"video/x-raw,format={fmt} ! "
+    net_q = (f"queue name=net_q leaky=no max-size-buffers={max(8, batch_size * 2)} "
+             f"max-size-bytes=0 max-size-time=0 ! ")
     if lean:
-        tile_to_net = (
-            f"videoconvert n-threads=2 ! "
-            f"queue name=net_q leaky=no max-size-buffers={max(8, batch_size * 2)} max-size-bytes=0 max-size-time=0 ! "
-        )
+        tile_to_net = f"{fmt_pin}videoconvert n-threads=2 ! {net_q}"
     else:
         tile_to_net = (
-            f"videoscale n-threads=4 ! video/x-raw,width={model_size},height={model_size} ! "
-            f"videoconvert n-threads=2 ! "
-            f"queue name=net_q leaky=no max-size-buffers={max(8, batch_size * 2)} max-size-bytes=0 max-size-time=0 ! "
+            f"{fmt_pin}videoscale n-threads=4 ! video/x-raw,width={model_size},height={model_size} ! "
+            f"videoconvert n-threads=2 ! {net_q}"
         )
     return (
         f"{source_str} ! "
@@ -152,12 +161,12 @@ class Bench:
     def run(self):
         a = self.args
         Gst.init(None)
-        source_str = build_source(a.source, a.width, a.height, a.fps)
+        source_str = build_source(a.source, a.width, a.height, a.fps, a.format)
         pstr = build_pipeline(a.hef, a.so, source_str, a.tiles_x, a.tiles_y,
-                              a.overlap, a.model_size, a.batch_size, a.lean)
+                              a.overlap, a.model_size, a.batch_size, a.lean, a.format)
         tiles = a.tiles_x * a.tiles_y
-        print(f"# {a.tiles_x}x{a.tiles_y} tiles ({tiles}) | frame {a.width}x{a.height} -> tile {a.model_size}x{a.model_size}"
-              f" | batch={a.batch_size} | source={a.source} | overlap={a.overlap}")
+        print(f"# {a.tiles_x}x{a.tiles_y} tiles ({tiles}) | frame {a.width}x{a.height} {a.format} -> tile {a.model_size}x{a.model_size}"
+              f" | batch={a.batch_size} | source={a.source} | overlap={a.overlap} | lean={a.lean}")
         if a.print_pipeline:
             print(pstr.replace(" ! ", " !\n    "))
         pipeline = Gst.parse_launch(pstr)
@@ -208,6 +217,8 @@ def main():
     ap.add_argument("--duration", type=int, default=15, help="measure seconds")
     ap.add_argument("--hef", default=default_hef())
     ap.add_argument("--so", default=DEFAULT_SO)
+    ap.add_argument("--format", choices=["RGB", "NV12"], default="RGB",
+                    help="pixel format fed to the cropper (NV12 = half the bytes to resize)")
     ap.add_argument("--lean", action="store_true",
                     help="drop explicit videoscale; let the cropper scale tiles to the model size")
     ap.add_argument("--print-pipeline", action="store_true")
