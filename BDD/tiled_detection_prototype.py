@@ -138,11 +138,24 @@ class Bench:
         self.frames = 0
         self.det_total = 0
         self.fps_samples: list[float] = []
+        self.latencies_ms: list[float] = []
         self.t0 = None
 
     def on_probe(self, pad, info, _u):
         buf = info.get_buffer()
         if buf is not None:
+            # Capture->detection-available latency: the aggregator emits the bypass frame (carrying
+            # the ORIGINAL capture PTS) once all tiles are inferred+merged, so the buffer's age in
+            # running-time at this point IS the tiling+inference latency a decision must wait for.
+            # For a live source PTS == running-time at emit; capture latency is identical across
+            # configs so it cancels in the comparison. THIS is the metric that matters for the app.
+            if buf.pts != Gst.CLOCK_TIME_NONE:
+                elem = pad.get_parent_element()
+                clock = elem.get_clock()
+                if clock is not None:
+                    now_rt = clock.get_time() - elem.get_base_time()
+                    if now_rt != Gst.CLOCK_TIME_NONE and now_rt >= buf.pts:
+                        self.latencies_ms.append((now_rt - buf.pts) / 1e6)
             roi = hailo.get_roi_from_buffer(buf)
             self.det_total += len(roi.get_objects_typed(hailo.HAILO_DETECTION))
             self.frames += 1
@@ -199,9 +212,20 @@ class Bench:
         wall_fps = self.frames / elapsed if elapsed > 0 else 0.0
         steady = self.fps_samples[1:] or self.fps_samples  # drop first warmup sample
         avg_fps = sum(steady) / len(steady) if steady else wall_fps
+
+        def pct(xs, p):
+            if not xs:
+                return float('nan')
+            s = sorted(xs)
+            return s[min(len(s) - 1, int(p / 100 * len(s)))]
+        # Drop the first ~10 frames (prerolling/ramp) from the latency stats.
+        lat = self.latencies_ms[10:] or self.latencies_ms
+        mean_lat = sum(lat) / len(lat) if lat else float('nan')
         print("# ---- summary ----")
         print(f"# frames={self.frames}  wall_fps={wall_fps:.2f}  avg_measured_fps={avg_fps:.2f}  "
               f"tile_inf/s={avg_fps * tiles:.1f}  dets/frame={self.det_total / max(1, self.frames):.2f}")
+        print(f"# LATENCY capture->detection (ms): mean={mean_lat:.1f}  p50={pct(lat, 50):.1f}  "
+              f"p95={pct(lat, 95):.1f}  min={min(lat) if lat else float('nan'):.1f}  n={len(lat)}")
 
 
 def main():
