@@ -1,5 +1,40 @@
 # Tiled detection-only pipeline — prototype & findings
 
+## ⚑ DECISION (integrated + measured in the REAL app): keep the PRODUCER engine
+
+The cropper engine was fully integrated (`detection_mode.engine='cropper'`, dual-branch
+hailotilecropper detection + valve-switched whole-frame pursuit) and measured **in the real app**
+against the existing producer engine. Latency is THE metric for this app, and it reverses the
+isolated-harness story:
+
+| detection mode (real app, 8L) | capture→detection p50 | fps |
+|-------------------------------|----------------------:|----:|
+| **producer** (square tiles, batch-1, throttled 10fps) | **119 ms** | 9.5 |
+| cropper (hailotilecropper, batch-4, unthrottled)      | 431 ms | 8.6 |
+
+**The producer engine is 3.6× LOWER latency at the same throughput.** Why the harness lied: in
+isolation the cropper path was 58 ms / 26 fps, but under the *full app load* (recording x264enc at
+1332×990, the dual-branch's 2 hailonets + 2 cropper/aggregator pairs, the controller + telemetry) the
+pipeline saturates at ~8.6 fps, and saturation = deep queue backlog = 431 ms. The producer engine's
+`capture_fps` throttle — which I'd criticized as "artificial" — actually keeps the pipeline
+*non-saturated*, which is exactly what keeps latency low. Running "unthrottled at the knee" only helps
+if the knee is the camera rate; here the app's CPU ceiling is the knee, far below it.
+
+Other integration results (all real-app, 8L): switch latency (controller decision → valve flip on the
+GLib main loop) ≈ **106 ms**, no camera gap; **target trajectory survives the switch** (3D NED
+position/velocity continuous — same camera, same FOV, estimators not cleared on a mode change);
+cropper pursuit-branch latency was unreliable to measure (the hailotileaggregator appears to drop the
+producer's sensor-timestamp ref-meta → bogus 2 ms e2e — another fix the cropper would need).
+
+**Recommendation: use the producer engine** (the default; lower latency, square no-distortion tiles).
+The cropper engine is committed and works (additive, `--detection-engine cropper`), kept for the
+record / future hardware — but on this Pi5+8L it loses on the metric that matters. A Hailo-8 wouldn't
+help (the bottleneck is Pi5 CPU/recording, not the NPU — see below). The rest of this doc is the
+prototype exploration that led here.
+
+---
+
+
 Prototype: [tiled_detection_prototype.py](tiled_detection_prototype.py). A parallel, detection-only
 pipeline that splits a large pre-tiling frame into a configurable `NxM` grid with **hailotilecropper**,
 **batches** all tiles of a frame through `hailonet` (batch-size = N·M), and reassembles + cross-tile
