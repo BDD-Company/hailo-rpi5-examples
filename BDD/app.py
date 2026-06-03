@@ -520,6 +520,8 @@ def main():
     arg_parser.add_argument('--detection-engine', choices=['producer', 'cropper'], default=None,
                             help="Detection tiling engine: 'producer' (square tiles, batch-1) or "
                                  "'cropper' (hailotilecropper, batched, unthrottled)")
+    arg_parser.add_argument('--detection-recording-fps', type=int, default=None,
+                            help='Throttle the debug recorder to this fps while detecting (0 = full rate)')
     arg_parser.add_argument('--simulate-detections', action='store_true',
                             help='Overlay a synthetic moving target on real inference output (bench testing)')
 
@@ -772,7 +774,8 @@ def main():
         capture_fps=detection_mode_cfg.get('capture_fps', 10),
         frame_size=detection_mode_cfg.get('frame_size', (1332, 990)),
         batch_size=detection_mode_cfg.get('batch_size', None),
-        recording_fps=detection_mode_cfg.get('recording_fps', 3),
+        recording_fps=(early_opts.detection_recording_fps if early_opts.detection_recording_fps is not None
+                       else detection_mode_cfg.get('recording_fps', 3)),
         switch_after_consecutive_detections=detection_mode_cfg.get('switch_after_consecutive_detections', 10),
     )
 
