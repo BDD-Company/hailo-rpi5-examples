@@ -431,19 +431,20 @@ class App(GStreamerDetectionApp):
         video_file_name = video_file_name.stem + "_%05d" + (video_file_name.suffix if video_file_name.suffix else '.mkv')
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000_000_000
-        # Normalize to CONSTANT format+size+PAR before x264enc (matroskamux refuses any caps change
-        # after the first, and x264enc re-emits codec_data when its input caps change). In producer
-        # detection mode the source flips 640x640 tiles -> 1280x720 full frame at the switch;
-        # videoscale absorbs the size and the pinned caps keep x264enc's input byte-identical.
-        # Framerate is deliberately NOT pinned: the detection-mode recording rate-limiter
-        # (_install_recording_rate_limiter) DROPS buffers to recording_fps via a pad probe — which
-        # leaves caps untouched (a videorate would tie the output-caps framerate to the rate and
-        # break the muxer when the rate reverts to full in pursuit). Light recording while detecting
-        # frees CPU for the detection pipeline (the dominant cost there).
+        # Fully normalize the stream to constant caps before x264enc. In detection mode the source
+        # caps are the tile size (640x640) and flip to the full frame (1280x720) on the one-way
+        # switch to pursuit. matroskamux refuses ANY caps change after the first, and x264enc
+        # re-emits its codec_data whenever its input caps renegotiate — so it is not enough to pin
+        # width/height; we must pin format + size + framerate + pixel-aspect-ratio so x264enc's
+        # input is byte-identical across the flip and it never reconfigures the muxer. videoscale
+        # absorbs the size change, videorate the rate, videoconvert the format (detection tiles are
+        # scaled up for the debug recording only). The pursuit-only stream already matches these
+        # exact caps, so its recording is unchanged.
         return f'''
             videoscale \
             ! videoconvert \
-            ! video/x-raw, format=I420, width={self.video_width}, height={self.video_height}, pixel-aspect-ratio=1/1 \
+            ! videorate \
+            ! video/x-raw, format=I420, width={self.video_width}, height={self.video_height}, framerate=30/1, pixel-aspect-ratio=1/1 \
             ! x264enc \
                 key-int-max=30 \
                 bframes=0 \
@@ -533,8 +534,6 @@ def main():
     arg_parser.add_argument('--detection-engine', choices=['producer', 'cropper'], default=None,
                             help="Detection tiling engine: 'producer' (square tiles, batch-1) or "
                                  "'cropper' (hailotilecropper, batched, unthrottled)")
-    arg_parser.add_argument('--detection-recording-fps', type=int, default=None,
-                            help='Throttle the debug recorder to this fps while detecting (0 = full rate)')
     arg_parser.add_argument('--simulate-detections', action='store_true',
                             help='Overlay a synthetic moving target on real inference output (bench testing)')
 
@@ -678,7 +677,6 @@ def main():
             'capture_fps': 10,              # producer engine: throttle so all tiles/capture clear
             'frame_size': (1332, 990),      # cropper engine: whole-frame size before tiling
             'batch_size': None,             # cropper engine: hailonet batch (default = tiles_x*tiles_y)
-            'recording_fps': 3,             # throttle the debug recorder to this fps WHILE detecting
             'switch_after_consecutive_detections': 10,
         },
         # Pursuit: how long the target may stay out of sight (s) before reverting to a level
@@ -787,8 +785,6 @@ def main():
         capture_fps=detection_mode_cfg.get('capture_fps', 10),
         frame_size=detection_mode_cfg.get('frame_size', (1332, 990)),
         batch_size=detection_mode_cfg.get('batch_size', None),
-        recording_fps=(early_opts.detection_recording_fps if early_opts.detection_recording_fps is not None
-                       else detection_mode_cfg.get('recording_fps', 3)),
         switch_after_consecutive_detections=detection_mode_cfg.get('switch_after_consecutive_detections', 10),
     )
 

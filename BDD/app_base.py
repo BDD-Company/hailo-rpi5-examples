@@ -347,42 +347,6 @@ class GStreamerApp:
             return Gst.PadProbeReturn.OK
         pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
 
-    def _install_recording_rate_limiter(self):
-        """Drop buffers on the recording branch so the debug encoder runs at flight_mode.recording_fps
-        WHILE DETECTING (full rate in pursuit). Dropping in a pad probe leaves caps untouched, so the
-        encoder/muxer never reconfigure (a videorate would tie the output framerate to caps and break
-        matroska when the rate reverts). The point: detection-mode recording is the dominant CPU cost
-        on the detection path, so capping it to a few fps frees the Pi for lower detection latency."""
-        flight_mode = getattr(self, 'flight_mode', None)
-        if flight_mode is None or not flight_mode.enabled:
-            return
-        max_fps = flight_mode.recording_fps
-        if max_fps is None or max_fps <= 0:
-            return
-        q = self.pipeline.get_by_name('recording_input_q')
-        if q is None:
-            logger.warning("recording rate-limiter: 'recording_input_q' not found; recording not throttled")
-            return
-        pad = q.get_static_pad('src')
-        min_interval_ns = int(1e9 / max_fps)
-        state = {'last_pts': None}
-
-        def _cb(pad, info, _user):
-            # Full rate once airborne (pursuit) — the intercept is worth recording in full.
-            if flight_mode.is_pursuit():
-                return Gst.PadProbeReturn.OK
-            buf = info.get_buffer()
-            if buf is None or buf.pts == Gst.CLOCK_TIME_NONE:
-                return Gst.PadProbeReturn.OK
-            last = state['last_pts']
-            if last is not None and (buf.pts - last) < min_interval_ns:
-                return Gst.PadProbeReturn.DROP
-            state['last_pts'] = buf.pts
-            return Gst.PadProbeReturn.OK
-
-        pad.add_probe(Gst.PadProbeType.BUFFER, _cb, None)
-        logger.info("Recording rate-limited to %d fps while detecting (full rate in pursuit)", max_fps)
-
     def _log_pipeline_health(self):
         """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)
         and current-level-buffers for every named GstQueue. If the deepest probe (last
@@ -553,9 +517,6 @@ class GStreamerApp:
             # Stamp detection-start timestamp on buffers entering the inference wrapper.
             # libcamerasrc path has nobody to attach this upstream; picamera2 path already does.
             self._install_detection_start_probe()
-
-        # Throttle the debug recorder to recording_fps while DETECTING (frees CPU for detection).
-        self._install_recording_rate_limiter()
 
         # Periodic pipeline health snapshot (buffer counts, queue levels, stall detection).
         # GLib.timeout_add_seconds(2, self._log_pipeline_health)
