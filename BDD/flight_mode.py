@@ -108,7 +108,6 @@ class FlightModeController:
                  capture_fps : int = 10,
                  frame_size : tuple[int, int] = (1332, 990),
                  batch_size : int | None = None,
-                 recording_fps : int = 3,
                  switch_after_consecutive_detections : int = 10):
         self._enabled = bool(enabled)
         self._detection_camera_id = detection_camera_id
@@ -127,9 +126,6 @@ class FlightModeController:
         self._capture_fps = int(capture_fps)
         self._frame_size = (int(frame_size[0]), int(frame_size[1]))
         self._batch_size = int(batch_size) if batch_size else self._tiles_x * self._tiles_y
-        # Recording is throttled to this fps WHILE DETECTING (it reverts to full rate in pursuit) so
-        # the debug encoder doesn't steal CPU from the detection pipeline. 0 = no recording throttle.
-        self._recording_fps = int(recording_fps)
         self._switch_after = int(switch_after_consecutive_detections)
         self._mode = FlightMode.DETECTION if self._enabled else FlightMode.PURSUIT
         self._lock = threading.Lock()
@@ -178,10 +174,6 @@ class FlightModeController:
     @property
     def batch_size(self) -> int:
         return self._batch_size
-
-    @property
-    def recording_fps(self) -> int:
-        return self._recording_fps
 
     @property
     def tiles_x(self) -> int:
