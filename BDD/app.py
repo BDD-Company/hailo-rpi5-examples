@@ -157,19 +157,6 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
     seen_frames.append(frame_id)
 
-    if False:
-        pipeline_clock = pad.get_parent_element().get_clock()
-        base_time      = pad.get_parent_element().get_base_time()
-        now_running    = pipeline_clock.get_time() - base_time
-        end_to_end_ns  = now_running - buffer.pts
-
-        sensor_timestamp_ns = buffer.pts
-        detection_start_timestamp_ns = buffer.pts
-        detection_end_timestamp_ns = now_running
-
-        logger.info("!!!!!!!!!!!!!!!!!!!!!!! e2e delay: %ums", int(end_to_end_ns / 1_000_000))
-
-
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
     frame = None
     # if user_data.use_frame and format is not None and width is not None and height is not None:
