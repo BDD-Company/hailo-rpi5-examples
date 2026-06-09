@@ -16,7 +16,7 @@ Design notes:
     reported as an error too (so typos in the config are caught loudly).
 """
 
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Union, get_args, get_origin
@@ -73,11 +73,12 @@ class Range(_Constraint):
                 errors.append(f"{path}: {value} must be less than {self.max}")
 
     def validate(self, value: Any, path: str, errors: list[str]) -> None:
-        # TODO: rework to work for any dataclass (inpsect fields and chech those individually)
-        if isinstance(value, XY):
-            self._check_scalar(value.x, f"{path}.x", errors)
-            self._check_scalar(value.y, f"{path}.y", errors)
-        elif isinstance(value, (int, float)):
+        # Numeric scalars are checked directly; dataclasses (e.g. XY) have the
+        # bound applied to each of their numeric fields individually.
+        if is_dataclass(value):
+            for f in fields(value):
+                self.validate(getattr(value, f.name), f"{path}.{f.name}", errors)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
             self._check_scalar(value, path, errors)
 
 
@@ -185,11 +186,10 @@ class CameraSection:
     # Relative target size (max(w,h)) that triggers switching wide/zoom. Both in (0,1].
     switch_to_wide_size:  Range(float, 0.0, 1.0, min_inclusive=False) = 0.25
     switch_to_zoom_size:  Range(float, 0.0, 1.0, min_inclusive=False) = 0.015
-    # NOTE: must be at least 1 camera.
-    # TODO: remove deafult value
-    cameras: MinItems(CameraEntry, 1) = field(
-        default_factory=lambda: [CameraEntry(camera_id=0, name='wide', sensor_index=0,
-                                             frame_angular_size_deg=XY(107, 85))])
+    # Platform-only initial position (normalized).
+    platform_initial_pos: XY = field(default_factory=_xy_factory(0, 0))
+    # At least one camera must be configured explicitly (no default).
+    cameras: MinItems(CameraEntry, 1) = field(kw_only=True)
 
 
 @dataclass(slots=True)
@@ -212,7 +212,8 @@ class DroneControlConfig:
 @dataclass(slots=True)
 class DroneSection:
     connection_string: str = 'usb'
-    config: DroneControlConfig = field(default_factory=DroneControlConfig)
+    # The control block must be present explicitly (no default).
+    config: DroneControlConfig = field(kw_only=True)
 
 
 # ---------------------------------------------------------------------------
@@ -266,13 +267,14 @@ class Config:
     # w*h, so a normalized area in 0..1.
     adjust_aim_point_at_edge_of_frame_max_size:       Range(float, 0.0, 1.0) = 0.25
 
-    # Per-axis P gain (x, y); non-negative.
-    # TODO: remove defaults from here
-    pd_coeff_p:          Range(XY, min=0.0) = field(default_factory=_xy_factory(8, 2))
+    # Per-axis P gain (x, y); non-negative. These must be set explicitly (no
+    # default) — they directly shape the control response and silently
+    # defaulting them is dangerous.
+    pd_coeff_p:          Range(XY, min=0.0) = field(kw_only=True)
     pd_coeff_d:          float = 0.0
-    pd_coeff_p_safe_min: Range(XY, min=0.0) = field(default_factory=_xy_factory(0.1, 0.1))
-    pd_coeff_p_min:      Range(XY, min=0.0) = field(default_factory=_xy_factory(0.5, 0.5))
-    pd_coeff_p_max:      Range(XY, min=0.0) = field(default_factory=_xy_factory(4, 2))
+    pd_coeff_p_safe_min: Range(XY, min=0.0) = field(kw_only=True)
+    pd_coeff_p_min:      Range(XY, min=0.0) = field(kw_only=True)
+    pd_coeff_p_max:      Range(XY, min=0.0) = field(kw_only=True)
 
     pd_coeff_p_dynamic:               bool = False
     pd_coeff_p_dynamic_use_piecewise: bool = False
@@ -308,13 +310,11 @@ class Config:
     # EMA smoothing factor for camera-switch target size, 0..1.
     camera_switch_size_ema_alpha: Range(float, 0.0, 1.0) = 0.3
 
-    # Platform-only initial position (normalized).
-    # TODO: move into CameraSection
-    platform_initial_pos: XY = field(default_factory=_xy_factory(0, 0))
-
-    camera:    CameraSection    = field(default_factory=CameraSection)
-    drone:     DroneSection     = field(default_factory=DroneSection)
-    bytetrack: ByteTrackSection = field(default_factory=ByteTrackSection)
+    # Complex sub-sections must be present explicitly (no default) so an
+    # incomplete config fails loudly instead of silently using a stand-in.
+    camera:    CameraSection    = field(kw_only=True)
+    drone:     DroneSection     = field(kw_only=True)
+    bytetrack: ByteTrackSection = field(kw_only=True)
 
     # Runtime-only fields: set programmatically, NEVER read from the config
     # file (providing them in the file is reported as an unknown key).
@@ -433,11 +433,25 @@ def _coerce(value, ann, path, errors):
     return coerced
 
 
+def _required_names(cls) -> set:
+    """Field names that have no default (neither default nor default_factory)."""
+    return {f.name for f in fields(cls)
+            if f.default is MISSING and f.default_factory is MISSING
+            and not f.metadata.get('runtime')}
+
+
+def _blank(cls):
+    """Construct an instance, passing None for every required field so it never
+    raises. Only used on the error path, where the result is discarded."""
+    return cls(**{name: None for name in _required_names(cls)})
+
+
 def _parse_dataclass(cls, data, path, errors):
     prefix = f"{path}." if path else ""
+    required = _required_names(cls)
     if not isinstance(data, dict):
         errors.append(f"{path or '<root>'}: expected a mapping, got {type(data).__name__}")
-        return cls()
+        return _blank(cls)
 
     anns = inspect.get_annotations(cls)
     valid_names = set()
@@ -451,16 +465,22 @@ def _parse_dataclass(cls, data, path, errors):
             r = _coerce(data[f.name], anns[f.name], f"{prefix}{f.name}", errors)
             if r is not _INVALID:
                 kwargs[f.name] = r
+        elif f.name in required:
+            errors.append(f"{prefix}{f.name}: missing required configuration key")
 
     for key in data:
         if key not in valid_names or (key in valid_names and _runtime_field(cls, key)):
             errors.append(f"{prefix}{key}: unknown configuration key")
 
+    # Placeholder for any required field still missing, so construction (used to
+    # return *something*) never raises; on the error path the object is discarded.
+    for name in required:
+        kwargs.setdefault(name, None)
     try:
         return cls(**kwargs)
     except Exception as exc:  # pragma: no cover - kwargs are pre-validated
         errors.append(f"{path or '<root>'}: could not build {cls.__name__}: {exc}")
-        return cls()
+        return _blank(cls)
 
 
 def _runtime_field(cls, name) -> bool:

@@ -205,7 +205,7 @@ async def drone_controlling_thread_async(
         drone_connection_string,
         drone_config,
         detections_queue,
-        control_config: Config = None,
+        control_config: Config,
         output_queue = None,
         signal_event_when_ready = None,
         camera_switcher : CameraSwitcher | None = None
@@ -215,9 +215,6 @@ async def drone_controlling_thread_async(
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
     global global_logger
     logger = global_logger
-
-    if control_config is None:
-        control_config = Config()
 
     START_TIME_MS = time.monotonic_ns() / 1000_000
 

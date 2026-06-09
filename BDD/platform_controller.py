@@ -34,13 +34,10 @@ def platform_controlling_thread(*args, **kwargs):
         loop.close()
 
 
-async def platform_controlling_thread_async(platform_connection_string, platform_config, detections_queue, control_config: Config = None, output_queue = None, signal_event_when_ready = None, camera_switcher : CameraSwitcher | None = None):
+async def platform_controlling_thread_async(platform_connection_string, platform_config, detections_queue, control_config: Config, output_queue = None, signal_event_when_ready = None, camera_switcher : CameraSwitcher | None = None):
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
     global global_logger
     logger = global_logger
-
-    if control_config is None:
-        control_config = Config()
 
     START_TIME_MS = time.monotonic_ns() / 1000_000
     DEBUG           = control_config.DEBUG
@@ -109,7 +106,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
 
     # SAFE_TAKEOFF_PERIOD_NS = control_config.safe_takeoff_period_ns
 
-    PLATFORM_INITIAL_POS = control_config.platform_initial_pos
+    PLATFORM_INITIAL_POS = control_config.camera.platform_initial_pos
 
     center = XY(0.5, 0.5)
     distance_r = 0.1

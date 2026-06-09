@@ -19,6 +19,26 @@ from helpers import XY
 CONFIG_YAML = Path(__file__).resolve().parent / "config.yaml"
 
 
+def _valid_dict():
+    """A complete, valid config mapping (the shipped one) to build cases from."""
+    import yaml
+    return yaml.safe_load(CONFIG_YAML.read_text())
+
+
+def valid_with(**overrides):
+    """Shipped config with top-level keys overridden/added."""
+    d = _valid_dict()
+    d.update(overrides)
+    return d
+
+
+def valid_section(section, **overrides):
+    """Shipped config with one nested section's keys overridden/added."""
+    d = _valid_dict()
+    d[section] = {**d.get(section, {}), **overrides}
+    return d
+
+
 def test_shipped_yaml_parses_and_matches_legacy_values():
     cfg = load_config(CONFIG_YAML)
     assert isinstance(cfg, Config)
@@ -40,17 +60,26 @@ def test_shipped_yaml_parses_and_matches_legacy_values():
     assert cfg.bytetrack.recovery_max_dist is None
 
 
-def test_empty_config_uses_defaults():
-    cfg = parse_config({})
+def test_empty_config_reports_missing_required_sections():
+    with pytest.raises(ConfigError) as ei:
+        parse_config({})
+    probs = ei.value.problems
+    for name in ('camera', 'drone', 'bytetrack', 'pd_coeff_p'):
+        assert any(p.startswith(f"{name}:") and 'missing required' in p for p in probs), name
+
+
+def test_optional_scalars_still_default_when_omitted():
+    # A complete config may still omit scalar knobs that carry sensible defaults.
+    cfg = parse_config(_valid_dict())
     assert cfg.confidence_min == 0.4
-    assert cfg.camera.cameras[0].name == 'wide'
+    assert cfg.camera.platform_initial_pos == XY(0, 0)  # not in the shipped file
 
 
 def test_bytetrack_tracker_kwargs_excludes_target_lock():
-    cfg = parse_config({})
+    cfg = parse_config(_valid_dict())
     kwargs = cfg.bytetrack.tracker_kwargs()
     assert 'target_lock' not in kwargs
-    assert kwargs['track_thresh'] == 0.5
+    assert kwargs['track_thresh'] == 0.3
 
 
 def test_type_error_reported():
@@ -95,17 +124,17 @@ def test_runtime_fields_rejected_from_file():
         parse_config({'DEBUG': True})
     assert any('DEBUG' in p and 'unknown' in p for p in ei.value.problems)
     # but settable programmatically
-    cfg = parse_config({})
+    cfg = parse_config(_valid_dict())
     cfg.DEBUG = True
     assert cfg.DEBUG is True
 
 
 def test_xy_validation():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'pd_coeff_p': [1, 2, 3]})
+        parse_config(valid_with(pd_coeff_p=[1, 2, 3]))
     assert any('pd_coeff_p' in p for p in ei.value.problems)
     # mapping form works
-    cfg = parse_config({'aim_point': {'x': 0.4, 'y': 0.6}})
+    cfg = parse_config(valid_with(aim_point={'x': 0.4, 'y': 0.6}))
     assert cfg.aim_point == XY(0.4, 0.6)
 
 
@@ -117,26 +146,50 @@ def test_xy_component_bounds():
 
 def test_choices_validation():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'camera': {'video_format': 'JPEG'}})
+        parse_config(valid_section('camera', video_format='JPEG'))
     assert any('video_format' in p for p in ei.value.problems)
+
+
+def test_range_validates_each_numeric_field_of_any_dataclass():
+    # TODO #1: Range applies the bound to every numeric field of a dataclass,
+    # not just XY. Verify with an ad-hoc 3-field dataclass.
+    @dataclasses.dataclass
+    class Triple:
+        a: float = 0.0
+        b: float = 0.0
+        c: float = 0.0
+
+    errors = []
+    Range(Triple, 0.0, 1.0).validate(Triple(0.5, 2.0, -1.0), "t", errors)
+    assert any(e.startswith("t.b:") and "maximum" in e for e in errors)
+    assert any(e.startswith("t.c:") and "minimum" in e for e in errors)
+    assert not any(e.startswith("t.a:") for e in errors)
 
 
 def test_camera_requires_at_least_one():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'camera': {'cameras': []}})
+        parse_config(valid_section('camera', cameras=[]))
     assert any('cameras' in p and 'at least' in p for p in ei.value.problems)
 
 
 def test_bool_is_not_int():
     with pytest.raises(ConfigError):
-        parse_config({'safe_takeoff_period_ns': True})
+        parse_config(valid_with(safe_takeoff_period_ns=True))
 
 
 def test_optional_field_accepts_null_and_value():
-    cfg = parse_config({'bytetrack': {'recovery_max_dist': None}})
+    cfg = parse_config(valid_section('bytetrack', recovery_max_dist=None))
     assert cfg.bytetrack.recovery_max_dist is None
-    cfg = parse_config({'bytetrack': {'recovery_max_dist': 0.5}})
+    cfg = parse_config(valid_section('bytetrack', recovery_max_dist=0.5))
     assert cfg.bytetrack.recovery_max_dist == 0.5
+
+
+def test_missing_required_nested_section_reported():
+    # drone present but its required `config` block omitted.
+    with pytest.raises(ConfigError) as ei:
+        parse_config(valid_with(drone={'connection_string': 'usb'}))
+    assert any(p.startswith('drone.config:') and 'missing required' in p
+               for p in ei.value.problems)
 
 
 def test_errors_annotated_with_file_line_numbers(tmp_path):
@@ -264,17 +317,36 @@ def test_schema_has_leaf_fields():
     assert len(LEAF_FIELDS) > 30
 
 
-def test_every_field_has_a_default():
-    # Guarantees parse_config({}) keeps working as fields are added.
-    for cls in all_dataclasses():
-        for f in dataclasses.fields(cls):
-            has_default = (f.default is not dataclasses.MISSING
-                           or f.default_factory is not dataclasses.MISSING)
-            assert has_default, f"{cls.__name__}.{f.name} needs a default"
+def required_names(cls):
+    return [f.name for f in dataclasses.fields(cls)
+            if not f.metadata.get('runtime')
+            and f.default is dataclasses.MISSING
+            and f.default_factory is dataclasses.MISSING]
 
 
-def test_empty_config_builds_full_object():
-    cfg = parse_config({})
+# (cls, field_name) for every required top-level / nested-section field. Adding
+# a new required field anywhere is automatically covered by the test below.
+REQUIRED_TOP = [(Config, n) for n in required_names(Config)]
+
+
+def test_schema_has_required_fields():
+    # sanity: the complex sub-sections really are required (no silent defaults)
+    names = {n for _, n in REQUIRED_TOP}
+    assert {'camera', 'drone', 'bytetrack', 'pd_coeff_p'} <= names
+
+
+@pytest.mark.parametrize("name", [n for _, n in REQUIRED_TOP], ids=lambda n: n)
+def test_missing_each_required_top_level_field_is_reported(name):
+    data = _valid_dict()
+    del data[name]
+    with pytest.raises(ConfigError) as ei:
+        parse_config(data)
+    assert any(p.startswith(f"{name}:") and 'missing required' in p
+               for p in ei.value.problems), ei.value.problems
+
+
+def test_full_config_builds_full_object():
+    cfg = parse_config(_valid_dict())
     # every nested section is materialised
     assert isinstance(cfg.camera, CameraSection)
     assert isinstance(cfg.drone, DroneSection)
