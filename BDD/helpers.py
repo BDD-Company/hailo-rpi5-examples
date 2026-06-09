@@ -6,10 +6,14 @@ from functools import wraps
 import inspect
 import datetime
 import math
+import sys
 
 import numpy as np
 
 import logging
+import logging.handlers
+import queue
+import atexit
 
 # Milliseconds = int
 # def get_current_time_ms() -> Milliseconds:
@@ -127,6 +131,13 @@ class XY:
 
     def __str__(self):
         return f"XY({self.x:.3f}, {self.y:.3f})"
+
+    def __format__(self, format_spec):
+        # Apply the format spec to x and y individually, e.g. f"{xy:.2f}".
+        # An empty spec falls back to the default __str__ representation.
+        if not format_spec:
+            return self.__str__()
+        return f"XY({self.x:{format_spec}}, {self.y:{format_spec}})"
 
 
 @dataclass(init=True, slots=True, order=True, repr=False)
@@ -365,24 +376,72 @@ def log_execution_time(logger=logging.debug, threshold = datetime.timedelta(micr
     return wrapper_outer
 
 
-def configure_logging(level=logging.NOTSET, process_prefix=""):
+# Keeps the async log listener alive for the lifetime of the process.
+_log_queue_listener = None
+_log_listener_atexit_registered = False
+
+
+def _stop_log_listener():
+    """Flush and stop the async log listener if it is running. Guarded because
+    QueueListener.stop() is not idempotent (it sets _thread=None then joins it), so a
+    second call — e.g. atexit after a manual/reconfigure stop — would raise."""
+    listener = _log_queue_listener
+    if listener is not None and getattr(listener, "_thread", None) is not None:
+        listener.stop()
+
+
+def configure_logging(level=logging.NOTSET, process_prefix="", log_file_name=""):
+    """Configure root logging with an ASYNC pipeline so log I/O never blocks the
+    calling thread (critical for the real-time control loop).
+
+    The only handler on the root logger is a QueueHandler: its emit() resolves the
+    record's message args and drops the record on an unbounded in-memory queue (no I/O,
+    no blocking). A background QueueListener thread drains the queue and runs the real
+    StreamHandler — so the asctime/prefix assembly and the write+flush syscall all
+    happen off the hot path.
+
+    NOTE: the message %-args ARE resolved on the calling thread (inside QueueHandler),
+    so logging a large/mutable object (e.g. the telemetry dict) still pays its repr
+    cost here — that is intentional: deferring it to the listener would let later
+    mutations of that object corrupt the logged value. Keep such lines cheap/guarded.
+    """
+    global _log_queue_listener, _log_listener_atexit_registered
+
     class _ExcludeGrpcCallInitFilter(logging.Filter):
         def filter(self, record):
             return not (record.module == "_call")
-            # return not (
-            #     record.filename == "_call.py"
-            #     and record.lineno == 562
-            #     and record.funcName == "__init__"
-            # )
 
     process_prefix = f"{process_prefix}-" if process_prefix else ""
-    logging.basicConfig(level=level,
-        format="%(asctime)s.%(msecs)03d [" + process_prefix + "%(threadName)s] @ { %(filename)s:%(lineno)s : %(funcName)20s() } <%(levelname)s> :\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S")
+    formatter = logging.Formatter(
+        fmt="%(asctime)s.%(msecs)03d [" + process_prefix + "%(threadName)s] @ { %(filename)s:%(lineno)s : %(funcName)20s() } <%(levelname)s> :\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
-    exclude_grpc_call_init_filter = _ExcludeGrpcCallInitFilter()
-    for handler in logging.getLogger().handlers:
-        handler.addFilter(exclude_grpc_call_init_filter)
+    # Real handler: runs on the listener thread; does the heavy formatting + I/O.
+    stream_handler = logging.StreamHandler(sys.stdout)  # Writes to standard output
+    stream_handler.setFormatter(formatter)
+    stream_handler.addFilter(_ExcludeGrpcCallInitFilter())
+
+    # Unbounded queue: put_nowait() never blocks the producer (the control thread).
+    log_queue = queue.Queue(-1)
+    queue_handler = logging.handlers.QueueHandler(log_queue)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+    root.addHandler(queue_handler)
+
+    # (Re)start the background listener that owns the real handler. Stop any previous
+    # one first so reconfiguration doesn't leak threads or duplicate output.
+    _stop_log_listener()
+    _log_queue_listener = logging.handlers.QueueListener(
+        log_queue, stream_handler, respect_handler_level=True
+    )
+    _log_queue_listener.start()
+    if not _log_listener_atexit_registered:
+        atexit.register(_stop_log_listener)
+        _log_listener_atexit_registered = True
 
     # based on https://stackoverflow.com/a/7995762
     logging.addLevelName(logging.INFO, "\033[1;34m%s\033[1;0m" % logging.getLevelName(logging.INFO))

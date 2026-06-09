@@ -281,8 +281,8 @@ class MockDroneMover:
             current_telemetry,
         )
 
-    async def standstill(self):
-        logger.debug("MockDroneMover.standstill()")
+    async def standstill(self, thrust):
+        logger.debug(f"MockDroneMover.standstill({thrust})")
 
     async def idle(self):
         logger.debug("MockDroneMover.idle()")
@@ -519,7 +519,7 @@ def main():
             'thrust_min': 0.5,
             'thrust_max': 0.5,
             'thrust_dynamic': False,
-            'thrust_proportional_to_target_size': False,
+            'thrust_proportional_to_distance': False,
             'target_lost_fade_per_frame': 0.99,
             'target_estimator_clear_history_after_target_lost_frames': 3,
             'estimation_use_3d': False,
@@ -529,11 +529,11 @@ def main():
             'estimation_lookahead_dynamic_frames_near': 3,
             'estimation_lookahead_dynamic_frames_medium': 10,
             'estimation_lookahead_dynamic_frames_far': 20,
-            'pd_coeff_p': 3,
+            'pd_coeff_p': XY(3, 3), # per-axis P gain (x, y)
             'pd_coeff_d': 0,
             'pd_coeff_p_safe_min': 0.6,
-            'pd_coeff_p_min': 0.5,
-            'pd_coeff_p_max': 10,
+            'pd_coeff_p_min': XY(0.5, 0.5),
+            'pd_coeff_p_max': XY(10, 10),
             'pd_coeff_p_dynamic': False,
             'frame_angular_size_deg': XY(107, 85),
             'target_size_m': XY(1.7, 2),

@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal, QObject, QPoint
 from PyQt6.QtGui import (
     QImage, QPixmap, QTextCursor, QTextCharFormat, QColor, QFont,
-    QAction, QShortcut, QKeySequence,
+    QAction, QShortcut, QKeySequence, QColorConstants
 )
 
 import matplotlib
@@ -65,7 +65,7 @@ class HighlightStyle:
     BOLD       : bool — whether highlighted text is bold
     """
     BACKGROUND = QColor(50, 50, 100)
-    FOREGROUND = None                     # keep default text colour
+    FOREGROUND = QColorConstants.White
     BOLD = False
 
 
@@ -75,7 +75,7 @@ class HighlightStyle:
 
 FRAME_RE = re.compile(r"frame=#(\d+)")
 TARGET_RE = re.compile(r"frame=#(\d+).*?!!! target : XY\(([^,]+),\s*([^)]+)\)")
-TARGET_ESTIMATE_RE = re.compile(r"frame=#(\d+).*?!!! estimated new target pos XY\(([^,]+),\s*([^)]+)\)")
+TARGET_ESTIMATE_RE = re.compile(r"frame=#(\d+).*?!!!.*estimated new target pos XY\(([^,]+),\s*([^)]+)\)")
 ESTIMATED_DISTANCE_RE = re.compile(r"frame=#(\d+).*?estimated distance:\s*\([^,@]+[,@]\s*([\.\d]+)m?\)")
 
 

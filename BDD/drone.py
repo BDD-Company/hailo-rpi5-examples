@@ -4,7 +4,7 @@ import asyncio
 # import nest_asyncio
 import dataclasses
 from enum import Enum
-from math import nan, cos, radians, acos, degrees, copysign
+from math import nan, cos, radians, acos, atan2, degrees, copysign, hypot
 import time
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate, OffboardError
@@ -62,6 +62,17 @@ def mavsdk_msg_to_dict(msg):
 
 class DroneMover():
 
+    # Default per-aspect MAVLink stream rates (Hz) requested from PX4.
+    # Anything listed here is attempted with `telemetry.set_rate_*`; failures
+    # are logged and swallowed (PX4 default rate remains in effect for that
+    # aspect). Override via drone config key 'telemetry_rates_hz'.
+    DEFAULT_TELEMETRY_RATES_HZ: dict[str, float] = {
+        "attitude_euler":   50.0,
+        "odometry":         50.0,
+        "imu":              50.0,
+        "landed_state":      5.0,
+    }
+
     def __init__(self, drone_connection_string, config : dict|None = None) -> None:
         super().__init__()
         self.drone = System()
@@ -84,6 +95,24 @@ class DroneMover():
         self.aborted = False
         self.upside_down_state = False
 
+        # Belly-down yaw assist.
+        # This airframe is a quadro whose body (forward/nose axis) is normal to
+        # the rotor plane, so "belly-down" means the nose points at the ground.
+        # Yaw spins the craft about the body-down (rotor-normal) axis, which can
+        # only swing the nose within the body forward-right plane. Once the body
+        # is tilted enough that gravity has a component in that plane, we drive a
+        # proportional yaw rate to align the nose with the estimated earth-down
+        # direction (taken from the accelerometer). Turn off via 'belly_down_yaw'.
+        self.belly_down_yaw = self.config.get('belly_down_yaw', True)
+        # Yaw rate (deg/s) commanded per degree of nose-vs-down heading error.
+        self.belly_down_yaw_kp = self.config.get('belly_down_yaw_kp', 1.5)
+        # Clamp on the commanded yaw rate (deg/s).
+        self.belly_down_yaw_max_rate_deg_s = self.config.get('belly_down_yaw_max_rate_deg_s', 90.0)
+        # Minimum gravity magnitude (m/s²) in the forward-right plane before the
+        # assist engages; below this the nose is ~aligned with the rotor axis and
+        # yaw can't tilt it toward the ground, so the heading error is just noise.
+        self.belly_down_min_horizontal_g_mss = self.config.get('belly_down_min_horizontal_g_mss', 2.0)
+
         # Telemetry aspects to keep cached; edit this list to add/remove streams.
         self.telemetry_aspects = [
             "attitude_euler",
@@ -91,7 +120,8 @@ class DroneMover():
             # "health",
             "odometry",
             "landed_state",
-            "imu"
+            "imu",
+            "flight_mode",
             # "attitude_angular_velocity_body",
         ]
         self._telemetry_tasks : dict[str, asyncio.Task] = {}
@@ -134,9 +164,94 @@ class DroneMover():
         asyncio.run(__shutdown_async())
 
 
+    @staticmethod
+    def _find_usb_device() -> str:
+        """Resolve the special 'USB' connection target to a concrete device path.
+
+        1. Prefer a stable by-id symlink for an Auterion PX4 FMU, e.g.
+           /dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00.
+        2. Otherwise fall back to the most recently connected /dev/ttyACM* node.
+
+        Raises RuntimeError when neither is present.
+        """
+        import glob
+        import os
+
+        by_id = sorted(glob.glob("/dev/serial/by-id/usb-Auterion_PX4_FMU*"))
+        if by_id:
+            logger.info("USB -> PX4 by-id device: %s", by_id[0])
+            return by_id[0]
+
+        acm = glob.glob("/dev/ttyACM*")
+        if acm:
+            # newest device node = most recently connected
+            device = max(acm, key=lambda p: os.stat(p).st_mtime)
+            logger.info("USB -> most recently connected device: %s", device)
+            return device
+
+        raise RuntimeError("No viable USB devices found")
+
+    @staticmethod
+    def _validate_px4_on_serial(device_path: str, baud: int = 57600, timeout_s: float = 10.0) -> bool:
+        """Briefly open `device_path` with pymavlink and confirm a PX4 autopilot
+        is heartbeating on the other side, then close the port so mavsdk can
+        take it over.
+
+        Returns True if a PX4 heartbeat is seen, False otherwise. When
+        pymavlink is unavailable validation is skipped (returns True).
+        """
+        try:
+            from pymavlink import mavutil
+        except ImportError:
+            logger.warning("pymavlink unavailable, skipping PX4 validation of %s", device_path)
+            return True
+
+        conn = None
+        try:
+            conn = mavutil.mavlink_connection(device_path, baud=baud)
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                hb = conn.recv_match(type="HEARTBEAT", blocking=True, timeout=1.0)
+                if hb is None:
+                    continue
+                # GCS / companion heartbeats report INVALID; keep looking for the FC.
+                if hb.autopilot == mavutil.mavlink.MAV_AUTOPILOT_INVALID:
+                    continue
+                is_px4 = hb.autopilot == mavutil.mavlink.MAV_AUTOPILOT_PX4
+                logger.info("Heartbeat on %s: autopilot=%d (is PX4: %s)",
+                            device_path, hb.autopilot, is_px4)
+                return is_px4
+        except Exception:
+            logger.exception("PX4 validation failed on %s", device_path)
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        logger.warning("No PX4 heartbeat seen on %s within %.0fs", device_path, timeout_s)
+        return False
+
+    def _resolve_connection_string(self) -> str:
+        """Expand the special 'USB' connection target into a concrete
+        serial:// device path, validating that a PX4 is actually on the other
+        side. Any other connection string is returned unchanged."""
+        if self.drone_connection_string.lower() != "usb":
+            return self.drone_connection_string
+
+        device = self._find_usb_device()
+        # pixhawk 6x seems to be supporting about 2Mbps, here using ~1Mbps-ish just to be safe.
+        BAUD_RATE=1_000_000
+        # MUST specify baude rate explicitly otherwise will fail to connect later
+        return f"serial://{device}:{BAUD_RATE}"
+
+
     async def startup_sequence(self, arm_attempts = 100, force_arm=False):
-        logging.info("Connecting to drone... %s", self.drone_connection_string)
-        await self.drone.connect(system_address = self.drone_connection_string)
+        connection_string = self._resolve_connection_string()
+        logging.info("Connecting to drone... %s", connection_string)
+        await self.drone.connect(system_address = connection_string)
         arm_attempts = max(3, arm_attempts)
 
         drone = self.drone
@@ -184,9 +299,9 @@ class DroneMover():
 
         await arm()
 
-
-        await asyncio.sleep(1) # TODO(vnemkov): maybe remove?
-
+        await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
+        # it is requirement of PX4 to receive setpoints for at least 1 second before switching to offboard
+        await asyncio.sleep(1)
         await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.01))
 
         logger.debug("Entering Offboard mode...")
@@ -239,10 +354,61 @@ class DroneMover():
         # await asyncio.sleep(1)
         # logging.debug("offboard mode: %s", await self.offboard.is_active())
 
+        await self._configure_telemetry_rates()
         await self._ensure_telemetry_cache()
         # await self.start_upside_down_monitor()
 
         return
+
+
+    async def _configure_telemetry_rates(self, rates_hz: dict[str, float] | None = None) -> None:
+        """
+        Ask PX4 to publish selected telemetry streams at a specified rate.
+
+        Maps each aspect name to its `telemetry.set_rate_*` method; failures
+        are logged per-aspect and don't abort the other requests. A stream
+        we couldn't bump simply keeps PX4's default rate.
+
+        `rates_hz` defaults to DEFAULT_TELEMETRY_RATES_HZ merged with
+        `self.config['telemetry_rates_hz']` (the latter wins).
+        """
+        effective: dict[str, float] = dict(self.DEFAULT_TELEMETRY_RATES_HZ)
+        effective.update(self.config.get('telemetry_rates_hz', {}) or {})
+        if rates_hz:
+            effective.update(rates_hz)
+            logger.info("effective telemetry refresh rates: %s", rates_hz)
+
+        tele = self.drone.telemetry
+        setters: dict[str, object] = {
+            "attitude_euler":        getattr(tele, "set_rate_attitude_euler",        None),
+            "attitude_quaternion":   getattr(tele, "set_rate_attitude_quaternion",   None),
+            "imu":                   getattr(tele, "set_rate_imu",                   None),
+            "odometry":              getattr(tele, "set_rate_odometry",              None),
+            "position":              getattr(tele, "set_rate_position",              None),
+            "velocity_ned":          getattr(tele, "set_rate_velocity_ned",          None),
+            "position_velocity_ned": getattr(tele, "set_rate_position_velocity_ned", None),
+            "landed_state":          getattr(tele, "set_rate_landed_state",          None),
+        }
+
+        for aspect, hz in effective.items():
+            if hz is None or hz <= 0:
+                logger.warning("telemetry rate for %s skipped (hz=%s)", aspect, hz)
+                continue
+
+            setter = setters.get(aspect)
+            if setter is None:
+                logger.warning("no set_rate_* for aspect '%s', keeping PX4 default", aspect)
+                continue
+
+            try:
+                await setter(float(hz))
+                logger.info("telemetry '%s' rate set to %.1f Hz", aspect, hz)
+            except Exception as e:
+                # Typical causes: TelemetryError ("COMMAND_DENIED"/"NO_SYSTEM"),
+                # PX4 refuses due to link bandwidth, or aspect unsupported on
+                # this firmware. In all cases, fall back to PX4 default.
+                logger.warning("failed to set '%s' rate to %.1f Hz: %s "
+                               "(keeping PX4 default)", aspect, hz, e)
 
 
     async def _ensure_telemetry_cache(self, aspects: list[str] | None = None):
@@ -418,6 +584,49 @@ class DroneMover():
                       roll_deg, safe_roll, pitch_deg, safe_pitch, thrust, self.min_lift_fraction, effective_min_lift, bonus)
         return safe_roll, safe_pitch
 
+    def _belly_down_yaw_rate(self, current_telemetry) -> float:
+        """Yaw rate (deg/s) that rotates the nose toward the ground ("belly-down").
+
+        For this airframe the body/forward axis is normal to the rotor plane, so
+        belly-down == the forward axis pointing along gravity. Yaw spins the craft
+        about the body-down (rotor-normal) axis, which can only move the nose
+        within the body forward-right plane. We therefore estimate the earth-down
+        direction in the body frame from the accelerometer and drive the nose
+        toward the in-plane part of it with a proportional controller.
+
+        The accelerometer reports specific force (≈ -gravity at rest), so the
+        earth-down direction in the body frame is the negated accel vector.
+
+        Returns 0.0 when disabled, when telemetry is missing, or when the body is
+        too close to upright for yaw to make any difference.
+        """
+        if not self.belly_down_yaw:
+            return 0.0
+
+        try:
+            accel = current_telemetry["imu"]["acceleration_frd"]
+            down_fwd = -accel["forward_m_s2"]
+            down_rgt = -accel["right_m_s2"]
+        except (TypeError, KeyError):
+            return 0.0
+
+        # Gravity component lying in the forward-right plane (the plane yaw can
+        # rotate the nose within). Too small => nose ~aligned with rotor axis.
+        horizontal_g = hypot(down_fwd, down_rgt)
+        if horizontal_g < self.belly_down_min_horizontal_g_mss:
+            return 0.0
+
+        # Heading error between the nose (+forward) and the in-plane down dir.
+        # Positive yaw (about body-down) swings +forward toward +right.
+        error_deg = degrees(atan2(down_rgt, down_fwd))
+        yaw_rate = self.belly_down_yaw_kp * error_deg
+        yaw_rate = max(-self.belly_down_yaw_max_rate_deg_s,
+                       min(self.belly_down_yaw_max_rate_deg_s, yaw_rate))
+
+        logger.debug("belly-down yaw: down_frd=(%.2f,%.2f) horiz_g=%.2f err=%.1f° -> yaw_rate=%.1f°/s",
+                     down_fwd, down_rgt, horizontal_g, error_deg, yaw_rate)
+        return yaw_rate
+
     async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0, current_telemetry = None) -> None:
         if self.upside_down_state:
             logger.warning("drone is UPSIDE-DOWN, ignoring command")
@@ -437,11 +646,12 @@ class DroneMover():
                 )
             )
         else:
+            yaw_deg_s = self._belly_down_yaw_rate(current_telemetry)
             await drone_offboard.set_attitude_rate(
                 AttitudeRate(
                     roll_deg_s=roll_degree,
                     pitch_deg_s=pitch_degree,
-                    yaw_deg_s=0,
+                    yaw_deg_s=yaw_deg_s,
                     thrust_value=thrust,
                 )
             )
@@ -465,8 +675,16 @@ class DroneMover():
         #     )
         # )
 
-    async def standstill(self) -> None:
-        await self.move_to_target_zenith_async(0, 0, IDLE_THRUST * 2)
+    async def standstill(self, thrust = IDLE_THRUST * 2) -> None:
+        # await self.move_to_target_zenith_async(0, 0, thrust)
+        await self.drone.offboard.set_attitude(
+            Attitude(
+                roll_deg=0,
+                pitch_deg=0,
+                yaw_deg=0,
+                thrust_value=thrust,
+            )
+        )
 
 
     async def idle(self):

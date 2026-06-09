@@ -28,7 +28,7 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 from bytetrack import BYTETracker
 
-from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand
+from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
@@ -44,6 +44,7 @@ import logging
 logger = logging.getLogger(__name__)
 global_logger = logger # a hack
 DEBUG = False
+USE_TRACKER = False
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
@@ -123,7 +124,6 @@ def _match_track_to_detection(
             best_idx = i
     return best_idx
 
-USE_TRACKER = False
 
 # This is the callback function that will be called when data is available from the pipeline
 def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_callback_class):
@@ -152,8 +152,9 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         sensor_timestamp_ns = detection_start_timestamp_ns
 
     if frame_id in seen_frames:
-        # logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s", frame_id)
+        logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s", frame_id)
         return Gst.PadProbeReturn.OK
+
     seen_frames.append(frame_id)
 
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
@@ -192,12 +193,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     else:
         dets_array = np.empty((0, 5))
 
-    logger.debug(
-        "frame=#%04d ByteTracker input: %d detections %s",
-        frame_id,
-        len(raw_dets),
-        [(round(r.left_edge, 1), round(r.top_edge, 1), round(r.right_edge, 1), round(r.bottom_edge, 1), round(c, 3)) for r, c in raw_dets],
-    )
+    # logger.debug(
+    #     "frame=#%04d ByteTracker input: %d detections %s",
+    #     frame_id,
+    #     len(raw_dets),
+    #     [(round(r.left_edge, 1), round(r.top_edge, 1), round(r.right_edge, 1), round(r.bottom_edge, 1), round(c, 3)) for r, c in raw_dets],
+    # )
 
     track_id_map: dict[int, int] = {}
     if USE_TRACKER:
@@ -315,7 +316,8 @@ def main():
     env_path_str = str(env_file)
     os.environ["HAILO_ENV_FILE"] = env_path_str
 
-    configure_logging(level = logging.DEBUG)
+    start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    configure_logging(level = logging.DEBUG, log_file_name=start_time_str)
     # shushing verbose loggers
     logging.getLogger("picamera2").setLevel(logging.WARNING)
     logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
@@ -332,45 +334,67 @@ def main():
         logger.error("!!! ============================================================== !!!")
         logger.error('')
 
-    detections_queue = OverwriteQueue(maxsize=20)
+    # maxsize=1 so the control loop always acts on the FRESHEST detection.
+    # The producer (camera->pipeline->callback) runs ~14 fps but the drone loop only
+    # ~8.5 fps; with a deep queue + oldest-first get() the loop chewed through a ~20-frame
+    # backlog, making every decision act on a frame ~1.3 s stale (the dominant latency).
+    # With size 1 the callback overwrites, so get() returns the latest frame and stale
+    # frames are dropped instead of queued (same drop count, but keeps new not old).
+    detections_queue = OverwriteQueue(maxsize=1)
     output_queue = OverwriteQueue(maxsize=200)
 
-    start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
     event = threading.Event()
 
     arg_parser = get_default_parser()
     arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
+    arg_parser.add_argument('--connection_string', type=str, default=None)
 
     control_config = {
         'confidence_min': 0.4,
         'confidence_move': 0.3,
 
         'thrust_takeoff' : 0.5,
-        'thrust_min': 0.7,
+        'thrust_cruise' : 0.53,
+        'thrust_hover' : 0.4,
+
+        'thrust_min': 0.4,
         'thrust_max': 0.9,
+
         'thrust_dynamic': False,
-        'thrust_proportional_to_target_size' : False,
+        'thrust_proportional_to_distance' : True,
+        'thrust_proportional_to_distance_far_coeff' : 1,
+        'thrust_proportional_to_distance_medium_distance_m' : 20,
+        'thrust_proportional_to_distance_medium_coeff'      : 0.9,
+        'thrust_proportional_to_distance_near_distance_m'   : 10,
+        'thrust_proportional_to_distance_near_coeff'        : 1.1,
 
         'target_lost_fade_per_frame': 0.99,
         'target_estimator_clear_history_after_target_lost_frames' : 3,
 
         'estimation_3d': True,
-        'estimation_3d_method': 'cluster',
-        'estimation_3d_use_initial_velocity' : True,
+        'estimation_3d_method': 'numpy',
+        'estimation_3d_use_initial_velocity' : False,
 
-        'estimation_lookahead_frames': 2,
+        'estimation_lookahead_frames': 1,
         'estimation_lookahead_dynamic': True,
-        'estimation_lookahead_dynamic_sqrt': True,
-        'estimation_lookahead_dynamic_frames_near':   1,
-        'estimation_lookahead_dynamic_frames_medium': 1,
-        'estimation_lookahead_dynamic_frames_far':    1, # can't be too big -- estimation will be too FAAR away.
+        'estimation_lookahead_dynamic_frames_max' : 5,
+        'estimation_lookahead_dynamic_sqrt': False,
+        'estimation_lookahead_dynamic_factor': 0.1,
+        'estimation_lookahead_dynamic_frames_near':   0,
+        'estimation_lookahead_dynamic_frames_medium': 0,
+        'estimation_lookahead_dynamic_frames_far':    0, # can't be too big -- estimation will be too FAAR away.
 
-        'pd_coeff_p': 3,
+        'optical_methods_to_refine_target_size_and_center': True,
+        'adjust_aim_point_at_edge_of_frame': True,
+        'adjust_aim_point_at_edge_of_frame_threshold': 0.01,
+        'adjust_aim_point_at_edge_of_frame_max_size': 0.25, # w*h, e.g. w=0.5, h=0.5, size=0.25
+
+        'pd_coeff_p': XY(8, 2), # per-axis P gain (x, y)
         'pd_coeff_d': 0, #-1, # -1
-        'pd_coeff_p_safe_min': 0.6,
-        'pd_coeff_p_min' : 0.5,
-        'pd_coeff_p_max' : 10,
+        'pd_coeff_p_safe_min': XY(0.5, 0.5),
+        'pd_coeff_p_min' : XY(0.5, 0.5),
+        'pd_coeff_p_max' : XY(4, 2),
 
         # Dynamically adjust P coeff based on target size.
         # Old mode: linear interpolation between min and max.
@@ -392,27 +416,45 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m' : XY(1.8, 1.8),             # shahed small
+        'target_size_m': XY(1.2, 1.2),            # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
         # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
-        'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
-        'inertia_correction_limits': XY(1, 1),
-        'inertia_correction_min_speed_ms': 5,
+        # Inertia correction is in another branch and not used since telemetry data is weird sometimes,
+        # leading to completely invalid corrections.
+        # 'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
+        # 'inertia_correction_limits': XY(1, 1),
+        # 'inertia_correction_min_speed_ms': 5,
 
         'safe_takeoff_period_ns': 300_000_000,
-        'delay_takeof_until_n_detection_frames' : 30,
+        'delay_takeof_until_n_detection_frames' : 10,
 
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
 
         'follow_target_position_ned' : False,
 
-        # params to go to the drone config ("drone_" prefix is stripped then)
-        'drone_use_set_attitude': False,
-        'drone_min_lift_fraction': 0.1,
-        'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
-        'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+        'drone' : {
+            # 'connection_string' : 'udpout://192.168.0.3:14540', # direct comm with drone, slow to start, fails to connect on client restart
+            #'connection_string' : 'udp://:14550', # mavlink-rounterd
+            # 'connection_string' : 'serial:///dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00',
+            'connection_string' : 'usb',
+            'config' : {
+                'upside_down_angle_deg': 130,
+                'upside_down_hold_s': 0.2,
+                'use_set_attitude': False,
+                'min_lift_fraction': 0.1,
+                'lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
+                'lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+
+                # Belly-down yaw assist: yaw the nose toward the ground (forward
+                # axis points down) using the accelerometer-estimated gravity dir.
+                'belly_down_yaw': True,                  # set False to disable
+                'belly_down_yaw_kp': 1.5,                # deg/s per deg of heading error
+                'belly_down_yaw_max_rate_deg_s': 90.0,   # clamp on commanded yaw rate
+                'belly_down_min_horizontal_g_mss': 2.0,  # min in-plane gravity to engage
+            }
+        },
 
         'DEBUG': DEBUG,
 
@@ -426,18 +468,26 @@ def main():
         'bytetrack_nms_thresh':        0.3,
         'bytetrack_nms_dist_thresh':   0.06,
     }
+    global USE_TRACKER
+    USE_TRACKER = False
+
+    byte_track_config_params = {k.removeprefix('bytetrack_') : v for k, v in control_config.items() if k.startswith('bytetrack_')}
+    for k in byte_track_config_params:
+        control_config.pop('bytetrack_' + k)
 
     bytetracker = BYTETracker(
-        track_thresh=control_config['bytetrack_track_thresh'],
-        det_thresh=control_config['bytetrack_det_thresh'],
-        match_thresh=control_config['bytetrack_match_thresh'],
-        track_buffer=control_config['bytetrack_track_buffer'],
-        frame_rate=control_config['bytetrack_frame_rate'],
-        match_max_dist=control_config.get('bytetrack_match_max_dist'),
-        recovery_max_dist=control_config.get('bytetrack_recovery_max_dist'),
-        nms_thresh=control_config.get('bytetrack_nms_thresh'),
-        nms_dist_thresh=control_config.get('bytetrack_nms_dist_thresh'),
+        **byte_track_config_params
+        # track_thresh=control_config['bytetrack_track_thresh'],
+        # det_thresh=control_config['bytetrack_det_thresh'],
+        # match_thresh=control_config['bytetrack_match_thresh'],
+        # track_buffer=control_config['bytetrack_track_buffer'],
+        # frame_rate=control_config['bytetrack_frame_rate'],
+        # match_max_dist=control_config.get('bytetrack_match_max_dist'),
+        # recovery_max_dist=control_config.get('bytetrack_recovery_max_dist'),
+        # nms_thresh=control_config.get('bytetrack_nms_thresh'),
+        # nms_dist_thresh=control_config.get('bytetrack_nms_dist_thresh'),
     )
+
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True
 
@@ -455,6 +505,9 @@ def main():
         import math
         nan = math.nan
         control_config['debug_telemetry_dict'] = {'attitude_euler': {'pitch_deg': 1.1012928485870361, 'roll_deg': -2.5803990364074707, 'timestamp_us': 4597491000, 'yaw_deg': -139.22280883789062}, 'odometry': {'angular_velocity_body': {'pitch_rad_s': 0.005480111576616764, 'roll_rad_s': -0.004354139324277639, 'yaw_rad_s': 0.00451350212097168}, 'child_frame_id': '1 (BODY_NED)', 'frame_id': '1 (BODY_NED)', 'pose_covariance': {'covariance_matrix': (0.0006513984990306199, nan, nan, nan, nan, nan, 0.0006680359947495162, nan, nan, nan, nan, 0.0795387253165245, nan, nan, nan, 0.00014700590691063553, nan, nan, 0.0001532444730401039, nan, 0.0037478541489690542)}, 'position_body': {'x_m': 10155.28515625, 'y_m': 1922.0908203125, 'z_m': 0.21114209294319153}, 'q': {'timestamp_us': 0, 'w': -0.3483775854110718, 'x': -0.0011684682685881853, 'y': -0.024444160982966423, 'z': 0.9370348453521729}, 'time_usec': 4597481426, 'velocity_body': {'x_m_s': 0.014301709830760956, 'y_m_s': -0.007258167490363121, 'z_m_s': 0.04777885600924492}, 'velocity_covariance': {'covariance_matrix': (0.002916615456342697, nan, nan, nan, nan, nan, 0.0030234858859330416, nan, nan, nan, nan, 0.005942340008914471, nan, nan, nan, nan, nan, nan, nan, nan, nan)}}, 'landed_state': None, 'imu': {'acceleration_frd': {'down_m_s2': -10.367236137390137, 'forward_m_s2': -0.11148512363433838, 'right_m_s2': 0.5069471597671509}, 'angular_velocity_frd': {'down_rad_s': -0.0006937360158190131, 'forward_rad_s': 0.004322248511016369, 'right_rad_s': 0.0015081189339980483}, 'magnetic_field_frd': {'down_gauss': 0.2559056580066681, 'forward_gauss': -0.3339233696460724, 'right_gauss': 0.3074171245098114}, 'temperature_degc': 15.0, 'timestamp_us': 4597496423}}
+
+    if app.options_menu.connection_string:
+        control_config['drone']['connection_string'] = app.options_menu.connection_string
 
     action_thread = None
     if app.options_menu.action == 'platform':
@@ -475,15 +528,12 @@ def main():
             )
         )
     else:
-
+        drone_params = control_config.pop('drone')
         action_thread = threading.Thread(
             target = drone_controlling_thread,
             args = (
-                'udp://:14550',
-                {
-                    'upside_down_angle_deg': 130,
-                    'upside_down_hold_s': 0.2,
-                },
+                drone_params.pop('connection_string'), #'udp://10.41.10.2:14540',
+                drone_params.pop('config'),
                 detections_queue
             ),
             kwargs= dict(
@@ -494,6 +544,7 @@ def main():
             name = "Drone"
         )
     action_thread.start()
+    app.add_shutdown_callback(lambda: detections_queue.put(STOP))
 
     sink = MultiSink([
         # RtspStreamerSink(30, 8554),

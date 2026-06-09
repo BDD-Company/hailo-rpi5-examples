@@ -94,16 +94,22 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
             framere_clause=f',framerate={framerate}/1'
 
         source_element = (
-            # max-size-time is 100ms in nanoseconds
-            f'appsrc name=app_source is-live=true leaky-type=downstream {do_timestamp_clause} ! '
+            # `format=time` MUST be set on appsrc at pipeline-parse time, not later from
+            # picamera_thread: with the lighter single-stream picam2 config, the main
+            # thread now reaches Gst.State.PAUSED before picamera_thread runs its
+            # set_property("format", Gst.Format.TIME), so appsrc emits a BYTES-format
+            # segment and videorate downstream rejects it with "Got segment but doesn't
+            # have GST_FORMAT_TIME value" -> Internal data stream error and the pipeline
+            # dies. Declaring it here eliminates the race regardless of thread timing.
+            f'appsrc name=app_source is-live=true leaky-type=downstream format=time {do_timestamp_clause} ! '
             # 'videoflip name=videoflip video-direction=horiz ! '
             f'video/x-raw, format={video_format}, width={video_width}, height={video_height} {framere_clause} ! '
         )
     elif source_type == 'libcamera':
         framerate = int(force_framerate if force_framerate is not None else frame_rate)
         source_element = (
-            f'libcamerasrc name={name} ! '
-            f'video/x-raw, width={video_width}, height={video_height}, framerate={framerate}/1 ! '
+            f'libcamerasrc name={name} exposure-time-mode=manual exposure-time=8000 ! '
+            f'video/x-raw, format=NV12, width={video_width}, height={video_height}, framerate={framerate}/1 ! '
         )
     elif source_type == 'ximage':
         source_element = (
@@ -122,21 +128,42 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
     # Set up the fps caps.
     # If sync is True, constrain the rate with the given frame_rate.
     # Otherwise, pass through (no framerate limitation).
+    # Always pin format/size so caps queries can't intersect upstream Bayer/etc.
+    # back through libcamerasrc during negotiation.
+    base_caps = f"video/x-raw, format={video_format}, width={video_width}, height={video_height}"
     if sync:
-        fps_caps = f"video/x-raw, framerate={frame_rate}/1"
+        fps_caps = f"{base_caps}, framerate={frame_rate}/1"
     else:
-        fps_caps = "video/x-raw"
+        fps_caps = base_caps
 
-    source_pipeline = (
-        f'{source_element} '
-        f'{QUEUE(name=f"{name}_scale_q")} ! '
-        f'videoscale name={name}_videoscale n-threads=2 ! '
-        f'{QUEUE(name=f"{name}_convert_q")} ! '
-        f'videoconvert n-threads=3 name={name}_convert qos=false ! '
-        f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, '
-        f'width={video_width}, height={video_height} ! '
-        f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
-    )
+    if source_type == 'rpi':
+        # The picamera2/appsrc producer already delivers exactly video_format @
+        # video_width x video_height at the camera's natural (variable) rate with correct
+        # per-buffer PTS, so the whole common tail is redundant on this path:
+        #   - videoscale (W->W) / videoconvert (format->format) — pure no-op full-frame
+        #     passes;
+        #   - videorate + fps_caps — only DUPLICATED the variable camera stream up to a
+        #     fixed framerate, and those dupes got inferred by Hailo then dropped by the
+        #     callback's frame-id dedup, wasting inference. Downstream times off PTS, so
+        #     no fixed rate is needed for the live path.
+        # The inference wrapper does its own scale/convert to the model input downstream.
+        # (update_fps_caps() would look up the now-removed videorate/fps_caps elements,
+        # but it has no callers and already no-ops gracefully if they are absent.)
+        source_pipeline = (
+            f'{source_element} '
+            f'{QUEUE(name=f"{name}_scale_q")} '
+        )
+    else:
+        source_pipeline = (
+            f'{source_element} '
+            f'{QUEUE(name=f"{name}_scale_q")} ! '
+            f'videoscale name={name}_videoscale n-threads=2 ! '
+            f'{QUEUE(name=f"{name}_convert_q")} ! '
+            f'videoconvert n-threads=3 name={name}_convert qos=false ! '
+            f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, '
+            f'width={video_width}, height={video_height} ! '
+            f'videorate name={name}_videorate ! capsfilter name={name}_fps_caps caps="{fps_caps}" '
+        )
 
     return source_pipeline
 
@@ -153,7 +180,8 @@ def INFERENCE_PIPELINE(
     scheduler_timeout_ms=None,
     scheduler_priority=None,
     vdevice_group_id=1,
-    multi_process_service=None
+    multi_process_service=None,
+    internal_leaky='no',
 ):
     """
     Creates a GStreamer pipeline string for inference and post-processing using a user-provided shared object file.
@@ -199,23 +227,29 @@ def INFERENCE_PIPELINE(
         f'force-writable=true '
     )
 
+    # When this pipeline is wrapped by hailocropper / hailoaggregator (the typical case),
+    # NONE of these queues may drop buffers: the aggregator pairs sink_0 (bypass) with sink_1
+    # (this branch) by per-buffer offset, so dropping a buffer here orphans the matching bypass
+    # buffer and the aggregator deadlocks. internal_leaky='no' propagates backpressure all the way
+    # back through the cropper to inference_wrapper_input_q, which IS leaky=downstream and sheds
+    # the oldest camera frame instead — keeping both branches in lockstep.
     inference_pipeline = (
-        f'{QUEUE(name=f"{name}_scale_q")} ! '
+        f'{QUEUE(name=f"{name}_scale_q", leaky=internal_leaky)} ! '
         f'videoscale name={name}_videoscale n-threads=2 qos=false ! '
-        f'{QUEUE(name=f"{name}_convert_q")} ! '
+        f'{QUEUE(name=f"{name}_convert_q", leaky=internal_leaky)} ! '
         f'video/x-raw, pixel-aspect-ratio=1/1 ! '
         f'videoconvert name={name}_videoconvert n-threads=2 ! '
-        f'{QUEUE(name=f"{name}_hailonet_q")} ! '
+        f'{QUEUE(name=f"{name}_hailonet_q", leaky=internal_leaky)} ! '
         f'{hailonet_str} ! '
     )
 
     if post_process_so:
         inference_pipeline += (
-            f'{QUEUE(name=f"{name}_hailofilter_q")} ! '
+            f'{QUEUE(name=f"{name}_hailofilter_q", leaky=internal_leaky)} ! '
             f'hailofilter name={name}_hailofilter so-path={post_process_so} {config_str} {function_name_str} qos=false ! '
         )
 
-    inference_pipeline += f'{QUEUE(name=f"{name}_output_q")} '
+    inference_pipeline += f'{QUEUE(name=f"{name}_output_q", leaky=internal_leaky)} '
 
     return inference_pipeline
 
@@ -228,7 +262,13 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=2, name='
 
     Args:
         inner_pipeline (str): The inner pipeline string to be wrapped.
-        bypass_max_size_buffers (int, optional): The maximum number of buffers for the bypass queue. Defaults to 20.
+        bypass_max_size_buffers (int, optional): The maximum number of buffers for the bypass queue. Defaults to 2.
+            This queue MUST be non-leaky: hailoaggregator pairs sink_0 (bypass) with sink_1 (inference)
+            by buffer; if a leaky queue drops the bypass buffer the aggregator is waiting for, the two
+            streams desync and the aggregator stops emitting forever. With leaky=no, hitting the cap
+            backpressures the cropper, which backpressures the input queue (which is leaky=downstream
+            and sheds the oldest camera frame instead). Worst-case added latency is
+            (bypass_max_size_buffers - 1) * frame_interval — keep this number small for low latency.
         name (str, optional): The prefix name for the pipeline elements. Defaults to 'inference_wrapper'.
 
     Returns:
@@ -243,7 +283,7 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=2, name='
         f'{QUEUE(name=f"{name}_input_q")} ! '
         f'hailocropper name={name}_crop so-path={whole_buffer_crop_so} function-name=create_crops use-letterbox=true resize-method=inter-area internal-offset=true '
         f'hailoaggregator name={name}_agg '
-        f'{name}_crop. ! {QUEUE(max_size_buffers=bypass_max_size_buffers, name=f"{name}_bypass_q")} ! {name}_agg.sink_0 '
+        f'{name}_crop. ! {QUEUE(max_size_buffers=bypass_max_size_buffers, leaky="no", name=f"{name}_bypass_q")} ! {name}_agg.sink_0 '
         f'{name}_crop. ! {inner_pipeline} ! {name}_agg.sink_1 '
         f'{name}_agg. ! {QUEUE(name=f"{name}_output_q")} '
     )

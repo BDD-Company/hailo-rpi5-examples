@@ -139,19 +139,25 @@ def make_debug_info_dict(frame_id, telemetry_dict : dict, frame_metadata):
         'captured at': frame_metadata.capture_timestamp_ns,
         'detection delay': detection_delay
     }
-    result['state'] = telemetry_dict.get('landed_state', '')
+    result['state'] = f"{telemetry_dict.get('landed_state', '')} == {telemetry_dict.get('flight_mode', '')}"
 
     return result
 
 
-def draw_detection(frame, detection : Detection, color, line_thickness = 1):
+def draw_detection(frame, detection : Detection, color, special_point = None, line_thickness = 1):
     frame_size = XY(frame.shape[1], frame.shape[0])
     bbox = detection.bbox.multiplied_by_XY(frame_size)
     # bbox
     draw_rect(frame, bbox, color, line_thickness=line_thickness)
 
     # object center
-    circle_size = max(1, min(bbox.height, detection.bbox.width) / 4)
+    circle_size = 1 #int(max(1, min(bbox.height, bbox.width) / 25))
+    # cv2.circle(frame, bbox.center.to_tuple(to = int), circle_size, color, line_thickness, cv2.FILLED)
+
+    if special_point is not None:
+        special_point = special_point.multiplied_by_XY(frame_size)
+        cv2.circle(frame, special_point.to_tuple(to = int), circle_size + 3, color, int(line_thickness/2), cv2.LINE_AA)
+
     cv2.circle(frame, bbox.center.to_tuple(to = int), circle_size, color, line_thickness, cv2.FILLED)
 
     # confidence label
@@ -250,6 +256,8 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
 
     detections : Detections = detection_dict.get('detections', None)
     selected : Detection|None = detection_dict.get('selected', None)
+    selected_aim_point : XY|None = detection_dict.get('selected_aim_point', None)
+
     move_command : MoveCommand | None = detection_dict.get('move_command', None)
     telemetry : dict | None = detection_dict.get('telemetry', {})
     predicted_pos : XY | None = detection_dict.get('selected_detection_projected_pos', None)
@@ -369,13 +377,14 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
 
 
     for detection in detections.detections:
-        draw_detection(frame, detection, DETECTED_OBJECT_COLOR, 1)
+        draw_detection(frame, detection, DETECTED_OBJECT_COLOR, line_thickness=1)
 
     if selected is not None:
-        draw_detection(frame, selected, SELECTED_OBJECT_COLOR, 2)
+        draw_detection(frame, selected, SELECTED_OBJECT_COLOR, special_point=selected_aim_point, line_thickness=2)
 
     if predicted_pos is not None and selected is not None:
-        draw_predicted_pos(frame, predicted_pos, selected.bbox.center, TARGET_COLOR, 1, aim_point=aim_point)
+        prediceted_from = selected_aim_point if selected_aim_point else selected.bbox.center
+        draw_predicted_pos(frame, predicted_pos, prediceted_from, TARGET_COLOR, 1, aim_point=aim_point)
 
     if move_goal is not None:
         draw_move_goal(frame, move_goal, TARGET_COLOR, 1, aim_point=aim_point)
@@ -606,6 +615,7 @@ if __name__ == '__main__':
             output_queue.put({
                 'detections': d,
                 'selected' : selected,
+                'selected_aim_point': selected.bbox.center + XY(0.01, 0.01) if selected else None,
                 # 'move_command': move_command,
                 'telemetry' : telemetry,
                 'selected_detection_projected_pos' : selected_detection_projected_pos,

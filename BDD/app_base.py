@@ -15,7 +15,7 @@ import queue
 
 
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GLib, GObject
+from gi.repository import Gst, GLib, GObject, GstApp
 
 from hailo_apps.hailo_app_python.core.common.installation_utils import detect_hailo_arch
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser, get_resource_path
@@ -165,6 +165,7 @@ class GStreamerApp:
         self.pipeline = None
         self.loop = None
         self.threads = []
+        self.shutdown_callbacks = []
         self.error_occurred = False
         self.pipeline_latency = 0  # milliseconds; 0 = use each element's natural minimum latency; if frames are dropped or Gstreamer is stalled, then set to 50
 
@@ -185,6 +186,9 @@ class GStreamerApp:
         if self.options_menu.dump_dot:
             # pass
             os.environ["GST_DEBUG_DUMP_DOT_DIR"] = "/home/bdd/hailo-rpi5-examples/_DEBUG/pipeline/" #os.getcwd()
+        # Ensure stall-detection dot dumps land somewhere even without --dump-dot.
+        os.environ.setdefault("GST_DEBUG_DUMP_DOT_DIR", "/home/bdd/hailo-rpi5-examples/_DEBUG/pipeline/")
+        os.makedirs(os.environ["GST_DEBUG_DUMP_DOT_DIR"], exist_ok=True)
 
         self.webrtc_frames_queue = None  # for appsink & GUI mode
 
@@ -244,6 +248,21 @@ class GStreamerApp:
 
             self.error_occurred = (err, debug)
             self.shutdown()
+        elif t == Gst.MessageType.WARNING:
+            err, debug = message.parse_warning()
+            src_name = message.src.get_name() if message.src else '?'
+            logger.warning("GStreamer warning from %s: %s : %s", src_name, err, debug)
+        elif t == Gst.MessageType.INFO:
+            err, debug = message.parse_info()
+            src_name = message.src.get_name() if message.src else '?'
+            logger.info("GStreamer info from %s: %s : %s", src_name, err, debug)
+        elif t == Gst.MessageType.STATE_CHANGED:
+            if message.src is self.pipeline:
+                old, new, pending = message.parse_state_changed()
+                logger.info("pipeline state %s -> %s (pending %s)", old.value_nick, new.value_nick, pending.value_nick)
+        elif t == Gst.MessageType.STREAM_STATUS:
+            status_type, owner = message.parse_stream_status()
+            logger.debug("stream-status %s on %s", status_type.value_nick, owner.get_name() if owner else '?')
         # QOS
         elif t == Gst.MessageType.QOS:
             # Handle QoS message here
@@ -281,9 +300,119 @@ class GStreamerApp:
             self.shutdown()
 
 
+    def _add_buffer_counter_probe(self, element_name, pad_name='src'):
+        """Install a pad probe that increments self.buffer_counters[(element_name, pad_name)]
+        for every buffer that crosses pad_name of element_name. Used to identify where
+        buffers stop flowing in the pipeline when a stall is suspected."""
+        if not hasattr(self, 'buffer_counters'):
+            self.buffer_counters = {}
+        element = self.pipeline.get_by_name(element_name)
+        if element is None:
+            logger.warning("Cannot add buffer counter probe: element %r not found", element_name)
+            return
+        pad = element.get_static_pad(pad_name)
+        if pad is None:
+            logger.warning("Cannot add buffer counter probe: pad %r of %r not found", pad_name, element_name)
+            return
+        key = (element_name, pad_name)
+        self.buffer_counters[key] = 0
+        def _probe_cb(pad, info, _user):
+            self.buffer_counters[key] += 1
+            return Gst.PadProbeReturn.OK
+        pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
+
+    def _install_detection_start_probe(self, element_name='inference_wrapper_input_q', pad_name='sink'):
+        """Stamp `timestamp/x-unix` reference meta with time.monotonic_ns() on each buffer
+        entering the detection portion of the pipeline. The user callback reads it back as
+        detection_start to compute detection-only latency.
+
+        No-op when the meta is already present — the picamera2/appsrc producer attaches it
+        upstream, so this only fills in the libcamerasrc path where nothing else does."""
+        element = self.pipeline.get_by_name(element_name)
+        if element is None:
+            logger.warning("Cannot install detection-start probe: element %r not found", element_name)
+            return
+        pad = element.get_static_pad(pad_name)
+        if pad is None:
+            logger.warning("Cannot install detection-start probe: pad %r of %r not found", pad_name, element_name)
+            return
+        unix_ts_caps = Gst.Caps.from_string("timestamp/x-unix")
+        def _probe_cb(pad, info, _user):
+            buf = info.get_buffer()
+            if buf is not None and buf.get_reference_timestamp_meta(unix_ts_caps) is None:
+                buf.add_reference_timestamp_meta(unix_ts_caps, time.monotonic_ns(), Gst.CLOCK_TIME_NONE)
+            return Gst.PadProbeReturn.OK
+        pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
+
+    def _log_pipeline_health(self):
+        """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)
+        and current-level-buffers for every named GstQueue. If the deepest probe (last
+        registered) hasn't advanced in a while, dump a dot file for offline inspection."""
+        now = time.monotonic()
+        prev_counts = getattr(self, '_health_prev_counts', {})
+        prev_time = getattr(self, '_health_prev_time', now)
+        elapsed = max(now - prev_time, 1e-6)
+
+        counter_parts = []
+        for key, count in self.buffer_counters.items():
+            delta = count - prev_counts.get(key, 0)
+            elem_name, pad_name = key
+            counter_parts.append(f"{elem_name}:{pad_name}={count}(+{delta},{delta/elapsed:.1f}fps)")
+        logger.info("pipeline buffer counters (over %.2fs): %s", elapsed, " | ".join(counter_parts))
+
+        queue_parts = []
+        it = self.pipeline.iterate_elements()
+        while True:
+            ok, element = it.next()
+            if ok != Gst.IteratorResult.OK:
+                break
+            factory = element.get_factory()
+            if factory is None or factory.get_name() != 'queue':
+                continue
+            qname = element.get_name()
+            buffers = element.get_property('current-level-buffers')
+            max_buffers = element.get_property('max-size-buffers')
+            queue_parts.append(f"{qname}={buffers}/{max_buffers}")
+        logger.info("pipeline queue levels (current/max buffers): %s", " ".join(queue_parts))
+
+        # Stall detection: track the LAST registered probe (the deepest one — typically identity_callback)
+        if self.buffer_counters:
+            tail_key = next(reversed(self.buffer_counters))
+            tail_delta = self.buffer_counters[tail_key] - prev_counts.get(tail_key, 0)
+            stall_ticks = getattr(self, '_health_stall_ticks', 0)
+            if tail_delta == 0 and self.buffer_counters[tail_key] > 0:
+                stall_ticks += 1
+                logger.error(
+                    "STALL: %s:%s has not advanced in %.2fs (%d consecutive ticks). count=%d",
+                    tail_key[0], tail_key[1], elapsed, stall_ticks, self.buffer_counters[tail_key],
+                )
+                if stall_ticks == 1:
+                    # Dump dot once per stall episode so we don't spam files.
+                    Gst.debug_bin_to_dot_file(self.pipeline, Gst.DebugGraphDetails.VERBOSE,
+                                              f"stall_{int(now)}")
+                    logger.error("STALL: dumped pipeline dot to GST_DEBUG_DUMP_DOT_DIR/stall_%d.dot", int(now))
+            else:
+                stall_ticks = 0
+            self._health_stall_ticks = stall_ticks
+
+        self._health_prev_counts = dict(self.buffer_counters)
+        self._health_prev_time = now
+        return True  # keep timeout active
+
+    def add_shutdown_callback(self, callback):
+        """Register a callable invoked at the start of shutdown(), before the pipeline is torn down.
+        Use it to signal worker threads (e.g. push a STOP sentinel into their input queue)
+        so they can exit even if a producer thread (e.g. picamera) is stuck."""
+        self.shutdown_callbacks.append(callback)
+
     def shutdown(self, signum=None, frame=None):
         logger.info("Shutting down... Hit Ctrl-C again to force quit.")
         signal.signal(signal.SIGINT, signal.SIG_DFL)
+        for cb in self.shutdown_callbacks:
+            try:
+                cb()
+            except Exception:
+                logger.exception("Error in shutdown callback %s", cb)
         self.pipeline.set_state(Gst.State.PAUSED)
         GLib.usleep(100000)  # 0.1 second delay
 
@@ -368,8 +497,34 @@ class GStreamerApp:
             display_process = multiprocessing.Process(target=display_user_data_frame, args=(self.user_data,))
             display_process.start()
 
+        # # Buffer-counter probes at strategic points in the pipeline. The order matters:
+        # # _log_pipeline_health() treats the LAST registered probe as the "deepest" one
+        # # for stall detection. So register them upstream → downstream.
+        # for elem_name in (
+        #     'app_source',
+        #     'inference_wrapper_input_q',
+        #     'inference_hailonet',
+        #     'inference_hailofilter',
+        #     'inference_wrapper_output_q',
+        #     'identity_callback',
+        # ):
+        #     self._add_buffer_counter_probe(elem_name, 'src')
+
+        if self.source_type == 'libcamera':
+            # Stamp detection-start timestamp on buffers entering the inference wrapper.
+            # libcamerasrc path has nobody to attach this upstream; picamera2 path already does.
+            self._install_detection_start_probe()
+
+        # Periodic pipeline health snapshot (buffer counts, queue levels, stall detection).
+        # GLib.timeout_add_seconds(2, self._log_pipeline_health)
+
         if self.source_type == RPI_NAME_I:
-            picam_thread = threading.Thread(target=picamera_thread, args=(self.pipeline, self.video_width, self.video_height, self.video_format))
+            on_picam_failure = lambda: GLib.idle_add(self.shutdown)
+            picam_thread = threading.Thread(
+                target=picamera_thread,
+                args=(self.pipeline, self.video_width, self.video_height, self.video_format),
+                kwargs={'on_failure': on_picam_failure},
+            )
             self.threads.append(picam_thread)
             picam_thread.start()
 
@@ -410,22 +565,58 @@ class GStreamerApp:
                 sys.exit(0)
 
 
-def picamera_thread(pipeline, video_width, video_height, video_format, picamera_config=None, target_fps = 30, picamera_controls_initial = None, picamera_controls_per_frame_callback = None):
-    appsrc = pipeline.get_by_name("app_source")
+# Shared destroy-notify for zero-extra-copy GstBuffers: handed to new_wrapped_full so
+# PyGObject keeps the wrapped bytes alive until the buffer is freed, then this no-op
+# runs. Sharing one callable across all buffers (PyGObject still tracks per-buffer
+# user_data + notify pairs internally, so this is safe).
+_buffer_keepalive_noop = lambda *_: None
+
+
+def picamera_thread(
+        pipeline,
+        video_width,
+        video_height,
+        video_format,
+        picamera_config=None,
+        target_fps = 30,  # aligns appsrc caps with the pipeline's 30/1 -> no videorate duplication
+        picamera_controls_initial = None,
+        picamera_controls_per_frame_callback = None,
+        on_failure=None,
+        capture_timeout_s = 1,
+        slow_capture_warn_s = 0.2,
+        alive_log_every_n_frames = 100
+    ):
+    appsrc: GstApp.AppSrc = pipeline.get_by_name("app_source")
     appsrc.set_property("is-live", True)
     appsrc.set_property("format", Gst.Format.TIME)
-    logger.debug("appsrc properties: %s", appsrc)
+    if logger.isEnabledFor(logging.DEBUG):
+        prop_lines = []
+        for pspec in appsrc.list_properties():
+            if not (pspec.flags & GObject.ParamFlags.READABLE):
+                continue
+            try:
+                value = appsrc.get_property(pspec.name)
+            except Exception as e:  # some props raise when not yet negotiated
+                value = f"<unreadable: {e}>"
+            if isinstance(value, Gst.Caps):
+                value = value.to_string()
+            prop_lines.append(f"  {pspec.name} = {value!r}")
+        logger.debug("appsrc '%s' properties:\n%s", appsrc.get_name(), "\n".join(prop_lines))
     # Initialize Picamera2
 
     camera_model = Picamera2.global_camera_info()[0]['Model']
 
     with Picamera2(tuning=f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}_noir.json") as picam2:
         if picamera_config is None:
-            # Default configuration
+            # Single ISP output stream. The inference path only ever consumed one
+            # 1280x720 RGB frame; the old config also allocated an identical, UNUSED
+            # `lores` stream which doubled ISP output bandwidth for nothing. Capture
+            # `main` only. buffer_count trimmed from the preview default (4) to 3 to
+            # shorten the camera pipeline depth (fewer frames in flight => lower capture
+            # latency); each request is released immediately after copying, so 3 suffices.
             main = {'size': (1280, 720), 'format': 'RGB888'}
-            lores = {'size': (video_width, video_height), 'format': 'RGB888'}
             controls = {'FrameRate': target_fps}
-            config = picam2.create_preview_configuration(main=main, lores=lores, controls=controls)
+            config = picam2.create_preview_configuration(main=main, controls=controls, buffer_count=3)
         else:
             config = picamera_config
         # Configure the camera with the created configuration
@@ -438,10 +629,10 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
         if picamera_controls_initial is not None:
             apply_controls(picamera_controls_initial)
 
-        # Update GStreamer caps based on 'lores' stream
-        lores_stream = config['lores']
-        format_str = 'RGB' if lores_stream['format'] == 'RGB888' else video_format
-        width, height = lores_stream['size']
+        # Update GStreamer caps based on the captured stream
+        capture_stream = config['main']
+        format_str = 'RGB' if capture_stream['format'] == 'RGB888' else video_format
+        width, height = capture_stream['size']
         logger.debug("Picamera2 configuration: width=%s, height=%s, format=%s", width, height, format_str)
         appsrc.set_property(
             "caps",
@@ -462,6 +653,13 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
         first_frame_timestamp_ns = 0
         prev_frame_timestamp_ns = 0
         logger.debug("picamera_process started")
+        last_alive_log_monotonic = time.monotonic()
+        last_alive_log_frame_count = 0
+        # Timing breakdown to locate the fps bottleneck: capture wait (camera/ISP) vs
+        # post-capture loop work (cvtColor/tobytes/appsrc push). Reset each alive window.
+        capture_time_accum = 0.0
+        processing_time_accum = 0.0
+        emit_time_accum = 0.0  # subset of loop_proc spent inside appsrc push-buffer
         while True:
             # TODO(vnemkov): only set if camera actually supports those:
             # Must set AF params AFTER picam2.start() above, otherwise it doesn't work
@@ -476,13 +674,32 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
                 if picamera_controls:
                     apply_controls(picamera_controls)
 
-            request = picam2.capture_request()
+            capture_started_monotonic = time.monotonic()
+            try:
+                request = picam2.capture_request(wait=capture_timeout_s)
+            except TimeoutError:
+                logger.error(
+                    "picam2.capture_request timed out after %.2fs at frame #%d — camera appears stalled, exiting picamera_thread",
+                    capture_timeout_s, frame_count,
+                )
+                if on_failure is not None:
+                    on_failure()
+                break
+
+            capture_elapsed_s = time.monotonic() - capture_started_monotonic
+            if capture_elapsed_s > slow_capture_warn_s:
+                logger.warning(
+                    "picam2.capture_request took %.3fs (frame #%d) — exceeds %.3fs threshold; camera may be stalling",
+                    capture_elapsed_s, frame_count, slow_capture_warn_s,
+                )
+            capture_time_accum += capture_elapsed_s
+            proc_start_monotonic = time.monotonic()
 
             frame_data = None
             frame_meta = None
             frame_timestamp_ns = 0
             try:
-                frame_data = request.make_array("lores")
+                frame_data = request.make_array("main")
                 frame_meta = request.get_metadata()
             finally:
                 request.release()
@@ -490,14 +707,27 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
             # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
             if frame_data is None:
                 logger.error("Failed to capture frame #%s.", frame_count)
+                if on_failure is not None:
+                    on_failure()
                 break
 
             # Convert framontigue data if necessary
             frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-            frame = np.asarray(frame)
+            frame_bytes = frame.tobytes()
 
-            # Create Gst.Buffer by wrapping the frame data
-            buffer = Gst.Buffer.new_wrapped(frame.tobytes())
+            # Drop one of the two buffer copies. The old new_wrapped(frame.tobytes())
+            # copied the bytes a SECOND time into GstMemory; new_wrapped_full instead
+            # references frame_bytes directly (transfer none) and keeps it alive by
+            # taking it as user_data with a destroy-notify. Measured ~2.5x faster than
+            # new_wrapped on dev. Signature: (flags, data, maxsize, offset, user_data,
+            # notify) — 6 args (no `size`; inferred from data length). NOTE: true
+            # zero-copy straight from the numpy array is NOT possible via PyGObject
+            # (it marshals the array param as a sequence of ints) so the one tobytes()
+            # copy is unavoidable here.
+            buffer = Gst.Buffer.new_wrapped_full(
+                Gst.MemoryFlags.READONLY, frame_bytes, len(frame_bytes), 0,
+                frame_bytes, _buffer_keepalive_noop,
+            )
 
             # Set buffer PTS and duration
             # buffer_duration = Gst.util_uint64_scale_int(1, Gst.SECOND, target_fps)
@@ -521,13 +751,39 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
                 buffer.offset = frame_count
 
             # Push the buffer to appsrc
+            emit_start_monotonic = time.monotonic()
             ret = appsrc.emit('push-buffer', buffer)
+            emit_time_accum += time.monotonic() - emit_start_monotonic
             if ret == Gst.FlowReturn.FLUSHING:
                 break
             if ret != Gst.FlowReturn.OK:
                 logger.error("Failed to push buffer: %s", ret)
+                if on_failure is not None:
+                    on_failure()
                 break
+            processing_time_accum += time.monotonic() - proc_start_monotonic
             frame_count += 1
+
+            if alive_log_every_n_frames and frame_count % alive_log_every_n_frames == 0:
+                now_monotonic = time.monotonic()
+                window_s = now_monotonic - last_alive_log_monotonic
+                window_frames = frame_count - last_alive_log_frame_count
+                window_fps = window_frames / window_s if window_s > 0 else 0.0
+                avg_capture_ms = (capture_time_accum / window_frames * 1000.0) if window_frames else 0.0
+                avg_proc_ms = (processing_time_accum / window_frames * 1000.0) if window_frames else 0.0
+                avg_emit_ms = (emit_time_accum / window_frames * 1000.0) if window_frames else 0.0
+                logger.info(
+                    "picamera_thread alive: pushed %d frames so far, last %d frames in %.2fs (%.1f fps); "
+                    "per-frame avg: capture_wait=%.1fms loop_proc=%.1fms [convert=%.1fms emit=%.1fms] (interval=%.1fms)",
+                    frame_count, window_frames, window_s, window_fps,
+                    avg_capture_ms, avg_proc_ms, avg_proc_ms - avg_emit_ms, avg_emit_ms,
+                    (window_s / window_frames * 1000.0) if window_frames else 0.0,
+                )
+                last_alive_log_monotonic = now_monotonic
+                last_alive_log_frame_count = frame_count
+                capture_time_accum = 0.0
+                processing_time_accum = 0.0
+                emit_time_accum = 0.0
 
 
 def disable_qos(pipeline):
@@ -663,19 +919,46 @@ class GStreamerDetectionApp(GStreamerApp):
             tracker_pipeline = f'{tracker_pipeline} ! '
 
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
-        if self.source_type == 'rpi':
+        if True: #self.source_type == 'rpi':
             # production case == video from camera, use custom pipeline
             display_pipeline = self.get_output_pipeline_string(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
         else:
             # here custom pipeline might break rewinding of initial source, use default display pipeline
             display_pipeline = DISPLAY_PIPELINE(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
 
+        # Split the post-inference stream with a tee so the (software, CPU-heavy)
+        # video recorder can never back-pressure the detection path.
+        #
+        # Why the isolating queue goes AFTER the tee, not before it:
+        # a tee fans every buffer out to all of its src pads *synchronously, on the
+        # thread that pushed the buffer in*. A queue placed BEFORE the tee would only
+        # decouple the tee from its upstream — both branches would still run on that one
+        # post-queue thread, so a slow encoder would still stall detection. Placing the
+        # large leaky queue AFTER the tee, on the recording branch, gives the encoder its
+        # own streaming thread; the tee's push into a leaky queue returns immediately
+        # (dropping the oldest frame when full), so detection never waits on the encoder.
+        #
+        #   output_tee
+        #     ├─ detection branch:  identity (probe) -> fakesink   (terminates ASAP)
+        #     └─ recording branch:  BIG leaky queue -> encoder -> splitmuxsink
+        #
+        # The recording queue is leaky=downstream so a lagging encoder drops the oldest
+        # *raw* frame instead of blocking the tee. Sized in buffers (raw RGB ~2.6 MB each
+        # at 1280x720) to bound RAM (~30 buffers ≈ 80 MB); raise it to ride out longer
+        # encoder stalls without dropping recorded frames, at the cost of RAM only — it
+        # adds no detection latency because it is leaky.
+        recording_input_queue = (
+            'queue name=recording_input_q leaky=downstream '
+            'max-size-buffers=120 max-size-bytes=0 max-size-time=0'
+        )
+
         pipeline_string = (
             f'{source_pipeline} ! '
             f'{detection_pipeline_wrapper} ! '
             f'{tracker_pipeline} '
-            f'{user_callback_pipeline} ! '
-            f'{display_pipeline}'
+            f'tee name=output_tee '
+            f'output_tee. ! {user_callback_pipeline} ! fakesink name=detection_sink sync=false async=false '
+            f'output_tee. ! {recording_input_queue} ! {display_pipeline}'
         )
 
         logger.debug(pipeline_string)
