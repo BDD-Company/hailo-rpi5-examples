@@ -1,15 +1,16 @@
 """Host-runnable tests for config parsing/validation (no hailo/mavsdk needed)."""
 
 import dataclasses
+import inspect
 import types
 from pathlib import Path
-from typing import Annotated, Union, get_args, get_origin, get_type_hints
+from typing import Union, get_args, get_origin
 
 import pytest
 
 from config import (
     Config, ByteTrackSection, CameraSection, DroneSection,
-    Range, Choices,
+    Range, Choices, _Constraint,
     ConfigError, parse_config, load_config,
 )
 from helpers import XY
@@ -165,21 +166,20 @@ def test_errors_annotated_with_file_line_numbers(tmp_path):
 # later is automatically validated (correct type-checking, bound-checking and
 # unknown-key handling) without touching this file.
 # ---------------------------------------------------------------------------
-def _unwrap(hint):
-    """Strip Annotated/Optional, returning (base_type, [constraints])."""
-    consts = []
-    if get_origin(hint) is Annotated:
-        args = get_args(hint)
-        hint, consts = args[0], list(args[1:])
-    if get_origin(hint) in (Union, types.UnionType):
-        non_none = [a for a in get_args(hint) if a is not type(None)]
+def _unwrap(ann):
+    """Split a raw field annotation into (base_type, [constraints]).
+
+    A constraint instance carries its own base type; Optional is unwrapped.
+    """
+    if isinstance(ann, _Constraint):
+        base, consts = ann.base, [ann]
+    else:
+        base, consts = ann, []
+    if get_origin(base) in (Union, types.UnionType):
+        non_none = [a for a in get_args(base) if a is not type(None)]
         if len(non_none) == 1:
-            hint = non_none[0]
-            if get_origin(hint) is Annotated:
-                args = get_args(hint)
-                hint, extra = args[0], list(args[1:])
-                consts += extra
-    return hint, consts
+            base = non_none[0]
+    return base, consts
 
 
 def _list_item_type(base):
@@ -195,7 +195,7 @@ def iter_leaf_fields(cls, prefix=()):
     path_segments is a tuple of ('key', name) / ('list',) steps so we can build
     a minimal nested dict that sets exactly one deep field.
     """
-    hints = get_type_hints(cls, include_extras=True)
+    hints = inspect.get_annotations(cls)
     for f in dataclasses.fields(cls):
         if f.metadata.get('runtime'):
             continue
@@ -218,7 +218,7 @@ def all_dataclasses():
         if cls in seen:
             continue
         seen.add(cls)
-        hints = get_type_hints(cls, include_extras=True)
+        hints = inspect.get_annotations(cls)
         for f in dataclasses.fields(cls):
             base, _ = _unwrap(hints[f.name])
             if dataclasses.is_dataclass(base) and base is not XY:
