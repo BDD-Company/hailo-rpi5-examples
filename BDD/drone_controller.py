@@ -9,6 +9,7 @@ from queue import Empty, Queue
 from helpers import XY
 
 from drone import DroneMover
+from config import Config
 from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
 # from telemetry_position import PositionNED, VelocityNED
@@ -204,7 +205,7 @@ async def drone_controlling_thread_async(
         drone_connection_string,
         drone_config,
         detections_queue,
-        control_config = {},
+        control_config: Config = None,
         output_queue = None,
         signal_event_when_ready = None,
         camera_switcher : CameraSwitcher | None = None
@@ -215,53 +216,56 @@ async def drone_controlling_thread_async(
     global global_logger
     logger = global_logger
 
+    if control_config is None:
+        control_config = Config()
+
     START_TIME_MS = time.monotonic_ns() / 1000_000
 
     global DEBUG
-    DEBUG                = control_config.pop('DEBUG', False)
-    DEBUG_TELEMETRY_DICT = control_config.pop('debug_telemetry_dict', None)
+    DEBUG                = control_config.DEBUG
+    DEBUG_TELEMETRY_DICT = control_config.debug_telemetry_dict
     logger.debug("!!!!! DEBUG state: %s", DEBUG)
 
-    CONFIDENCE_MIN  = control_config.pop('confidence_min', 0.1)
+    CONFIDENCE_MIN  = control_config.confidence_min
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
 
-    THRUST_MAX      = control_config.pop('thrust_max', 0.5)
-    THRUST_MIN      = control_config.pop('thrust_min', 0.4)
-    THRUST_CRUISE   = control_config.pop('thrust_cruise', 0.4)
-    THRUST_TAKEOFF  = control_config.pop('thrust_takeoff', 0.5)
-    THRUST_HOVER    = control_config.pop('thrust_hover', 0.5)
+    THRUST_MAX      = control_config.thrust_max
+    THRUST_MIN      = control_config.thrust_min
+    THRUST_CRUISE   = control_config.thrust_cruise
+    THRUST_TAKEOFF  = control_config.thrust_takeoff
+    THRUST_HOVER    = control_config.thrust_hover
 
-    THRUST_DYNAMIC  = control_config.pop('thrust_dynamic', False)
+    THRUST_DYNAMIC  = control_config.thrust_dynamic
 
-    THRUST_PROPORTIONAL_TO_DISTANCE                   = control_config.pop('thrust_proportional_to_distance', False)
-    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF        = control_config.pop('thrust_proportional_to_distance_near_coeff', 1.0)
-    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF      = control_config.pop('thrust_proportional_to_distance_medium_coeff', 1.0)
-    THRUST_PROPORTIONAL_TO_DISTANCE_FAR_COEFF         = control_config.pop('thrust_proportional_to_distance_far_coeff', 1.0)
-    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M = control_config.pop('thrust_proportional_to_distance_medium_distance_m', 15)
-    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M   = control_config.pop('thrust_proportional_to_distance_near_distance_m', 7)
+    THRUST_PROPORTIONAL_TO_DISTANCE                   = control_config.thrust_proportional_to_distance
+    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF        = control_config.thrust_proportional_to_distance_near_coeff
+    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF      = control_config.thrust_proportional_to_distance_medium_coeff
+    THRUST_PROPORTIONAL_TO_DISTANCE_FAR_COEFF         = control_config.thrust_proportional_to_distance_far_coeff
+    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M = control_config.thrust_proportional_to_distance_medium_distance_m
+    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M   = control_config.thrust_proportional_to_distance_near_distance_m
 
 
-    FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
-    TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
+    FADE_COEFF      = control_config.target_lost_fade_per_frame
+    TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.target_estimator_clear_history_after_target_lost_frames
 
-    PD_COEFF_P                      = to_XY(control_config.pop('pd_coeff_p', XY(1, 1)))
-    PD_COEFF_D                      = control_config.pop('pd_coeff_d', 0)
+    PD_COEFF_P                      = to_XY(control_config.pd_coeff_p)
+    PD_COEFF_D                      = control_config.pd_coeff_d
 
-    PD_COEFF_P_DYNAMIC               = control_config.pop('pd_coeff_p_dynamic', False)
-    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pop('pd_coeff_p_dynamic_use_piecewise', False)
-    PD_COEFF_P_MIN_TARGET_SIZE       = control_config.pop('pd_coeff_p_dynamic_min_target_size', 0.003)
-    PD_COEFF_P_MAX_TARGET_SIZE       = control_config.pop('pd_coeff_p_dynamic_max_target_size', 0.005)
-    PD_COEFF_P_DYNAMIC_MIN           = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
-    PD_COEFF_P_DYNAMIC_MAX           = control_config.pop('pd_coeff_p_dynamic_max', 2)
+    PD_COEFF_P_DYNAMIC               = control_config.pd_coeff_p_dynamic
+    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pd_coeff_p_dynamic_use_piecewise
+    PD_COEFF_P_MIN_TARGET_SIZE       = control_config.pd_coeff_p_dynamic_min_target_size
+    PD_COEFF_P_MAX_TARGET_SIZE       = control_config.pd_coeff_p_dynamic_max_target_size
+    PD_COEFF_P_DYNAMIC_MIN           = control_config.pd_coeff_p_dynamic_min
+    PD_COEFF_P_DYNAMIC_MAX           = control_config.pd_coeff_p_dynamic_max
 
-    PD_COEFF_P_SAFE_MIN              = to_XY(control_config.pop('pd_coeff_p_safe_min', XY(0.5, 0.5)))
-    PD_COEFF_P_MIN                   = to_XY(control_config.pop('pd_coeff_p_min', XY(0.5, 0.5)))
-    PD_COEFF_P_MAX                   = to_XY(control_config.pop('pd_coeff_p_max', XY(5, 5)))
+    PD_COEFF_P_SAFE_MIN              = to_XY(control_config.pd_coeff_p_safe_min)
+    PD_COEFF_P_MIN                   = to_XY(control_config.pd_coeff_p_min)
+    PD_COEFF_P_MAX                   = to_XY(control_config.pd_coeff_p_max)
 
-    OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = control_config.pop('optical_methods_to_refine_target_size_and_center', False)
-    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = control_config.pop('adjust_aim_point_at_edge_of_frame', False)
-    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD = control_config.pop('adjust_aim_point_at_edge_of_frame_threshold', 0.01)
-    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_MAX_SIZE = control_config.pop('adjust_aim_point_at_edge_of_frame_max_size', 0.3)
+    OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = control_config.optical_methods_to_refine_target_size_and_center
+    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = control_config.adjust_aim_point_at_edge_of_frame
+    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD = control_config.adjust_aim_point_at_edge_of_frame_threshold
+    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_MAX_SIZE = control_config.adjust_aim_point_at_edge_of_frame_max_size
 
 
     # Normalized target size thresholds for dynamic P profile:
@@ -270,14 +274,14 @@ async def drone_controlling_thread_async(
     #
     # Below STAGE_1_THRESHOLD:
     #   target is considered small / far, P grows quickly from minimum.
-    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pop('pd_coeff_p_dynamic_stage_1_threshold', 0.2)
+    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pd_coeff_p_dynamic_stage_1_threshold
 
     # Between STAGE_1_THRESHOLD and STAGE_2_THRESHOLD:
     #   target is in the working mid-range, P continues growing up to maximum.
     # Above STAGE_2_THRESHOLD:
     #   target is considered large / near, P starts decreasing to avoid overshoot
     #   and overly aggressive control close to the target.
-    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pop('pd_coeff_p_dynamic_stage_2_threshold', 0.6)
+    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pd_coeff_p_dynamic_stage_2_threshold
 
 
     # Relative P ratios inside [PD_COEFF_P_MIN, PD_COEFF_P_MAX]:
@@ -285,21 +289,21 @@ async def drone_controlling_thread_async(
     # Ratio reached at STAGE_1_THRESHOLD.
     # Example: 0.60 means that by s = 0.2, P reaches 60% of the full range
     # between PD_COEFF_P_MIN and PD_COEFF_P_MAX.
-    PD_COEFF_P_STAGE_1_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_1_ratio', 0.60)
+    PD_COEFF_P_STAGE_1_RATIO = control_config.pd_coeff_p_dynamic_stage_1_ratio
 
     # Ratio reached at STAGE_2_THRESHOLD.
     # Usually 1.00, meaning the maximum P is reached in the mid-range.
-    PD_COEFF_P_STAGE_2_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_2_ratio', 1.00)
+    PD_COEFF_P_STAGE_2_RATIO = control_config.pd_coeff_p_dynamic_stage_2_ratio
 
     # Ratio used when target is very large / very near (s -> 1.0).
     # This reduces P near the target to make control softer and reduce oscillation.
-    PD_COEFF_P_STAGE_3_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_3_ratio', 0.35)
+    PD_COEFF_P_STAGE_3_RATIO = control_config.pd_coeff_p_dynamic_stage_3_ratio
 
-    TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
+    TARGET_SIZE_M = control_config.target_size_m
     # Legacy / single-camera fallback. When camera_switcher is provided, FOV
     # is looked up per-frame from the matching CameraConfig instead, so two
     # cameras with different FOVs (wide vs tele) yield correct steering angles.
-    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = control_config.pop('frame_angular_size_deg', XY(120, 90))
+    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = control_config.frame_angular_size_deg
 
     def fov_for_camera(cam_id : int) -> XY:
         if camera_switcher is not None:
@@ -308,35 +312,35 @@ async def drone_controlling_thread_async(
                 return cfg.frame_angular_size_deg
         return FRAME_ANGLUAR_SIZE_DEG_DEFAULT
 
-    # INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
-    # INERTIA_CORRECTION_LIMITS : XY = control_config.pop('inertia_correction_limits', XY(1, 1))
-    # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
+    # INERTIA_CORRECTION_GAIN = control_config.inertia_correction_gain
+    # INERTIA_CORRECTION_LIMITS : XY = control_config.inertia_correction_limits
+    # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.inertia_correction_min_speed_ms
 
-    ESTIMATION_3D = control_config.pop('estimation_3d', None)
+    ESTIMATION_3D = control_config.estimation_3d
 
-    ESTIMATION_3D_METHOD = VelocityMethod(control_config.pop('estimation_3d_method', None))
-    ESTIMATION_3D_USE_INITIAL_VELOCITY         = control_config.pop('estimation_3d_use_initial_velocity', True)
+    ESTIMATION_3D_METHOD = VelocityMethod(control_config.estimation_3d_method)
+    ESTIMATION_3D_USE_INITIAL_VELOCITY         = control_config.estimation_3d_use_initial_velocity
 
-    ESTIMATION_LOOKAHEAD_FRAMES                = control_config.pop('estimation_lookahead_frames', 2)
-    ESTIMATION_LOOKAHEAD_DYNAMIC               = control_config.pop('estimation_lookahead_dynamic', False)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT          = control_config.pop('estimation_lookahead_dynamic_sqrt', True)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR        = control_config.pop('estimation_lookahead_dynamic_factor', 1)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MAX    = control_config.pop('estimation_lookahead_dynamic_frames_max', 8)
+    ESTIMATION_LOOKAHEAD_FRAMES                = control_config.estimation_lookahead_frames
+    ESTIMATION_LOOKAHEAD_DYNAMIC               = control_config.estimation_lookahead_dynamic
+    ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT          = control_config.estimation_lookahead_dynamic_sqrt
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR        = control_config.estimation_lookahead_dynamic_factor
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.estimation_lookahead_dynamic_frames_near
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.estimation_lookahead_dynamic_frames_medium
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.estimation_lookahead_dynamic_frames_far
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MAX    = control_config.estimation_lookahead_dynamic_frames_max
 
-    FOLLOW_TARGET_POSITION_NED                 = control_config.pop('follow_target_position_ned', False)
+    FOLLOW_TARGET_POSITION_NED                 = control_config.follow_target_position_ned
 
 
-    DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.pop('delay_takeof_until_n_detection_frames', 3)
+    DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.delay_takeof_until_n_detection_frames
 
-    BYTETRACK_TARGET_LOCK = control_config.pop('bytetrack_target_lock', True)
+    BYTETRACK_TARGET_LOCK = control_config.bytetrack.target_lock
 
-    AIM_POINT = control_config.pop('aim_point', XY(0.5, 0.5))
+    AIM_POINT = control_config.aim_point
     aim_point = AIM_POINT
 
-    SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
+    SAFE_TAKEOFF_PERIOD_NS = control_config.safe_takeoff_period_ns
     if FOLLOW_TARGET_POSITION_NED and not ESTIMATION_3D:
         logger.warning("follow_target_position_ned requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True
@@ -354,10 +358,7 @@ async def drone_controlling_thread_async(
     # Raw per-frame bbox size jitters enough to flap the switch near a
     # threshold; an EMA cuts that without much lag. alpha=0.3 → effective
     # window ~3-4 frames at the controller's loop rate.
-    CAMERA_SWITCH_SIZE_EMA_ALPHA = control_config.pop('camera_switch_size_ema_alpha', 0.3)
-
-    if len(control_config) > 0:
-        logger.warning("Unknown/unused config parameters: %s", control_config)
+    CAMERA_SWITCH_SIZE_EMA_ALPHA = control_config.camera_switch_size_ema_alpha
 
 
     distance_r = 0.1
