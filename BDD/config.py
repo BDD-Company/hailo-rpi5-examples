@@ -440,22 +440,75 @@ def _runtime_field(cls, name) -> bool:
     return False
 
 
-def parse_config(data: dict | None) -> Config:
-    """Validate a parsed-YAML mapping and return a Config, or raise ConfigError."""
+def _collect_node_lines(node, prefix: str, out: dict[str, int]) -> None:
+    """Walk a yaml.compose() node tree, recording 1-based file lines per key path."""
+    import yaml
+    if isinstance(node, yaml.MappingNode):
+        for key_node, value_node in node.value:
+            path = f"{prefix}.{key_node.value}" if prefix else str(key_node.value)
+            out[path] = key_node.start_mark.line + 1
+            _collect_node_lines(value_node, path, out)
+    elif isinstance(node, yaml.SequenceNode):
+        for i, item in enumerate(node.value):
+            path = f"{prefix}[{i}]"
+            out[path] = item.start_mark.line + 1
+            _collect_node_lines(item, path, out)
+
+
+def _line_for_path(path: str, line_map: dict[str, int]) -> int | None:
+    """Resolve an error path to a file line, falling back to the nearest parent.
+
+    Synthetic sub-paths that have no YAML node of their own (an XY component
+    like `aim_point.y`, or a list element's missing key) resolve to the line of
+    their closest enclosing key/element.
+    """
+    p = path
+    while p:
+        if p in line_map:
+            return line_map[p]
+        cut = max(p.rfind('.'), p.rfind('['))
+        if cut <= 0:
+            break
+        p = p[:cut]
+    return line_map.get(p)
+
+
+def _with_line_numbers(errors: list[str], line_map: dict[str, int], source: str) -> list[str]:
+    """Append `(<source> line N)` to each error using its leading path token."""
+    enriched = []
+    for err in errors:
+        path = err.split(":", 1)[0].strip()
+        line = _line_for_path(path, line_map) if path and path != "<root>" else None
+        enriched.append(f"{err} ({source} line {line})" if line else err)
+    return enriched
+
+
+def parse_config(data: dict | None, line_map: dict[str, int] | None = None,
+                 source: str = "config file") -> Config:
+    """Validate a parsed-YAML mapping and return a Config, or raise ConfigError.
+
+    If `line_map` (path -> file line) is supplied, every reported problem is
+    annotated with the offending line in `source`.
+    """
     errors: list[str] = []
     cfg = _parse_dataclass(Config, data or {}, "", errors)
     if errors:
-        raise ConfigError(errors)
+        raise ConfigError(_with_line_numbers(errors, line_map, source) if line_map else errors)
     return cfg
 
 
 def load_config(path: str | Path) -> Config:
-    """Read a YAML file and return a validated Config (raises ConfigError)."""
+    """Read a YAML file and return a validated Config (raises ConfigError).
+
+    Errors are reported in bulk and annotated with the offending file line.
+    """
     import yaml
-    with open(path, "r") as fh:
-        data = yaml.safe_load(fh)
+    text = Path(path).read_text()
+    data = yaml.safe_load(text)
     if data is None:
         data = {}
     if not isinstance(data, dict):
         raise ConfigError([f"<root>: top level must be a mapping, got {type(data).__name__}"])
-    return parse_config(data)
+    line_map: dict[str, int] = {}
+    _collect_node_lines(yaml.compose(text), "", line_map)
+    return parse_config(data, line_map, source=Path(path).name)

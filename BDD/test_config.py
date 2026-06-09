@@ -138,6 +138,28 @@ def test_optional_field_accepts_null_and_value():
     assert cfg.bytetrack.recovery_max_dist == 0.5
 
 
+def test_errors_annotated_with_file_line_numbers(tmp_path):
+    bad = tmp_path / "broken.yaml"
+    bad.write_text(
+        "confidence_min: 1.7\n"                       # line 1
+        "aim_point: [0.5, 1.5]\n"                     # line 2 (XY component -> this line)
+        "camera:\n"
+        "  cameras:\n"
+        "    - camera_id: 0\n"
+        "      frame_angular_size_deg: [400, 85]\n"   # line 6
+        "drone:\n"
+        "  config:\n"
+        "    bogus_key: 1\n"                          # line 9
+    )
+    with pytest.raises(ConfigError) as ei:
+        load_config(bad)
+    probs = ei.value.problems
+    assert any('confidence_min' in p and 'broken.yaml line 1' in p for p in probs)
+    assert any('aim_point.y' in p and 'broken.yaml line 2' in p for p in probs)
+    assert any('frame_angular_size_deg.x' in p and 'broken.yaml line 6' in p for p in probs)
+    assert any('bogus_key' in p and 'broken.yaml line 9' in p for p in probs)
+
+
 # ---------------------------------------------------------------------------
 # Introspection-driven tests. These walk the Config schema, so any field added
 # later is automatically validated (correct type-checking, bound-checking and
