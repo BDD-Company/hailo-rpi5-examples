@@ -29,6 +29,7 @@ from gi.repository import Gst, GLib
 from bytetrack import BYTETracker
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
+from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
@@ -64,6 +65,7 @@ class user_app_callback_class(app_callback_class):
 sensor_timestamp_caps = Gst.Caps.from_string("timestamp/x-picamera2-sensor")
 unix_timestamp_caps = Gst.Caps.from_string("timestamp/x-unix")
 frame_id_caps = Gst.Caps.from_string("frame-id/x-picamera2")
+camera_id_caps = Gst.Caps.from_string("camera-id/x-picamera2")
 
 
 def normalized_timestamp(ts):
@@ -98,7 +100,17 @@ def normalized_frame_id(buffer: Gst.Buffer, frame_meta) -> int:
     return time.monotonic_ns()
 
 
-seen_frames = deque(maxlen=10)
+# Per-camera dedup buffer: frame_id only needs to be unique per producing camera,
+# and two cameras can legitimately emit the same offset/PTS. Indexing by camera_id
+# keeps a wide-camera buffer from masking a tele-camera frame as "already seen".
+seen_frames_by_camera: dict[int, deque] = {}
+
+
+def _read_camera_id(buffer: Gst.Buffer) -> int:
+    meta = buffer.get_reference_timestamp_meta(camera_id_caps)
+    if meta is None:
+        return DEFAULT_CAMERA_ID
+    return int(meta.timestamp)
 
 _MIN_MATCH_IOU = 0.1
 
@@ -144,6 +156,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     detection_end_timestamp_ns  = time.monotonic_ns()
 
     frame_id = normalized_frame_id(buffer, buffer.get_reference_timestamp_meta(frame_id_caps))
+    camera_id = _read_camera_id(buffer)
 
     # Picamera2 metadata absent when using libcamerasrc; fall back to wall-clock time
     if detection_start_timestamp_ns == 0:
@@ -151,8 +164,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     if sensor_timestamp_ns == 0:
         sensor_timestamp_ns = detection_start_timestamp_ns
 
+    seen_frames = seen_frames_by_camera.get(camera_id)
+    if seen_frames is None:
+        seen_frames = deque(maxlen=10)
+        seen_frames_by_camera[camera_id] = seen_frames
     if frame_id in seen_frames:
-        logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s", frame_id)
+        logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s (camera %s)", frame_id, camera_id)
         return Gst.PadProbeReturn.OK
 
     seen_frames.append(frame_id)
@@ -252,7 +269,8 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             meta = FrameMetadata(
                 capture_timestamp_ns=sensor_timestamp_ns,
                 detection_start_timestamp_ns = detection_start_timestamp_ns,
-                detection_end_timestamp_ns=detection_end_timestamp_ns)
+                detection_end_timestamp_ns=detection_end_timestamp_ns),
+            camera_id=camera_id,
         )
     )
 
@@ -349,12 +367,21 @@ def main():
     arg_parser = get_default_parser()
     arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
     arg_parser.add_argument('--connection_string', type=str, default=None)
+    # Verification harness for dual-camera switching. When set and 2+ cameras
+    # are configured, a daemon thread calls CameraSwitcher.toggle() every N
+    # seconds so we can confirm in the log that the switch propagates: each
+    # toggle yields a `[cam*]` prefix flip in picamera_thread alive lines,
+    # a `CAMERA SWITCH` warning in drone_controller, and a refreshed FOV in
+    # the angle math. Production policy (e.g. switch by target distance) will
+    # call the same set_active() / toggle() API.
+    arg_parser.add_argument('--test-camera-switch-s', type=float, default=None,
+                            help='Toggle active camera every N seconds (dual-camera verification only)')
 
     control_config = {
         'confidence_min': 0.4,
         'confidence_move': 0.3,
 
-        'thrust_takeoff' : 0.5,
+        'thrust_takeoff' : 1.0,
         'thrust_cruise' : 0.53,
         'thrust_hover' : 0.4,
 
@@ -392,7 +419,8 @@ def main():
 
         'pd_coeff_p': XY(8, 2), # per-axis P gain (x, y)
         'pd_coeff_d': 0, #-1, # -1
-        'pd_coeff_p_safe_min': XY(0.5, 0.5),
+        # stating from platform with guides, make sure that initial takeoff is almost perpendicular
+        'pd_coeff_p_safe_min': XY(0.1, 0.1),
         'pd_coeff_p_min' : XY(0.5, 0.5),
         'pd_coeff_p_max' : XY(4, 2),
 
@@ -413,10 +441,51 @@ def main():
         'pd_coeff_p_dynamic_stage_2_ratio': 1,
         'pd_coeff_p_dynamic_stage_3_ratio': 1,
 
-        'frame_angular_size_deg' : XY(107, 85),
+        # Multi-camera support. The 'camera' dict is the single source of
+        # truth: top-level keys (width/height/fps/video_format/active_id/
+        # switch_to_wide_size/switch_to_zoom_size) are SHARED across all
+        # cameras (a single appsrc downstream demands identical caps). The
+        # nested 'cameras' list holds per-camera CameraConfig dicts; the
+        # producer spawns one picamera thread per entry but only the camera
+        # with camera_id == active_id feeds inference at any moment. The
+        # drone/platform controller looks up frame_angular_size_deg from
+        # the active config so the wide FOV is never applied to a tele
+        # frame. zoom_factor is auto-derived by CameraSwitcher from the FOVs.
+        'camera': {
+            'width': 1280,
+            'height': 720,
+            'fps': 30,
+            'video_format': 'RGB',
+            'active_id': 0,
+            # Relative size of the tracked object (or bigger) that triggers switching to wide-angle camera.
+            # With wide 107° / zoom 14° FOVs (zoom_factor ~11x), 0.25 on zoom -> ~0.023 on wide after the
+            # switch, leaving a ~1.5x margin above switch_to_wide_size to prevent immediate flip-back.
+            'switch_to_wide_size': 0.25,
+            # Relative size of the tracked object (or smaller) that triggers switching to narrow-angle (zoomed) camera.
+            # 0.015 on wide -> ~0.165 on zoom after the switch, ~1.5x below switch_to_zoom_size.
+            'switch_to_zoom_size': 0.015,
+
+            'cameras': [
+                # NOTE: must be at least 1 camera
+                dict(
+                    camera_id=0,
+                    name='wide',
+                    sensor_index=0,
+                    frame_angular_size_deg=XY(107, 85),
+                ),
+                # dict(
+                #     camera_id=1,
+                #     name='zoom',
+                #     sensor_index=0,
+                #     frame_angular_size_deg=XY(14, 8),
+                # ),
+            ],
+        },
+
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m': XY(1.2, 1.2),            # shahed small
+        'target_size_m' : XY(2, 2),             # large baloon
+        # 'target_size_m': XY(1.2, 1.2),            # shahed small
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
         # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
@@ -426,7 +495,7 @@ def main():
         # 'inertia_correction_limits': XY(1, 1),
         # 'inertia_correction_min_speed_ms': 5,
 
-        'safe_takeoff_period_ns': 300_000_000,
+        'safe_takeoff_period_ns': 1_000_000_000,
         'delay_takeof_until_n_detection_frames' : 10,
 
         'aim_point': XY(0.5, 0.5),
@@ -491,6 +560,22 @@ def main():
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True
 
+    # Build CameraSwitcher from the 'camera' dict in control_config.
+    # The dict is the kwargs for CameraSwitcher except for 'cameras' which
+    # is the list of per-camera dicts (each one a CameraConfig kwargs).
+    camera_block = control_config.pop('camera', None) or {}
+    camera_dicts = camera_block.pop('cameras', None) or []
+    camera_switcher = None
+    if camera_dicts:
+        camera_configs = [CameraConfig(**d) for d in camera_dicts]
+        camera_switcher = CameraSwitcher(camera_configs, **camera_block)
+        logger.info("!!! Cameras configured: %s, active=%d, shared caps: %dx%d@%dfps %s, thresholds: wide>=%.3f zoom<=%.3f",
+                    [(c.camera_id, c.name) for c in camera_configs],
+                    camera_switcher.active_id(),
+                    camera_switcher.width, camera_switcher.height,
+                    camera_switcher.fps, camera_switcher.video_format,
+                    camera_switcher.switch_to_wide_size, camera_switcher.switch_to_zoom_size)
+
     app = App(
         app_callback,
         user_data,
@@ -499,6 +584,28 @@ def main():
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
         record_videos=True)
+    if camera_switcher is not None:
+        # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
+        app.camera_switcher = camera_switcher
+
+    # Optional dual-camera switching verification harness. The thread drives
+    # the same CameraSwitcher.toggle() that production policy will use, so a
+    # successful run here is direct evidence that the production switch path
+    # works end-to-end (producer gate, callback dedup, controller cache purge,
+    # FOV refresh). Disabled unless --camera-switch-test-s is passed.
+    test_switch_interval_s = app.options_menu.test_camera_switch_s
+    if test_switch_interval_s and camera_switcher is not None and len(camera_switcher.configs()) >= 2:
+        def _switch_test_thread():
+            while True:
+                time.sleep(test_switch_interval_s)
+                new_id = camera_switcher.toggle()
+                cfg = camera_switcher.active_config()
+                logger.warning(
+                    "!!! CAMERA SWITCH TEST: toggled to camera_id=%s (%s, FOV=%s, zoom=%.2fx)",
+                    new_id, cfg.name, cfg.frame_angular_size_deg, cfg.zoom_factor,
+                )
+        threading.Thread(target=_switch_test_thread, name="camera-switch-test", daemon=True).start()
+        logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
 
     logger.info("!!! Config: %s", control_config)
     if DEBUG:
@@ -525,6 +632,7 @@ def main():
                 control_config= control_config,
                 output_queue= output_queue,
                 signal_event_when_ready= event,
+                camera_switcher= camera_switcher,
             )
         )
     else:
@@ -540,9 +648,34 @@ def main():
                 control_config= control_config,
                 output_queue= output_queue,
                 signal_event_when_ready= event,
+                camera_switcher= camera_switcher,
             ),
             name = "Drone"
         )
+
+    # Uncaught crash in the control thread (e.g. drone can't connect to the
+    # FMU) used to leave the pipeline running with nothing behind it. Hook
+    # the failure: unblock the main thread waiting on `event`, then ask the
+    # GStreamer main loop to shut down so app.run() returns and main() can
+    # re-raise.
+    fatal_action_thread_error: dict = {}
+    _default_excepthook = threading.excepthook
+    def _action_thread_excepthook(args):
+        if args.thread is not action_thread:
+            _default_excepthook(args)
+            return
+        logger.error(
+            "Control thread '%s' crashed (%s: %s); shutting down application",
+            args.thread.name, args.exc_type.__name__, args.exc_value,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+        fatal_action_thread_error['error'] = args.exc_value
+        event.set()
+        GLib.idle_add(app.shutdown)
+        sys.exit(-1)
+
+    threading.excepthook = _action_thread_excepthook
+
     action_thread.start()
     app.add_shutdown_callback(lambda: detections_queue.put(STOP))
 
@@ -592,6 +725,12 @@ def main():
     print("Done !!!")
     detections_queue.put(STOP)
     action_thread.join()
+
+    # Re-raise a control-thread crash captured by the excepthook so the
+    # process exits non-zero (caller scripts / systemd / CI must be able
+    # to tell a clean stop from a drone-connect failure).
+    if 'error' in fatal_action_thread_error:
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     main()

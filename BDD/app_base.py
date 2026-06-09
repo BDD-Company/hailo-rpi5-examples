@@ -237,7 +237,7 @@ class GStreamerApp:
         # Create a GLib Main Loop
         self.loop = GLib.MainLoop()
 
-    def bus_call(self, bus, message, loop):
+    def bus_call(self, bus, message : Gst.Message, loop):
         t = message.type
         if t == Gst.MessageType.EOS:
             logger.info("End-of-stream")
@@ -262,7 +262,8 @@ class GStreamerApp:
                 logger.info("pipeline state %s -> %s (pending %s)", old.value_nick, new.value_nick, pending.value_nick)
         elif t == Gst.MessageType.STREAM_STATUS:
             status_type, owner = message.parse_stream_status()
-            logger.debug("stream-status %s on %s", status_type.value_nick, owner.get_name() if owner else '?')
+            if not status_type == 'create' and not status_type == 'enter':
+                logger.debug("stream-status %s on %s", status_type.value_nick, owner.get_name() if owner else '?')
         # QOS
         elif t == Gst.MessageType.QOS:
             # Handle QoS message here
@@ -520,13 +521,53 @@ class GStreamerApp:
 
         if self.source_type == RPI_NAME_I:
             on_picam_failure = lambda: GLib.idle_add(self.shutdown)
-            picam_thread = threading.Thread(
-                target=picamera_thread,
-                args=(self.pipeline, self.video_width, self.video_height, self.video_format),
-                kwargs={'on_failure': on_picam_failure},
-            )
-            self.threads.append(picam_thread)
-            picam_thread.start()
+            # Multi-camera support: if the application supplied a CameraSwitcher,
+            # spawn one capture thread per configured camera; otherwise fall back
+            # to the legacy single-camera launch (the producer synthesizes a
+            # default CameraConfig internally).
+            camera_switcher = getattr(self, 'camera_switcher', None)
+            if camera_switcher is not None:
+                # L4: set the shared appsrc caps ONCE, from the switcher's
+                # single source of truth, before any producer thread starts.
+                # Previously each picamera_thread set caps independently — fine
+                # while both happened to agree, but a footgun the moment they
+                # didn't. Now there's exactly one writer.
+                appsrc = self.pipeline.get_by_name("app_source")
+                if appsrc is not None:
+                    appsrc.set_property("is-live", True)
+                    appsrc.set_property("format", Gst.Format.TIME)
+                    appsrc.set_property(
+                        "caps",
+                        Gst.Caps.from_string(
+                            f"video/x-raw, format={camera_switcher.video_format}, "
+                            f"width={camera_switcher.width}, height={camera_switcher.height}, "
+                            f"framerate={camera_switcher.fps}/1, pixel-aspect-ratio=1/1"
+                        ),
+                    )
+                else:
+                    logger.warning("camera_switcher provided but 'app_source' appsrc not found; producer will fall back")
+                for cam_cfg in camera_switcher.configs():
+                    t = threading.Thread(
+                        target=picamera_thread,
+                        args=(self.pipeline, self.video_width, self.video_height, self.video_format),
+                        kwargs={
+                            'camera_config': cam_cfg,
+                            'camera_switcher': camera_switcher,
+                            'on_failure': on_picam_failure,
+                        },
+                        name=f"picam-{cam_cfg.camera_id}-{cam_cfg.name or 'cam'}",
+                    )
+                    self.threads.append(t)
+                    t.start()
+            else:
+                picam_thread = threading.Thread(
+                    target=picamera_thread,
+                    args=(self.pipeline, self.video_width, self.video_height, self.video_format),
+                    kwargs={'on_failure': on_picam_failure},
+                    name="picam",
+                )
+                self.threads.append(picam_thread)
+                picam_thread.start()
 
         # Set the pipeline to PAUSED to ensure elements are initialized
         self.pipeline.set_state(Gst.State.PAUSED)
@@ -572,24 +613,86 @@ class GStreamerApp:
 _buffer_keepalive_noop = lambda *_: None
 
 
+# Process-wide PTS baseline shared across every picam thread. Each thread used
+# to relativize buffer.pts against its OWN first sensor timestamp, so when the
+# active camera switched, the new stream's PTS jumped backward and splitmuxsink
+# crashed with "Queued GOP time is negative". With one shared monotonic baseline
+# the PTS is monotonic across cameras by construction.
+_pts_baseline_lock = threading.Lock()
+_pts_baseline_ns : int | None = None
+
+
+def _shared_pts_ns(now_ns : int) -> int:
+    """Return a monotonic, shared-across-all-cameras PTS in nanoseconds."""
+    global _pts_baseline_ns
+    with _pts_baseline_lock:
+        if _pts_baseline_ns is None:
+            _pts_baseline_ns = now_ns
+        return now_ns - _pts_baseline_ns
+
+
 def picamera_thread(
         pipeline,
         video_width,
         video_height,
         video_format,
+        camera_config=None,
+        camera_switcher=None,
         picamera_config=None,
         target_fps = 30,  # aligns appsrc caps with the pipeline's 30/1 -> no videorate duplication
         picamera_controls_initial = None,
         picamera_controls_per_frame_callback = None,
         on_failure=None,
-        capture_timeout_s = 1,
+        # imx477's first frame after a fresh start regularly takes 0.5-1.5s
+        # (especially after a fast restart of the previous process) and 1s
+        # was too tight — half the cold starts now fail. 3s gives the slower
+        # sensor headroom without masking a truly stalled camera.
+        capture_timeout_s = 3,
         slow_capture_warn_s = 0.2,
-        alive_log_every_n_frames = 100
+        alive_log_every_n_frames = 100,
+        appsrc_name = "app_source",
     ):
-    appsrc: GstApp.AppSrc = pipeline.get_by_name("app_source")
+    """Capture frames from one Picamera2 device into a shared GStreamer appsrc.
+
+    Multi-camera operation: when `camera_switcher` is provided, the thread only
+    pushes a captured frame into appsrc while `camera_switcher.is_active(camera_id)`.
+    The inactive camera keeps capturing+releasing so AGC/AWB stay warm and the
+    switch is instant. All threads share a single appsrc (named `appsrc_name`) —
+    the appsrc caps are set once by whichever thread is active first; subsequent
+    cameras must produce the same caps.
+    """
+    # Allow the legacy single-camera call site to keep working: synthesize a
+    # default CameraConfig when none is provided.
+    if camera_config is None:
+        from helpers import CameraConfig, DEFAULT_CAMERA_ID
+        camera_config = CameraConfig(
+            camera_id=DEFAULT_CAMERA_ID,
+            name="default",
+            sensor_index=0,
+        )
+
+    # Single source of truth for resolution/fps/format (L4):
+    # when a CameraSwitcher is provided, everyone reads from there so all
+    # producers and the shared appsrc agree on caps. Without a switcher we
+    # fall back to the args passed into the function (legacy single-cam).
+    if camera_switcher is not None:
+        capture_width = camera_switcher.width
+        capture_height = camera_switcher.height
+        capture_target_fps = camera_switcher.fps
+        capture_video_format = camera_switcher.video_format
+    else:
+        capture_width = video_width
+        capture_height = video_height
+        capture_target_fps = target_fps
+        capture_video_format = video_format
+
+    camera_id = camera_config.camera_id
+    log_prefix = f"[cam{camera_id}:{camera_config.name or '?'}]"
+
+    appsrc: GstApp.AppSrc = pipeline.get_by_name(appsrc_name)
     appsrc.set_property("is-live", True)
     appsrc.set_property("format", Gst.Format.TIME)
-    if logger.isEnabledFor(logging.DEBUG):
+    if False and logger.isEnabledFor(logging.DEBUG):
         prop_lines = []
         for pspec in appsrc.list_properties():
             if not (pspec.flags & GObject.ParamFlags.READABLE):
@@ -601,12 +704,23 @@ def picamera_thread(
             if isinstance(value, Gst.Caps):
                 value = value.to_string()
             prop_lines.append(f"  {pspec.name} = {value!r}")
-        logger.debug("appsrc '%s' properties:\n%s", appsrc.get_name(), "\n".join(prop_lines))
+        logger.debug("%s appsrc '%s' properties:\n%s", log_prefix, appsrc.get_name(), "\n".join(prop_lines))
     # Initialize Picamera2
 
-    camera_model = Picamera2.global_camera_info()[0]['Model']
+    cam_info = Picamera2.global_camera_info()
+    sensor_index = camera_config.sensor_index
+    if sensor_index >= len(cam_info):
+        logger.error("%s sensor_index=%d but only %d cameras visible: %s",
+                     log_prefix, sensor_index, len(cam_info), cam_info)
+        if on_failure is not None:
+            on_failure()
+        return
+    camera_model = cam_info[sensor_index]['Model']
+    tuning_file = camera_config.tuning_file or f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}_noir.json"
+    logger.info("%s opening Picamera2(camera_num=%d, model=%s, tuning=%s)",
+                log_prefix, sensor_index, camera_model, tuning_file)
 
-    with Picamera2(tuning=f"/usr/share/libcamera/ipa/rpi/pisp/{camera_model}_noir.json") as picam2:
+    with Picamera2(camera_num=sensor_index, tuning=tuning_file) as picam2:
         if picamera_config is None:
             # Single ISP output stream. The inference path only ever consumed one
             # 1280x720 RGB frame; the old config also allocated an identical, UNUSED
@@ -614,8 +728,8 @@ def picamera_thread(
             # `main` only. buffer_count trimmed from the preview default (4) to 3 to
             # shorten the camera pipeline depth (fewer frames in flight => lower capture
             # latency); each request is released immediately after copying, so 3 suffices.
-            main = {'size': (1280, 720), 'format': 'RGB888'}
-            controls = {'FrameRate': target_fps}
+            main = {'size': (capture_width, capture_height), 'format': 'RGB888'}
+            controls = {'FrameRate': capture_target_fps}
             config = picam2.create_preview_configuration(main=main, controls=controls, buffer_count=3)
         else:
             config = picamera_config
@@ -626,32 +740,75 @@ def picamera_thread(
             # TODO: creck that control is supported first
             picam2.set_controls(controls_dict)
 
+        # L3: ensure AE/AWB are explicitly enabled. picam2 defaults are
+        # usually "auto" but we want guaranteed behavior — without these the
+        # inactive camera could end up frozen at a startup exposure that
+        # doesn't match the active camera's scene (wide-angle outdoor vs
+        # tele-on-sky have very different luminance), and the first frame
+        # after a switch would be wildly mis-exposed. Per-camera overrides
+        # in `initial_controls` (e.g. a fixed ExposureTime for known-bright
+        # sky targets) win over this default.
+        merged_initial : dict = {
+            'AeEnable': True,
+            'AwbEnable': True,
+        }
+        if camera_config.initial_controls:
+            merged_initial.update(camera_config.initial_controls)
         if picamera_controls_initial is not None:
-            apply_controls(picamera_controls_initial)
+            merged_initial.update(picamera_controls_initial)
+        apply_controls(merged_initial)
 
-        # Update GStreamer caps based on the captured stream
+        # GStreamer caps for the shared appsrc.
+        # - Multi-camera path (camera_switcher provided): caps are set ONCE by
+        #   GStreamerApp.run() from the switcher's shared config, BEFORE any
+        #   producer starts. We skip setting them here to avoid two threads
+        #   racing on the same property.
+        # - Legacy single-camera path: nobody else sets caps, so we do it here,
+        #   based on the captured stream's actual size/format.
         capture_stream = config['main']
-        format_str = 'RGB' if capture_stream['format'] == 'RGB888' else video_format
+        format_str = 'RGB' if capture_stream['format'] == 'RGB888' else capture_video_format
         width, height = capture_stream['size']
-        logger.debug("Picamera2 configuration: width=%s, height=%s, format=%s", width, height, format_str)
-        appsrc.set_property(
-            "caps",
-            Gst.Caps.from_string(
-                f"video/x-raw, format={format_str}, width={width}, height={height}, "
-                f"framerate={target_fps}/1, pixel-aspect-ratio=1/1"
+        logger.debug("%s Picamera2 configuration: width=%s, height=%s, format=%s",
+                     log_prefix, width, height, format_str)
+        if camera_switcher is None:
+            appsrc.set_property(
+                "caps",
+                Gst.Caps.from_string(
+                    f"video/x-raw, format={format_str}, width={width}, height={height}, "
+                    f"framerate={capture_target_fps}/1, pixel-aspect-ratio=1/1"
+                )
             )
-        )
 
         sensor_timestamp_caps = Gst.Caps.from_string("timestamp/x-picamera2-sensor")
         unix_timestamp_caps = Gst.Caps.from_string("timestamp/x-unix")
         frame_id_caps = Gst.Caps.from_string("frame-id/x-picamera2")
+        camera_id_caps = Gst.Caps.from_string("camera-id/x-picamera2")
 
         picam2.start()
         frame_count = 0
 
-        # used to convert from absolute frame time of Picamera2 to relative of Gstreamer (starting from 0)
-        first_frame_timestamp_ns = 0
+        # Kept only to preserve the existing sensor-timestamp reference meta
+        # (used downstream for sensor→detection latency math). buffer.pts is
+        # NOT derived from this anymore — see _shared_pts_ns above for why.
+        first_sensor_timestamp_ns = 0
         prev_frame_timestamp_ns = 0
+
+        # Dual-camera idle throttle. When this camera is INACTIVE (the other
+        # one is feeding inference), we still need it captured so AGC/AWB stay
+        # converged for an instant switch — but at the full target_fps the
+        # idle camera burned ~half the ISP/CPU budget that the active path
+        # needed. Set a low FrameRate while inactive; restore on activation.
+        #
+        # Switch-in latency is bounded by one inactive frame interval (picam2
+        # latches a new FrameRate only on the next ISP cycle). 5 fps gave a
+        # ~200 ms worst-case wait between set_active() and the first frame of
+        # the new active camera reaching inference; 15 fps brings that down to
+        # ~67 ms. With L1 above the per-inactive-frame cost is now small
+        # (capture+release only — no make_array / cvtColor / push), so we can
+        # spend the extra ISP cycles. Bonus: 3x faster AE/AWB convergence on
+        # the inactive camera, narrowing the post-switch exposure transient.
+        INACTIVE_FPS = 15
+        was_active : bool | None = None  # forces the initial control push on first iteration
         logger.debug("picamera_process started")
         last_alive_log_monotonic = time.monotonic()
         last_alive_log_frame_count = 0
@@ -674,13 +831,34 @@ def picamera_thread(
                 if picamera_controls:
                     apply_controls(picamera_controls)
 
+            # Apply FrameRate based on active/inactive transition. Cheap call;
+            # only invoked when the active flag actually flips. picam2 latches
+            # the new rate on the next ISP cycle (~one frame interval), which
+            # is fast enough that the first push after a switch is at full
+            # rate already (we ramp up just before becoming active).
+            if camera_switcher is not None:
+                is_active = camera_switcher.is_active(camera_id)
+                if is_active != was_active:
+                    new_fps = capture_target_fps if is_active else INACTIVE_FPS
+                    transition_controls = {'FrameRate': new_fps}
+                    # L3: on inactive -> active, also re-assert AE/AWB so the
+                    # algorithms reconverge on the active scene under the new
+                    # (higher) cadence instead of riding the inactive estimate.
+                    # Cheap; only triggered on the flag flip.
+                    if is_active and was_active is False:
+                        transition_controls['AeEnable'] = True
+                        transition_controls['AwbEnable'] = True
+                    apply_controls(transition_controls)
+                    logger.info("%s FrameRate -> %d fps (active=%s)", log_prefix, new_fps, is_active)
+                    was_active = is_active
+
             capture_started_monotonic = time.monotonic()
             try:
                 request = picam2.capture_request(wait=capture_timeout_s)
             except TimeoutError:
                 logger.error(
-                    "picam2.capture_request timed out after %.2fs at frame #%d — camera appears stalled, exiting picamera_thread",
-                    capture_timeout_s, frame_count,
+                    "%s picam2.capture_request timed out after %.2fs at frame #%d — camera appears stalled, exiting picamera_thread",
+                    log_prefix, capture_timeout_s, frame_count,
                 )
                 if on_failure is not None:
                     on_failure()
@@ -689,8 +867,8 @@ def picamera_thread(
             capture_elapsed_s = time.monotonic() - capture_started_monotonic
             if capture_elapsed_s > slow_capture_warn_s:
                 logger.warning(
-                    "picam2.capture_request took %.3fs (frame #%d) — exceeds %.3fs threshold; camera may be stalling",
-                    capture_elapsed_s, frame_count, slow_capture_warn_s,
+                    "%s picam2.capture_request took %.3fs (frame #%d) — exceeds %.3fs threshold; camera may be stalling",
+                    log_prefix, capture_elapsed_s, frame_count, slow_capture_warn_s,
                 )
             capture_time_accum += capture_elapsed_s
             proc_start_monotonic = time.monotonic()
@@ -699,14 +877,21 @@ def picamera_thread(
             frame_meta = None
             frame_timestamp_ns = 0
             try:
+                # L1: skip the ~2.7 MB make_array copy + metadata fetch entirely
+                # when this camera is inactive. The ISP keeps running (so AGC/AWB
+                # stay warm); we only need to release the ISP buffer back to the
+                # pool. `continue` inside `try` still runs the `finally` below.
+                if camera_switcher is not None and not camera_switcher.is_active(camera_id):
+                    frame_count += 1
+                    processing_time_accum += time.monotonic() - proc_start_monotonic
+                    continue
                 frame_data = request.make_array("main")
                 frame_meta = request.get_metadata()
             finally:
                 request.release()
 
-            # frame_data = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
             if frame_data is None:
-                logger.error("Failed to capture frame #%s.", frame_count)
+                logger.error("%s Failed to capture frame #%s.", log_prefix, frame_count)
                 if on_failure is not None:
                     on_failure()
                 break
@@ -734,19 +919,28 @@ def picamera_thread(
 
             if frame_meta is not None:
                 sensor_timestamp_ns = frame_meta.get("SensorTimestamp", None)
-                if sensor_timestamp_ns is not None:
-                    if first_frame_timestamp_ns == 0:
-                        first_frame_timestamp_ns = sensor_timestamp_ns
-                    frame_timestamp_ns = sensor_timestamp_ns - first_frame_timestamp_ns
-                    # logging.debug("frame #%d\ttimestamp from sensor: %s, frame timestamp: %s", frame_count, sensor_timestamp_ns, frame_timestamp_ns)
+                # Multi-camera correctness: derive buffer.pts from a process-
+                # wide monotonic clock instead of per-camera sensor TS so the
+                # pipeline sees a single monotonic stream even when the active
+                # camera switches. The original sensor TS is still attached
+                # as ref-meta so downstream sensor-latency math is unchanged.
+                now_monotonic_ns = time.monotonic_ns()
+                frame_timestamp_ns = _shared_pts_ns(now_monotonic_ns)
+                if sensor_timestamp_ns is not None and first_sensor_timestamp_ns == 0:
+                    first_sensor_timestamp_ns = sensor_timestamp_ns
 
                 buffer.pts = frame_timestamp_ns
                 buffer.dts = frame_timestamp_ns
                 buffer.duration = Gst.CLOCK_TIME_NONE ## ?
 
-                buffer.add_reference_timestamp_meta(sensor_timestamp_caps, sensor_timestamp_ns, Gst.CLOCK_TIME_NONE)
-                buffer.add_reference_timestamp_meta(unix_timestamp_caps, time.monotonic_ns(), Gst.CLOCK_TIME_NONE)
+                if sensor_timestamp_ns is not None:
+                    buffer.add_reference_timestamp_meta(sensor_timestamp_caps, sensor_timestamp_ns, Gst.CLOCK_TIME_NONE)
+                buffer.add_reference_timestamp_meta(unix_timestamp_caps, now_monotonic_ns, Gst.CLOCK_TIME_NONE)
                 buffer.add_reference_timestamp_meta(frame_id_caps, frame_count, Gst.CLOCK_TIME_NONE)
+                # Tag each buffer with the producing camera so the user-callback
+                # can populate Detections.camera_id (and so downstream caches
+                # can be purged the moment a different camera's frame arrives).
+                buffer.add_reference_timestamp_meta(camera_id_caps, camera_id, Gst.CLOCK_TIME_NONE)
 
                 buffer.offset = frame_count
 
@@ -757,7 +951,7 @@ def picamera_thread(
             if ret == Gst.FlowReturn.FLUSHING:
                 break
             if ret != Gst.FlowReturn.OK:
-                logger.error("Failed to push buffer: %s", ret)
+                logger.error("%s Failed to push buffer: %s", log_prefix, ret)
                 if on_failure is not None:
                     on_failure()
                 break
@@ -773,9 +967,9 @@ def picamera_thread(
                 avg_proc_ms = (processing_time_accum / window_frames * 1000.0) if window_frames else 0.0
                 avg_emit_ms = (emit_time_accum / window_frames * 1000.0) if window_frames else 0.0
                 logger.info(
-                    "picamera_thread alive: pushed %d frames so far, last %d frames in %.2fs (%.1f fps); "
+                    "%s picamera_thread alive: pushed %d frames so far, last %d frames in %.2fs (%.1f fps); "
                     "per-frame avg: capture_wait=%.1fms loop_proc=%.1fms [convert=%.1fms emit=%.1fms] (interval=%.1fms)",
-                    frame_count, window_frames, window_s, window_fps,
+                    log_prefix, frame_count, window_frames, window_s, window_fps,
                     avg_capture_ms, avg_proc_ms, avg_proc_ms - avg_emit_ms, avg_emit_ms,
                     (window_s / window_frames * 1000.0) if window_frames else 0.0,
                 )

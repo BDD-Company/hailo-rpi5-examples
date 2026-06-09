@@ -254,7 +254,7 @@ def INFERENCE_PIPELINE(
     return inference_pipeline
 
 
-def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=2, name='inference_wrapper'):
+def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='inference_wrapper'):
     """
     Creates a GStreamer pipeline string that wraps an inner pipeline with a hailocropper and hailoaggregator.
     This allows to keep the original video resolution and color-space (format) of the input frame.
@@ -262,13 +262,18 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=2, name='
 
     Args:
         inner_pipeline (str): The inner pipeline string to be wrapped.
-        bypass_max_size_buffers (int, optional): The maximum number of buffers for the bypass queue. Defaults to 2.
+        bypass_max_size_buffers (int, optional): The maximum number of buffers for the bypass queue. Defaults to 1.
             This queue MUST be non-leaky: hailoaggregator pairs sink_0 (bypass) with sink_1 (inference)
             by buffer; if a leaky queue drops the bypass buffer the aggregator is waiting for, the two
             streams desync and the aggregator stops emitting forever. With leaky=no, hitting the cap
             backpressures the cropper, which backpressures the input queue (which is leaky=downstream
             and sheds the oldest camera frame instead). Worst-case added latency is
             (bypass_max_size_buffers - 1) * frame_interval — keep this number small for low latency.
+            Trimmed 2→1: the second buffer was a holdover that added ~one
+            frame-interval (~33 ms at 30 fps) of latency on the bypass branch
+            without a corresponding throughput benefit; the inference branch
+            is per-frame paced anyway so a depth-1 bypass keeps the aggregator
+            in lockstep without extra buffering.
         name (str, optional): The prefix name for the pipeline elements. Defaults to 'inference_wrapper'.
 
     Returns:

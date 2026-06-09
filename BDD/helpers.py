@@ -7,6 +7,7 @@ import inspect
 import datetime
 import math
 import sys
+import threading
 
 import numpy as np
 
@@ -128,6 +129,12 @@ class XY:
 
     def to_tuple(self, to = lambda x: x):
         return (to(self.x), to(self.y))
+
+    def max_val(self):
+        return max(self.x, self.y)
+
+    def min_val(self):
+        return min(self.x, self.y)
 
     def __str__(self):
         return f"XY({self.x:.3f}, {self.y:.3f})"
@@ -473,12 +480,57 @@ class FrameMetadata:
     detection_start_timestamp_ns : int = 0
     detection_end_timestamp_ns : int = 0
 
+
+# Default camera id used when only a single camera is configured (the original
+# single-camera path). Frames carrying this id behave like the legacy behaviour:
+# downstream code that does not yet know about per-camera configs should still
+# work via the single CameraConfig that the producer registers under this id.
+DEFAULT_CAMERA_ID: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class CameraConfig:
+    """Per-camera configuration that travels with every frame.
+
+    `frame_angular_size_deg` is the per-camera horizontal/vertical FOV used by
+    drone/platform controllers to convert a normalized bbox center into a
+    steering angle. Different physical cameras (wide vs tele) have different
+    FOVs and zoom — the consumer must look this up by `camera_id` so it does
+    not apply the wide-lens FOV to a tele-lens frame.
+
+    `zoom_factor` is NOT provided by the user; CameraSwitcher fills it in at
+    construction time as the linear magnification relative to the widest
+    camera in the set (so the widest camera always has zoom_factor = 1.0).
+
+    Resolution / framerate / video_format are NOT here on purpose: all
+    cameras feed a single shared appsrc, so they must produce identical
+    caps. CameraSwitcher holds those values once and all producers + the
+    pipeline read them from there.
+    """
+    camera_id : int = DEFAULT_CAMERA_ID
+    name : str = ""                         # human-readable, for logs/debug
+    sensor_index : int = 0                  # Picamera2 camera_num
+    frame_angular_size_deg : XY = field(default_factory=lambda: XY(107, 85))
+    # Linear magnification relative to the widest camera (1.0 = widest).
+    # Auto-filled by CameraSwitcher; do not set in app config.
+    zoom_factor : float = 1.0
+    # libcamera/picamera2 tuning override; None lets the producer pick a default.
+    tuning_file : str | None = None
+    # Optional picam2 controls applied at startup (FrameRate, ExposureTime, ...).
+    initial_controls : dict | None = None
+
+
 @dataclass(slots=True, frozen=True)
 class Detections:
     frame_id : int
     frame : np.ndarray | None = None
     detections : list[Detection] = field(default_factory=list)
     meta : FrameMetadata = field(default_factory=FrameMetadata)
+    # Identifies which physical camera produced this frame. Consumers must use
+    # it to look up the matching CameraConfig (FOV/zoom) and to detect camera
+    # switches so they can purge per-camera caches (target trajectory, ByteTrack
+    # lock, PD history, etc.).
+    camera_id : int = DEFAULT_CAMERA_ID
 
 
 @dataclass(slots=True)
@@ -486,6 +538,124 @@ class MoveCommand:
     # X - yaw
     adjust_attitude : XY = field(default_factory=XY)
     move_speed_ms : float = 0.0
+
+
+def _fill_zoom_factor(cam : CameraConfig, peers : list[CameraConfig]) -> CameraConfig:
+    """Return `cam` with zoom_factor set to its linear magnification relative
+    to the widest camera in `peers` (so the widest camera ends up as 1.0).
+    Uses the tan-based formula so it is exact for rectilinear lenses at any
+    FOV; under small-angle approx it reduces to the FOV ratio."""
+    wide_fov_x = max(p.frame_angular_size_deg.x for p in peers)
+    if cam.frame_angular_size_deg.x <= 0 or wide_fov_x <= 0:
+        return cam
+    tan_wide = math.tan(math.radians(wide_fov_x / 2.0))
+    tan_self = math.tan(math.radians(cam.frame_angular_size_deg.x / 2.0))
+    if tan_self <= 0:
+        return cam
+    from dataclasses import replace
+    return replace(cam, zoom_factor=tan_wide / tan_self)
+
+
+class CameraSwitcher:
+    """Shared, thread-safe selector that controls which camera_id is currently
+    feeding the inference pipeline.
+
+    Picam producer threads call `is_active(camera_id)` before pushing a frame
+    into the (shared) appsrc, so the inactive camera keeps capturing (to stay
+    AGC/AWB-warm for instant switch) but does not waste GStreamer/inference
+    bandwidth. The controller calls `set_active(camera_id)` to switch.
+
+    `get_config(camera_id)` returns the matching CameraConfig — the consumer
+    (drone_controller/platform_controller) uses this to swap FOV/zoom when a
+    new camera_id appears on a Detections object.
+    """
+    def __init__(self,
+                 configs : list[CameraConfig],
+                 *,
+                 width : int = 1280,
+                 height : int = 720,
+                 fps : int = 30,
+                 video_format : str = 'RGB',
+                 active_id : int | None = None,
+                 switch_to_wide_size : float = 0.25,
+                 switch_to_zoom_size : float = 0.015):
+        if not configs:
+            raise ValueError("CameraSwitcher requires at least one CameraConfig")
+        # All cameras share one appsrc → one set of caps. Hold them here so
+        # there is exactly one source of truth; the producer threads and the
+        # pipeline both read width/height/fps/video_format from this object
+        # instead of from per-camera fields.
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.video_format = video_format
+        # Switch policy thresholds, EMA-tested in the controller:
+        #   zoom→wide fires when EMA(max(w,h)) >= switch_to_wide_size
+        #   wide→zoom fires when EMA(max(w,h)) <= switch_to_zoom_size
+        # Held here so the consumer reads one policy object instead of
+        # duplicating values across control_config / per-controller code.
+        self.switch_to_wide_size = switch_to_wide_size
+        self.switch_to_zoom_size = switch_to_zoom_size
+        # Derive each camera's zoom factor relative to the widest camera in the
+        # set. We use the tan-based linear magnification (correct for a pinhole
+        # / rectilinear projection), normalized so the widest horizontal FOV
+        # maps to zoom_factor = 1.0. Horizontal FOV is used as the reference;
+        # vertical FOV usually has the same aspect ratio.
+        configs = [_fill_zoom_factor(c, configs) for c in configs]
+        self._configs : dict[int, CameraConfig] = {c.camera_id: c for c in configs}
+        if len(self._configs) != len(configs):
+            raise ValueError("CameraConfig.camera_id must be unique")
+        if active_id is None:
+            active_id = configs[0].camera_id
+        if active_id not in self._configs:
+            raise ValueError(f"active_id {active_id} not in configs")
+        self._active_id = active_id
+        self._lock = threading.Lock()
+
+    def configs(self) -> list[CameraConfig]:
+        return list(self._configs.values())
+
+    def num_cameras(self):
+        return len(self._configs)
+
+    def get_config(self, camera_id : int) -> CameraConfig | None:
+        return self._configs.get(camera_id)
+
+    def active_id(self) -> int:
+        with self._lock:
+            return self._active_id
+
+    def active_config(self) -> CameraConfig:
+        with self._lock:
+            return self._configs[self._active_id]
+
+    def is_active(self, camera_id : int) -> bool:
+        with self._lock:
+            return self._active_id == camera_id
+
+    def set_active(self, camera_id : int) -> bool:
+        """Set the active camera. Returns True if it changed."""
+        with self._lock:
+            if camera_id not in self._configs:
+                raise ValueError(f"unknown camera_id {camera_id}")
+            if self._active_id == camera_id:
+                return False
+            self._active_id = camera_id
+            return True
+
+    def toggle(self, from_id = None) -> int | None:
+        """Convenience: switch to the next camera_id in the configured order.
+        Optional: if `from_id` is NOT None, then switch only if current `active_id == from_id`
+        Returns: None if NOT switched, otherise active_id
+        """
+        with self._lock:
+            if from_id is not None and self._active_id != from_id:
+                return None
+
+            ids = list(self._configs.keys())
+            idx = ids.index(self._active_id)
+            self._active_id = ids[(idx + 1) % len(ids)]
+            return self._active_id
 
 
 

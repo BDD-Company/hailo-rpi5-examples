@@ -11,7 +11,7 @@ from helpers import XY
 from drone import DroneMover
 from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
-from telemetry_position import PositionNED, VelocityNED
+# from telemetry_position import PositionNED, VelocityNED
 from estimate_distance import estimate_distance_class, DistanceClass, OpticalObjectInfo
 from telemetry_position import (
     # get_position_ned,
@@ -21,7 +21,7 @@ from telemetry_position import (
     project_ned_to_camera
 )
 # from drone_killswitch import kill_on_rc_switch_on_channel
-from helpers import Detection, Detections, MoveCommand, STOP
+from helpers import Detection, Detections, MoveCommand, STOP, CameraSwitcher, DEFAULT_CAMERA_ID, CameraConfig
 
 try:
     from gpiozero import CPUTemperature
@@ -47,12 +47,13 @@ DEBUG = False
 
 
 def drone_controlling_thread(*args, **kwargs):
+    # Exceptions propagate out of run() so threading.excepthook in app.py
+    # can tear the GStreamer pipeline down. Used to be caught and logged
+    # here, which left the pipeline running behind a dead drone.
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(drone_controlling_thread_async(*args, **kwargs))
-    except Exception as e:
-        logger.error("in drone event loop", exc_info=True, stack_info=True)
     finally:
         loop.close()
 
@@ -193,7 +194,21 @@ def compute_inertia_correction(telemetry_dict, target_relative_pos, gain, min_sp
     )
 
 
-async def drone_controlling_thread_async(drone_connection_string, drone_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None):
+def to_XY(val):
+    if not isinstance(val, XY):
+        val = XY(val, val)
+
+    return val
+
+async def drone_controlling_thread_async(
+        drone_connection_string,
+        drone_config,
+        detections_queue,
+        control_config = {},
+        output_queue = None,
+        signal_event_when_ready = None,
+        camera_switcher : CameraSwitcher | None = None
+    ):
     # from math import radians
 
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
@@ -229,11 +244,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
 
-    PD_COEFF_P                      = control_config.pop('pd_coeff_p', XY(1, 1))
-    # P may be different along each axis, so it is carried around as an XY.
-    # Accept a plain scalar from config too and apply it to both axes.
-    if not isinstance(PD_COEFF_P, XY):
-        PD_COEFF_P = XY(PD_COEFF_P, PD_COEFF_P)
+    PD_COEFF_P                      = to_XY(control_config.pop('pd_coeff_p', XY(1, 1)))
     PD_COEFF_D                      = control_config.pop('pd_coeff_d', 0)
 
     PD_COEFF_P_DYNAMIC               = control_config.pop('pd_coeff_p_dynamic', False)
@@ -243,17 +254,9 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     PD_COEFF_P_DYNAMIC_MIN           = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
     PD_COEFF_P_DYNAMIC_MAX           = control_config.pop('pd_coeff_p_dynamic_max', 2)
 
-    PD_COEFF_P_SAFE_MIN              = control_config.pop('pd_coeff_p_safe_min', XY(0.5, 0.5))
-    if not isinstance(PD_COEFF_P_SAFE_MIN, XY):
-        PD_COEFF_P_SAFE_MIN = XY(PD_COEFF_P_SAFE_MIN, PD_COEFF_P_SAFE_MIN)
-    PD_COEFF_P_MIN                   = control_config.pop('pd_coeff_p_min', XY(0.5, 0.5))
-    PD_COEFF_P_MAX                   = control_config.pop('pd_coeff_p_max', XY(5, 5))
-    # P bounds may be different along each axis, carried around as XY.
-    # Accept a plain scalar from config too and apply it to both axes.
-    if not isinstance(PD_COEFF_P_MIN, XY):
-        PD_COEFF_P_MIN = XY(PD_COEFF_P_MIN, PD_COEFF_P_MIN)
-    if not isinstance(PD_COEFF_P_MAX, XY):
-        PD_COEFF_P_MAX = XY(PD_COEFF_P_MAX, PD_COEFF_P_MAX)
+    PD_COEFF_P_SAFE_MIN              = to_XY(control_config.pop('pd_coeff_p_safe_min', XY(0.5, 0.5)))
+    PD_COEFF_P_MIN                   = to_XY(control_config.pop('pd_coeff_p_min', XY(0.5, 0.5)))
+    PD_COEFF_P_MAX                   = to_XY(control_config.pop('pd_coeff_p_max', XY(5, 5)))
 
     OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = control_config.pop('optical_methods_to_refine_target_size_and_center', False)
     ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = control_config.pop('adjust_aim_point_at_edge_of_frame', False)
@@ -293,17 +296,23 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     PD_COEFF_P_STAGE_3_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_3_ratio', 0.35)
 
     TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
-    FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
+    # Legacy / single-camera fallback. When camera_switcher is provided, FOV
+    # is looked up per-frame from the matching CameraConfig instead, so two
+    # cameras with different FOVs (wide vs tele) yield correct steering angles.
+    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = control_config.pop('frame_angular_size_deg', XY(120, 90))
+
+    def fov_for_camera(cam_id : int) -> XY:
+        if camera_switcher is not None:
+            cfg = camera_switcher.get_config(cam_id)
+            if cfg is not None:
+                return cfg.frame_angular_size_deg
+        return FRAME_ANGLUAR_SIZE_DEG_DEFAULT
 
     # INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
     # INERTIA_CORRECTION_LIMITS : XY = control_config.pop('inertia_correction_limits', XY(1, 1))
     # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
 
     ESTIMATION_3D = control_config.pop('estimation_3d', None)
-    # if ESTIMATION_3D is None:
-    #     ESTIMATION_3D = control_config.pop('estimation_use_3d', False)
-    # else:
-    #     control_config.pop('estimation_use_3d', None)
 
     ESTIMATION_3D_METHOD = VelocityMethod(control_config.pop('estimation_3d_method', None))
     ESTIMATION_3D_USE_INITIAL_VELOCITY         = control_config.pop('estimation_3d_use_initial_velocity', True)
@@ -326,17 +335,26 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     AIM_POINT = control_config.pop('aim_point', XY(0.5, 0.5))
     aim_point = AIM_POINT
-    # AIM_POINT = XY(0.5, 0.5)
 
     SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
     if FOLLOW_TARGET_POSITION_NED and not ESTIMATION_3D:
         logger.warning("follow_target_position_ned requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True
 
-    # DRONE_CONFIG_PREFIX = 'drone_'
-    # for drone_config_key in [k for k in control_config.keys() if k.startswith(DRONE_CONFIG_PREFIX)]:
-    #     drone_config_key_stripped = drone_config_key.removeprefix(DRONE_CONFIG_PREFIX)
-    #     drone_config[drone_config_key_stripped]=control_config.pop(drone_config_key)
+    # Switch policy thresholds: read from camera_switcher (the single source
+    # of truth) when one is provided, else use defaults. The thresholds also
+    # determine when EMA-smoothed target size triggers a switch.
+    if camera_switcher is not None:
+        CAMERA_SWITCH_TO_WIDE_SIZE = camera_switcher.switch_to_wide_size
+        CAMERA_SWITCH_TO_ZOOM_SIZE = camera_switcher.switch_to_zoom_size
+    else:
+        CAMERA_SWITCH_TO_WIDE_SIZE = 0.25
+        CAMERA_SWITCH_TO_ZOOM_SIZE = 0.015
+    # S2: Exponential Moving Average (EMA) smoothing of target size for switching decisions.
+    # Raw per-frame bbox size jitters enough to flap the switch near a
+    # threshold; an EMA cuts that without much lag. alpha=0.3 → effective
+    # window ~3-4 frames at the controller's loop rate.
+    CAMERA_SWITCH_SIZE_EMA_ALPHA = control_config.pop('camera_switch_size_ema_alpha', 0.3)
 
     if len(control_config) > 0:
         logger.warning("Unknown/unused config parameters: %s", control_config)
@@ -346,6 +364,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     distance_r *= distance_r
     seen_target = False
     last_seen_target_at_frame = 0
+    # Monotonic per-iteration counter. Incremented for every frame dequeued
+    # from detections_queue, so it does NOT reset across camera switches —
+    # unlike detections_obj.frame_id, which is the camera-local index and
+    # jumps when the active camera changes. All internal "frames since X"
+    # logic (target-lost history clearing, periodic logging, idle throttling)
+    # must use this counter to stay consistent across switches.
     frame_id = 0
     pd_coeff_p_dynamic_stage = None
 
@@ -396,6 +420,19 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     moving = False
     flight_time_ns = 0
+    # Tracks which camera last produced a frame, so we can detect a camera
+    # switch and clear all per-camera caches (estimators, ByteTrack lock,
+    # PD history) — geometry/FOV change at the switch makes old samples
+    # meaningless and would otherwise inject a bogus velocity spike.
+    last_camera_id : int | None = None
+    # FOV in degrees of the camera that produced the CURRENT frame. Initialized
+    # to the default; refreshed every iteration from the incoming Detections.
+    FRAME_ANGLUAR_SIZE_DEG : XY = FRAME_ANGLUAR_SIZE_DEG_DEFAULT
+    # S2: smoothed target size, used by maybe_switch_to_another_camera to
+    # avoid flapping near the hysteresis edge. Reset on camera switch (the
+    # normalized size scale changes by ~zoom_factor) and on prolonged target
+    # loss (the previous trajectory is no longer relevant).
+    target_size_ema : XY | None = None
     takeoff_time_ns = None
     prev_angle_to_target = XY()
     skipped_detetions = 0
@@ -500,6 +537,94 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
         p = copy(clamp_xy(PD_COEFF_P_MIN, p, PD_COEFF_P_MAX))
         return p
 
+    def _nearest_peer(current_cfg : CameraConfig, *, wider : bool) -> CameraConfig | None:
+        """Closest peer to `current_cfg` in the zoom_factor ordering.
+
+        wider=True  → camera with the largest zoom_factor that is still
+                       smaller than current's (i.e. one step toward wider FOV)
+        wider=False → camera with the smallest zoom_factor that is still
+                       larger than current's (i.e. one step toward more zoom)
+        """
+        best = None
+        for cfg in camera_switcher.configs():
+            if cfg.camera_id == current_cfg.camera_id:
+                continue
+            if wider:
+                if cfg.zoom_factor < current_cfg.zoom_factor and (
+                    best is None or cfg.zoom_factor > best.zoom_factor
+                ):
+                    best = cfg
+            else:
+                if cfg.zoom_factor > current_cfg.zoom_factor and (
+                    best is None or cfg.zoom_factor < best.zoom_factor
+                ):
+                    best = cfg
+        return best
+
+    def maybe_switch_to_another_camera(target_size : XY, frame_camera_id : int):
+        nonlocal target_size_ema
+        if camera_switcher is None or camera_switcher.num_cameras() <= 1:
+            return
+
+        current_camera_id = camera_switcher.active_id()
+        if frame_camera_id != current_camera_id:
+            # Switch already requested; this frame is a delayed one from the
+            # old camera. Don't re-toggle and don't pollute the EMA with a
+            # value measured under the OLD camera's geometry.
+            return
+
+        # S2: update the EMA with this frame's raw target_size, then test
+        # thresholds against the smoothed value. alpha is small enough to
+        # stay responsive (a few-frame window) but removes single-frame
+        # bbox jitter that previously caused flapping near the threshold.
+        a = CAMERA_SWITCH_SIZE_EMA_ALPHA
+        if target_size_ema is None:
+            target_size_ema = target_size
+        else:
+            target_size_ema = XY(
+                target_size_ema.x * (1 - a) + target_size.x * a,
+                target_size_ema.y * (1 - a) + target_size.y * a,
+            )
+
+        # S1: decide via the auto-computed zoom_factor instead of free-text
+        # `name` strings. Old code did `name == 'zoom'` / `name == 'wide'`,
+        # which silently no-op'd the moment someone renamed a camera in app
+        # config. Now the policy is: target growing past the wide threshold
+        # → step toward a wider peer; target shrinking past the zoom
+        # threshold → step toward a more-zoomed peer. Also generalizes to
+        # >2 cameras (it will only ever step one peer at a time).
+        #
+        # Asymmetric axis test:
+        # - zoom→wide uses MAX(w,h): if either axis is about to clip the
+        #   frame edge we lose the target, so switch when any dimension
+        #   crosses the threshold. The old min(w,h) rule was too tolerant
+        #   of elongated bboxes (aspect ~1.3 is normal for non-square
+        #   objects) and never fired on real bench sweeps.
+        # - wide→zoom keeps MAX(w,h) ≤ threshold: BOTH axes must be small
+        #   for us to confidently say "target is far away, zoom in safely".
+        #   Using min() here would let a long thin false-positive flip us
+        #   into zoom on a frame that actually has a large target.
+        current_cfg : CameraConfig = camera_switcher.get_config(current_camera_id)
+        target_cfg = None
+        if target_size_ema.max_val() >= CAMERA_SWITCH_TO_WIDE_SIZE:
+            target_cfg = _nearest_peer(current_cfg, wider=True)
+        elif target_size_ema.max_val() <= CAMERA_SWITCH_TO_ZOOM_SIZE:
+            target_cfg = _nearest_peer(current_cfg, wider=False)
+
+        if target_cfg is None:
+            return
+        if not camera_switcher.set_active(target_cfg.camera_id):
+            return
+
+        logger.warning(
+            "Switching cameras: %s (zoom=%.2fx) -> %s (zoom=%.2fx), target_size_ema=%s (raw=%s)",
+            current_cfg.name, current_cfg.zoom_factor,
+            target_cfg.name, target_cfg.zoom_factor, target_size_ema, target_size,
+        )
+        # After we trigger a switch, the next frames will be under the new
+        # camera's geometry; the EMA's prior history is meaningless there.
+        target_size_ema = None
+
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
     while True:
@@ -559,7 +684,50 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 break
 
             update_timestamps()
-            logger = LoggerWithPrefix(logger, prefix=f'frame=#{detections_obj.frame_id:04}')
+            frame_id += 1
+            logger = LoggerWithPrefix(logger, prefix=f'frame=#{frame_id:04}')
+            logger.debug(f"frame cam{detections_obj.camera_id}#{detections_obj.frame_id:04}")
+
+            # Camera switch detection. On switch, refresh the per-frame FOV
+            # used for all geometry below AND drop the camera-frame caches:
+            #   - target_estimator_2d holds normalized bbox positions under
+            #     the OLD camera's pinhole; reusing them after a switch would
+            #     compute a wildly wrong velocity at the discontinuity.
+            #   - ByteTrack track ids are camera-local; the locked id must
+            #     be released so the next frame can establish a new lock.
+            #   - PD regulator history is from the old camera's angular
+            #     resolution; carrying it across yields one bogus large step.
+            #
+            # Deliberately KEPT across switches:
+            #   - target_estimator_3d (NED, world-frame): immune to camera
+            #     swap since project_camera_to_ned uses the per-frame FOV.
+            #     Preserving it means switch-time velocity estimate stays
+            #     continuous and the controller can keep flying the target
+            #     trajectory through the optical discontinuity. Assumes both
+            #     cameras are coaxial (no extrinsic offset); we can add a
+            #     per-camera angular offset to CameraConfig if needed.
+            #   - target_position_ned / _prev_ned / estimated_velocity_ned:
+            #     world-frame too; kept for the same reason.
+            if last_camera_id is None or last_camera_id != detections_obj.camera_id:
+                if last_camera_id is not None:
+                    logger.warning(
+                        "!!! CAMERA SWITCH: %s -> %s, purging 2D estimator / track lock / PD history; keeping 3D NED trajectory",
+                        last_camera_id, detections_obj.camera_id,
+                    )
+                    target_estimator_2d.clear_history()
+                    locked_track_id = None
+                    prev_angle_to_target = XY()
+                    # S2: drop the smoothed target-size; the new camera's
+                    # geometry rescales every dimension by ~zoom_factor, so
+                    # carrying the old value across would mis-fire the
+                    # symmetric threshold immediately.
+                    target_size_ema = None
+                    # CommandRegulator stores last input internally; reinstating
+                    # the configured P/D forces it to drop its previous-sample
+                    # state (next_command() initializes on first call).
+                    command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
+                last_camera_id = detections_obj.camera_id
+                FRAME_ANGLUAR_SIZE_DEG = fov_for_camera(detections_obj.camera_id)
 
             # if DEBUG:
             #     # NOTE: injecting fake detections to debug
@@ -589,7 +757,15 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 telemetry_dict = DEBUG_TELEMETRY_DICT
                 logger.warning("!!! USING DEBUG TELEMETRY data !!!")
 
-            logger.debug("telemetry: %s", telemetry_dict)
+            # Throttle: the full telemetry dict is ~1869 chars including two
+            # 21-element covariance matrices full of NaN; str()-ing it costs
+            # ~30 ms on the hot thread. %-style is "lazy" only when the level
+            # check fails, but DEBUG is enabled, so the format runs every
+            # iteration. Once every 10 controller frames (~1.2 s at ~8.5 fps)
+            # keeps the dump useful for offline analysis without spending
+            # ~30 ms per frame on the hot path.
+            if logger.isEnabledFor(logging.DEBUG) and frame_id % 10 == 0:
+                logger.debug("telemetry: %s", telemetry_dict)
             debug_info = telemetry_dict
 
             ## Check if take off
@@ -615,7 +791,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
             target_relative_pos = None
             target_relative_pos_uncorrected = None
             target_position_ned = None
-            frame_id = detections_obj.frame_id
             target_estimator = None
             target_center = None
             target_size = None
@@ -638,7 +813,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     locked_track_id = detection.track_id
 
                 seen_target = True
-                last_seen_target_at_frame = detections_obj.frame_id
+                last_seen_target_at_frame = frame_id
                 delay_between_detections_ns = update_timestamps_on_detection()
 
                 aim_point = copy(AIM_POINT)
@@ -668,13 +843,14 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     elif max_p.y >= 1 - ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD:
                         target_center.y = min(1, max_p.y) - ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD
 
-
                 logger.debug("!!! %s, %s, visual size: %s/%s, visual center: %s/%s",
                         TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, target_size, detection.bbox.size, target_center, detection.bbox.center)
                 estimated_distance_class, estimated_distance_m = estimate_distance_class(TARGET_SIZE_M, FRAME_ANGLUAR_SIZE_DEG, target_size)
 
                 logger.debug("!!! RAW estimated_distance: %s %s",
                         estimated_distance_class, estimated_distance_m)
+
+                maybe_switch_to_another_camera(target_size, detections_obj.camera_id)
 
                 # if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS and estimated_distance_m < 10:
                 #     # HACK: we have a distance estimation issue here, distance is at least 50m
@@ -840,7 +1016,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 thrust = THRUST_CRUISE
                 if flight_time_ns <= SAFE_TAKEOFF_PERIOD_NS:
                     thrust = THRUST_TAKEOFF
-                    logger.warning('takeoff low thrust mode: %s', thrust)
+                    # NOTE: not clamping thrust value here INTENTIONALLY
+                    logger.warning('takeoff thrust: %.2f', thrust)
                 else:
                     if THRUST_DYNAMIC:
                         if distance_to_center < 0.1:
@@ -874,6 +1051,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                             pd_coeff_p *= 1.1
                             extra += ' MEDIUM'
 
+                        thrust = clamp(THRUST_MIN, thrust, THRUST_MAX)
                         extra += f' changing thrust to: {thrust}, p to: {pd_coeff_p} '
 
 
@@ -913,7 +1091,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 #         angle_to_target = new_angle_to_target
 
                 debug_info["mode"] = mode
-                thrust = clamp(THRUST_MIN, thrust, THRUST_MAX)
                 if not takeoff_time_ns and target_estimator.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES:
                     logger.warning("Delaying takeoff for %s frames (now have %s)", DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES, target_estimator.history_size())
                     pass
@@ -939,6 +1116,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     target_estimator_2d.clear_history()
                     target_estimator_3d.clear_history()
                     locked_track_id = None
+                    # S2: prolonged target loss → smoothed size is stale.
+                    target_size_ema = None
 
                 if seen_target:
                     if FOLLOW_TARGET_POSITION_NED:
@@ -960,7 +1139,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         debug_info["mode"] = "hover"
                 else:
                     debug_info["mode"] = "idle"
-                    if not FOLLOW_TARGET_POSITION_NED and detections_obj.frame_id % 30 == 0:
+                    if not FOLLOW_TARGET_POSITION_NED and frame_id % 30 == 0:
                         # moving = False
                         await drone.idle()
 
@@ -1002,6 +1181,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     f"p_max={PD_COEFF_P_MAX:.2f} ")
 
             debug_info['extra'] = extra
+            # Surface frame identity to the visualization. frame_id is the
+            # controller's monotonic counter (unaffected by camera switches);
+            # camera_id + camera_frame_id locate the underlying source frame.
+            # debug_info['frame_id'] = (frame_id, detections_obj.camera_id, detections_obj.frame_id)
+            debug_info['camera_id'] = detections_obj.camera_id
+            debug_info['camera_frame_id'] = detections_obj.frame_id
 
             # -1 means that there was no frame and no detections
             if output_queue is not None:
@@ -1015,7 +1200,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     # 'target_pos_ned' : target_estimator_3d.latest,
                     # 'target_pos_ned_estimated' : target_estimator_3d.estimate(current_frame_timestamp_ns),
                     # 'inertia_accumuated' : target_relative_pos,
-                    'move_goal' : target_relative_pos
+                    'move_goal' : target_relative_pos,
+                    'frame_id' : frame_id,
+                    'camera_id' : detections_obj.camera_id,
+                    'camera_frame_id' : detections_obj.frame_id,
+                    'frame_angular_size_deg' : FRAME_ANGLUAR_SIZE_DEG,
                 }
                 output_queue.put(output)
 
