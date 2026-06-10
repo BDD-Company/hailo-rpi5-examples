@@ -19,8 +19,7 @@ Design notes:
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Union, get_args, get_origin
-import inspect
+from typing import Annotated, Any, Optional, Union, get_args, get_origin, get_type_hints
 import types
 
 from helpers import XY
@@ -30,31 +29,29 @@ from TargetEstimator import VelocityMethod
 
 
 # ---------------------------------------------------------------------------
-# Constraint types. A constraint instance IS the field's type annotation and
-# carries the underlying base type, e.g.
-#     confidence_min:  Range(float, 0.0, 1.0)
-#     video_format:    Choices('RGB', 'BGR', ...)
-#     estimation_method: Choices(VelocityMethod)        # enum -> its values
-#     cameras:         MinItems(CameraEntry, 1)         # -> list[CameraEntry]
-# Each `validate` appends human-readable problems to `errors` and never raises.
+# Constraint metadata, used as the second argument of typing.Annotated:
+#     confidence_min:    Annotated[float, Range(0.0, 1.0)]
+#     video_format:      Annotated[str, Choices('RGB', 'BGR', ...)]
+#     estimation_method: Annotated[str, Choices(VelocityMethod)]   # enum -> values
+#     cameras:           Annotated[list[CameraEntry], MinItems(1)]
+# The field keeps a real, introspectable type (get_type_hints sees the base
+# type) and the validator rides along as Annotated metadata. Each `validate`
+# appends human-readable problems to `errors` and never raises.
 # ---------------------------------------------------------------------------
 class _Constraint:
-    #: The underlying type the parser coerces the value to before validating.
-    base: Any = Any
-
+    """Base for the Annotated metadata that validates a parsed value."""
     def validate(self, value: Any, path: str, errors: list[str]) -> None:  # pragma: no cover - interface
         raise NotImplementedError
 
 
 class Range(_Constraint):
-    """A numeric (or XY) `base` with an inclusive-by-default bound.
+    """Inclusive-by-default numeric bound; applied per-field for dataclasses (XY).
 
-    Usage: ``Range(float, 0.0, 1.0)``, ``Range(int, min=1)``,
-    ``Range(XY, min=0.0, max=360.0)``, ``Range(Optional[float], min=0.0)``.
+    Usage: ``Annotated[float, Range(0.0, 1.0)]``, ``Annotated[int, Range(min=1)]``,
+    ``Annotated[XY, Range(min=0.0, max=360.0)]``.
     """
-    def __init__(self, base, min=None, max=None, *,
+    def __init__(self, min=None, max=None, *,
                  min_inclusive: bool = True, max_inclusive: bool = True):
-        self.base = base
         self.min = min
         self.max = max
         self.min_inclusive = min_inclusive
@@ -86,15 +83,13 @@ class Choices(_Constraint):
     """Value must be one of a fixed set.
 
     Pass an Enum class to use its member values (``Choices(VelocityMethod)``),
-    or pass the allowed values directly (``Choices('RGB', 'BGR')``). The base
-    type is inferred from the values.
+    or pass the allowed values directly (``Choices('RGB', 'BGR')``).
     """
     def __init__(self, *allowed):
         if len(allowed) == 1 and isinstance(allowed[0], type) and issubclass(allowed[0], Enum):
             self.allowed = tuple(m.value for m in allowed[0])
         else:
             self.allowed = tuple(allowed)
-        self.base = type(self.allowed[0]) if self.allowed else str
 
     def validate(self, value: Any, path: str, errors: list[str]) -> None:
         if value not in self.allowed:
@@ -102,12 +97,11 @@ class Choices(_Constraint):
 
 
 class MinItems(_Constraint):
-    """A ``list[item_type]`` that must contain at least `count` items.
+    """A list must contain at least `count` items.
 
-    Usage: ``MinItems(CameraEntry, 1)``.
+    Usage: ``Annotated[list[CameraEntry], MinItems(1)]``.
     """
-    def __init__(self, item_type, count: int):
-        self.base = list[item_type]
+    def __init__(self, count: int):
         self.count = count
 
     def validate(self, value: Any, path: str, errors: list[str]) -> None:
@@ -129,15 +123,15 @@ class ByteTrackSection:
     Everything except `target_lock` is forwarded verbatim to BYTETracker; use
     `tracker_kwargs()` to get exactly that subset.
     """
-    track_thresh:      Range(float, 0.0, 1.0) = 0.5
-    det_thresh:        Range(float, 0.0, 1.0) = 0.6
-    match_thresh:      Range(float, 0.0, 1.0) = 0.8
-    track_buffer:      Range(int, min=1)      = 30
-    frame_rate:        Range(float, min=0.0, min_inclusive=False) = 30.0
-    match_max_dist:    Range(Optional[float], min=0.0) = None
-    recovery_max_dist: Range(Optional[float], min=0.0) = None
-    nms_thresh:        Range(Optional[float], 0.0, 1.0) = None
-    nms_dist_thresh:   Range(Optional[float], min=0.0) = None
+    track_thresh:      Annotated[float, Range(0.0, 1.0)] = 0.5
+    det_thresh:        Annotated[float, Range(0.0, 1.0)] = 0.6
+    match_thresh:      Annotated[float, Range(0.0, 1.0)] = 0.8
+    track_buffer:      Annotated[int, Range(min=1)]      = 30
+    frame_rate:        Annotated[float, Range(min=0.0, min_inclusive=False)] = 30.0
+    match_max_dist:    Annotated[Optional[float], Range(min=0.0)] = None
+    recovery_max_dist: Annotated[Optional[float], Range(min=0.0)] = None
+    nms_thresh:        Annotated[Optional[float], Range(0.0, 1.0)] = None
+    nms_dist_thresh:   Annotated[Optional[float], Range(min=0.0)] = None
     # Consumed by the controller (not BYTETracker): keep the locked target id.
     target_lock:       bool = True
 
@@ -162,11 +156,11 @@ class CameraEntry:
     Resolution/fps/video_format are intentionally NOT here: all cameras share a
     single appsrc and must produce identical caps (those live in CameraSection).
     """
-    camera_id:              Range(int, min=0) = 0
+    camera_id:              Annotated[int, Range(min=0)] = 0
     name:                   str = ""
-    sensor_index:           Range(int, min=0) = 0
+    sensor_index:           Annotated[int, Range(min=0)] = 0
     # Per-camera horizontal/vertical FOV in degrees, (0, 360].
-    frame_angular_size_deg: Range(XY, min=0.0, min_inclusive=False, max=360.0) = \
+    frame_angular_size_deg: Annotated[XY, Range(min=0.0, min_inclusive=False, max=360.0)] = \
         field(default_factory=_xy_factory(107, 85))
 
 
@@ -177,36 +171,38 @@ class CameraSection:
     The shared caps apply to every camera (single appsrc, identical caps); the
     per-camera differences live in `cameras`.
     """
-    width:                Range(int, min=1) = 1280
-    height:               Range(int, min=1) = 720
-    fps:                  Range(int, min=1) = 30
-    video_format:         Choices('RGB', 'BGR', 'RGBA', 'BGRA',
-                                  'XRGB', 'XBGR', 'YUV420', 'NV12') = 'RGB'
-    active_id:            Range(int, min=0) = 0
+    width:                Annotated[int, Range(min=1)] = 1280
+    height:               Annotated[int, Range(min=1)] = 720
+    fps:                  Annotated[int, Range(min=1)] = 30
+    video_format:         Annotated[str, Choices('RGB', 'BGR', 'RGBA', 'BGRA',
+                                  'XRGB', 'XBGR', 'YUV420', 'NV12')] = 'RGB'
+    active_id:            Annotated[int, Range(min=0)] = 0
     # Relative target size (max(w,h)) that triggers switching wide/zoom. Both in (0,1].
-    switch_to_wide_size:  Range(float, 0.0, 1.0, min_inclusive=False) = 0.25
-    switch_to_zoom_size:  Range(float, 0.0, 1.0, min_inclusive=False) = 0.015
-    # Platform-only initial position (normalized).
-    platform_initial_pos: XY = field(default_factory=_xy_factory(0, 0))
+    switch_to_wide_size:  Annotated[float, Range(0.0, 1.0, min_inclusive=False)] = 0.25
+    switch_to_zoom_size:  Annotated[float, Range(0.0, 1.0, min_inclusive=False)] = 0.015
+
+    # EMA smoothing factor for camera-switch target size, 0..1.
+    switch_size_ema_alpha: Annotated[float, Range(0.0, 1.0)] = 0.3
+
     # At least one camera must be configured explicitly (no default).
-    cameras: MinItems(CameraEntry, 1) = field(kw_only=True)
+    cameras: Annotated[list[CameraEntry], MinItems(1)] = field(kw_only=True)
 
 
 @dataclass(slots=True)
 class DroneControlConfig:
     """The `drone.config` block — consumed by DroneMover."""
-    upside_down_angle_deg:           Range(float, 0.0, 360.0) = 130.0
-    upside_down_hold_s:              Range(float, min=0.0) = 0.2
+    upside_down_angle_deg:           Annotated[float, Range(0.0, 360.0)] = 130.0
+    upside_down_hold_s:              Annotated[float, Range(min=0.0)] = 0.2
     use_set_attitude:                bool = False
-    min_lift_fraction:               Range(float, 0.0, 1.0) = 0.1
+    min_lift_fraction:               Annotated[float, Range(0.0, 1.0)] = 0.1
     # Upward velocity headroom (m/s) when tilt restrictions are relaxed.
-    lift_velocity_headroom_ms:       Range(float, min=0.0) = 3.0
+    lift_velocity_headroom_ms:       Annotated[float, Range(min=0.0)] = 3.0
     # Upward acceleration headroom (m/s^2) when tilt restrictions are relaxed.
-    lift_accel_headroom_mss:         Range(float, min=0.0) = 5.0
+    lift_accel_headroom_mss:         Annotated[float, Range(min=0.0)] = 5.0
     belly_down_yaw:                  bool = True
-    belly_down_yaw_kp:               Range(float, min=0.0) = 1.5
-    belly_down_yaw_max_rate_deg_s:   Range(float, min=0.0) = 90.0
-    belly_down_min_horizontal_g_mss: Range(float, min=0.0) = 2.0
+    belly_down_yaw_kp:               Annotated[float, Range(min=0.0)] = 1.5
+    belly_down_yaw_max_rate_deg_s:   Annotated[float, Range(min=0.0)] = 90.0
+    belly_down_min_horizontal_g_mss: Annotated[float, Range(min=0.0)] = 2.0
 
 
 @dataclass(slots=True)
@@ -219,96 +215,93 @@ class DroneSection:
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class Config:
     """Validated runtime configuration.
 
     Scalar/XY fields are flat at the top level; the former nested dicts
     (`camera`, `drone`, `bytetrack`) are nested dataclasses.
     """
-    confidence_min:  Range(float, 0.0, 1.0) = 0.4
-    confidence_move: Range(float, 0.0, 1.0) = 0.3
+    confidence_min:  Annotated[float, Range(0.0, 1.0)] = 0.4
+    confidence_move: Annotated[float, Range(0.0, 1.0)] = 0.3
 
     # PX4 normalized thrust, 0..1.
-    thrust_takeoff: Range(float, 0.0, 1.0) = 1.0
-    thrust_cruise:  Range(float, 0.0, 1.0) = 0.53
-    thrust_hover:   Range(float, 0.0, 1.0) = 0.4
-    thrust_min:     Range(float, 0.0, 1.0) = 0.4
-    thrust_max:     Range(float, 0.0, 1.0) = 0.9
+    thrust_takeoff: Annotated[float, Range(0.0, 1.0)] = 1.0
+    thrust_cruise:  Annotated[float, Range(0.0, 1.0)] = 0.53
+    thrust_hover:   Annotated[float, Range(0.0, 1.0)] = 0.4
+    thrust_min:     Annotated[float, Range(0.0, 1.0)] = 0.4
+    thrust_max:     Annotated[float, Range(0.0, 1.0)] = 0.9
 
     thrust_dynamic:                  bool = False
     thrust_proportional_to_distance: bool = True
-    thrust_proportional_to_distance_far_coeff:        Range(float, min=0.0) = 1.0
-    thrust_proportional_to_distance_medium_distance_m: Range(float, min=0.0) = 20.0
-    thrust_proportional_to_distance_medium_coeff:     Range(float, min=0.0) = 0.9
-    thrust_proportional_to_distance_near_distance_m:   Range(float, min=0.0) = 10.0
-    thrust_proportional_to_distance_near_coeff:       Range(float, min=0.0) = 1.1
+    thrust_proportional_to_distance_far_coeff:        Annotated[float, Range(min=0.0)] = 1.0
+    thrust_proportional_to_distance_medium_distance_m: Annotated[float, Range(min=0.0)] = 20.0
+    thrust_proportional_to_distance_medium_coeff:     Annotated[float, Range(min=0.0)] = 0.9
+    thrust_proportional_to_distance_near_distance_m:   Annotated[float, Range(min=0.0)] = 10.0
+    thrust_proportional_to_distance_near_coeff:       Annotated[float, Range(min=0.0)] = 1.1
 
     # Per-frame multiplicative fade of target confidence after loss, 0..1.
-    target_lost_fade_per_frame: Range(float, 0.0, 1.0) = 0.99
-    target_estimator_clear_history_after_target_lost_frames: Range(int, min=0) = 3
+    target_lost_fade_per_frame: Annotated[float, Range(0.0, 1.0)] = 0.99
+    target_estimator_clear_history_after_target_lost_frames: Annotated[int, Range(min=0)] = 3
 
     estimation_3d:                      bool = True
-    estimation_3d_method:               Choices(VelocityMethod) = 'numpy'
+    estimation_3d_method:               Annotated[str, Choices(VelocityMethod)] = 'numpy'
     estimation_3d_use_initial_velocity: bool = False
 
-    estimation_lookahead_frames:                Range(int, min=0) = 1
+    estimation_lookahead_frames:                Annotated[int, Range(min=0)] = 1
     estimation_lookahead_dynamic:               bool = True
-    estimation_lookahead_dynamic_frames_max:    Range(int, min=0) = 5
+    estimation_lookahead_dynamic_frames_max:    Annotated[int, Range(min=0)] = 5
     estimation_lookahead_dynamic_sqrt:          bool = False
-    estimation_lookahead_dynamic_factor:        Range(float, min=0.0) = 0.1
-    estimation_lookahead_dynamic_frames_near:   Range(int, min=0) = 0
-    estimation_lookahead_dynamic_frames_medium: Range(int, min=0) = 0
-    estimation_lookahead_dynamic_frames_far:    Range(int, min=0) = 0
+    estimation_lookahead_dynamic_factor:        Annotated[float, Range(min=0.0)] = 0.1
+    estimation_lookahead_dynamic_frames_near:   Annotated[int, Range(min=0)] = 0
+    estimation_lookahead_dynamic_frames_medium: Annotated[int, Range(min=0)] = 0
+    estimation_lookahead_dynamic_frames_far:    Annotated[int, Range(min=0)] = 0
 
     optical_methods_to_refine_target_size_and_center: bool = True
     adjust_aim_point_at_edge_of_frame:                bool = True
-    adjust_aim_point_at_edge_of_frame_threshold:      Range(float, 0.0, 1.0) = 0.01
+    adjust_aim_point_at_edge_of_frame_threshold:      Annotated[float, Range(0.0, 1.0)] = 0.01
     # w*h, so a normalized area in 0..1.
-    adjust_aim_point_at_edge_of_frame_max_size:       Range(float, 0.0, 1.0) = 0.25
+    adjust_aim_point_at_edge_of_frame_max_size:       Annotated[float, Range(0.0, 1.0)] = 0.25
 
     # Per-axis P gain (x, y); non-negative. These must be set explicitly (no
     # default) — they directly shape the control response and silently
     # defaulting them is dangerous.
-    pd_coeff_p:          Range(XY, min=0.0) = field(kw_only=True)
+    pd_coeff_p:          Annotated[XY, Range(min=0.0)] = field(kw_only=True)
     pd_coeff_d:          float = 0.0
-    pd_coeff_p_safe_min: Range(XY, min=0.0) = field(kw_only=True)
-    pd_coeff_p_min:      Range(XY, min=0.0) = field(kw_only=True)
-    pd_coeff_p_max:      Range(XY, min=0.0) = field(kw_only=True)
+    pd_coeff_p_safe_min: Annotated[XY, Range(min=0.0)] = field(kw_only=True)
+    pd_coeff_p_min:      Annotated[XY, Range(min=0.0)] = field(kw_only=True)
+    pd_coeff_p_max:      Annotated[XY, Range(min=0.0)] = field(kw_only=True)
 
     pd_coeff_p_dynamic:               bool = False
     pd_coeff_p_dynamic_use_piecewise: bool = False
     # Normalized target size w*h (both in 0..1), so the product is in 0..1.
-    pd_coeff_p_dynamic_min_target_size: Range(float, 0.0, 1.0) = 0.0005
-    pd_coeff_p_dynamic_min:             Range(float, min=0.0) = 0.6
-    pd_coeff_p_dynamic_max_target_size: Range(float, 0.0, 1.0) = 0.0120
-    pd_coeff_p_dynamic_max:             Range(float, min=0.0) = 6.0
+    pd_coeff_p_dynamic_min_target_size: Annotated[float, Range(0.0, 1.0)] = 0.0005
+    pd_coeff_p_dynamic_min:             Annotated[float, Range(min=0.0)] = 0.6
+    pd_coeff_p_dynamic_max_target_size: Annotated[float, Range(0.0, 1.0)] = 0.0120
+    pd_coeff_p_dynamic_max:             Annotated[float, Range(min=0.0)] = 6.0
 
     # Normalized size thresholds s in 0..1.
-    pd_coeff_p_dynamic_stage_1_threshold: Range(float, 0.0, 1.0) = 0.01
-    pd_coeff_p_dynamic_stage_2_threshold: Range(float, 0.0, 1.0) = 0.05
+    pd_coeff_p_dynamic_stage_1_threshold: Annotated[float, Range(0.0, 1.0)] = 0.01
+    pd_coeff_p_dynamic_stage_2_threshold: Annotated[float, Range(0.0, 1.0)] = 0.05
     # Relative P ratios inside [min, max], 0..1.
-    pd_coeff_p_dynamic_stage_1_ratio: Range(float, 0.0, 1.0) = 1.0
-    pd_coeff_p_dynamic_stage_2_ratio: Range(float, 0.0, 1.0) = 1.0
-    pd_coeff_p_dynamic_stage_3_ratio: Range(float, 0.0, 1.0) = 1.0
+    pd_coeff_p_dynamic_stage_1_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
+    pd_coeff_p_dynamic_stage_2_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
+    pd_coeff_p_dynamic_stage_3_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
 
     # Physical target size in meters; positive.
-    target_size_m: Range(XY, min=0.0, min_inclusive=False) = field(default_factory=_xy_factory(2, 2))
+    target_size_m: Annotated[XY, Range(min=0.0, min_inclusive=False)] = field(default_factory=_xy_factory(2, 2))
     # Legacy / single-camera FOV fallback in degrees, (0, 360].
-    frame_angular_size_deg: Range(XY, min=0.0, min_inclusive=False, max=360.0) = \
+    frame_angular_size_deg: Annotated[XY, Range(min=0.0, min_inclusive=False, max=360.0)] = \
         field(default_factory=_xy_factory(120, 90))
 
-    safe_takeoff_period_ns:                Range(int, min=0) = 1_000_000_000
-    delay_takeof_until_n_detection_frames: Range(int, min=0) = 10
+    safe_takeoff_period_ns:                Annotated[int, Range(min=0)] = 1_000_000_000
+    delay_takeof_until_n_detection_frames: Annotated[int, Range(min=0)] = 10
 
     # Normalized image coordinates, 0..1.
-    aim_point:            Range(XY, 0.0, 1.0) = field(default_factory=_xy_factory(0.5, 0.5))
-    aim_point_max_offset: Range(XY, 0.0, 1.0) = field(default_factory=_xy_factory(0.5, 0.6))
+    aim_point:            Annotated[XY, Range(0.0, 1.0)] = field(default_factory=_xy_factory(0.5, 0.5))
+    aim_point_max_offset: Annotated[XY, Range(0.0, 1.0)] = field(default_factory=_xy_factory(0.5, 0.6))
 
     follow_target_position_ned: bool = False
-
-    # EMA smoothing factor for camera-switch target size, 0..1.
-    camera_switch_size_ema_alpha: Range(float, 0.0, 1.0) = 0.3
 
     # Complex sub-sections must be present explicitly (no default) so an
     # incomplete config fails loudly instead of silently using a stand-in.
@@ -341,12 +334,13 @@ _NONE_TYPE = type(None)
 def _split_constraint(ann):
     """Return (base_type, [constraints]) for a field annotation.
 
-    A constraint instance (Range/Choices/MinItems) IS the annotation and
-    carries its own base type; anything else is a plain type with no
-    constraints.
+    Range/Choices/MinItems produce typing.Annotated, so the base type is the
+    first arg and the validators are the Annotated metadata. A plain type has
+    no constraints.
     """
-    if isinstance(ann, _Constraint):
-        return ann.base, [ann]
+    if get_origin(ann) is Annotated:
+        args = get_args(ann)
+        return args[0], [m for m in args[1:] if isinstance(m, _Constraint)]
     return ann, []
 
 
@@ -453,7 +447,7 @@ def _parse_dataclass(cls, data, path, errors):
         errors.append(f"{path or '<root>'}: expected a mapping, got {type(data).__name__}")
         return _blank(cls)
 
-    anns = inspect.get_annotations(cls)
+    anns = get_type_hints(cls, include_extras=True)
     valid_names = set()
     kwargs = {}
     for f in fields(cls):

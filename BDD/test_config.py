@@ -1,15 +1,14 @@
 """Host-runnable tests for config parsing/validation (no hailo/mavsdk needed)."""
 
 import dataclasses
-import inspect
 import types
 from pathlib import Path
-from typing import Union, get_args, get_origin
+from typing import Annotated, Union, get_args, get_origin, get_type_hints
 
 import pytest
 
 from config import (
-    Config, ByteTrackSection, CameraSection, DroneSection,
+    Config, ByteTrackSection, CameraSection, CameraEntry, DroneSection,
     Range, Choices, _Constraint,
     ConfigError, parse_config, load_config,
 )
@@ -72,7 +71,7 @@ def test_optional_scalars_still_default_when_omitted():
     # A complete config may still omit scalar knobs that carry sensible defaults.
     cfg = parse_config(_valid_dict())
     assert cfg.confidence_min == 0.4
-    assert cfg.camera.platform_initial_pos == XY(0, 0)  # not in the shipped file
+    assert cfg.camera.switch_size_ema_alpha == 0.3  # not in the shipped file
 
 
 def test_bytetrack_tracker_kwargs_excludes_target_lock():
@@ -150,6 +149,24 @@ def test_choices_validation():
     assert any('video_format' in p for p in ei.value.problems)
 
 
+def test_constraints_resolve_to_real_types_like_annotated():
+    # Fields use Annotated[type, Constraint], so the base type is introspectable
+    # via get_type_hints and the validator rides along as Annotated metadata.
+    plain = get_type_hints(Config)
+    assert plain['confidence_min'] is float
+    assert plain['safe_takeoff_period_ns'] is int
+    assert plain['estimation_3d_method'] is str
+    assert plain['pd_coeff_p'] is XY
+    assert get_type_hints(CameraSection)['cameras'] == list[CameraEntry]
+
+    extras = get_type_hints(Config, include_extras=True)
+    ann = extras['confidence_min']
+    assert get_origin(ann) is Annotated
+    assert get_args(ann)[0] is float
+    meta = get_args(ann)[1]
+    assert isinstance(meta, Range) and hasattr(meta, 'validate')
+
+
 def test_range_validates_each_numeric_field_of_any_dataclass():
     # TODO #1: Range applies the bound to every numeric field of a dataclass,
     # not just XY. Verify with an ad-hoc 3-field dataclass.
@@ -160,7 +177,7 @@ def test_range_validates_each_numeric_field_of_any_dataclass():
         c: float = 0.0
 
     errors = []
-    Range(Triple, 0.0, 1.0).validate(Triple(0.5, 2.0, -1.0), "t", errors)
+    Range(0.0, 1.0).validate(Triple(0.5, 2.0, -1.0), "t", errors)
     assert any(e.startswith("t.b:") and "maximum" in e for e in errors)
     assert any(e.startswith("t.c:") and "minimum" in e for e in errors)
     assert not any(e.startswith("t.a:") for e in errors)
@@ -220,12 +237,13 @@ def test_errors_annotated_with_file_line_numbers(tmp_path):
 # unknown-key handling) without touching this file.
 # ---------------------------------------------------------------------------
 def _unwrap(ann):
-    """Split a raw field annotation into (base_type, [constraints]).
+    """Split a field annotation into (base_type, [constraints]).
 
-    A constraint instance carries its own base type; Optional is unwrapped.
+    The constraints DSL produces typing.Annotated; Optional is unwrapped.
     """
-    if isinstance(ann, _Constraint):
-        base, consts = ann.base, [ann]
+    if get_origin(ann) is Annotated:
+        args = get_args(ann)
+        base, consts = args[0], [m for m in args[1:] if isinstance(m, _Constraint)]
     else:
         base, consts = ann, []
     if get_origin(base) in (Union, types.UnionType):
@@ -248,7 +266,7 @@ def iter_leaf_fields(cls, prefix=()):
     path_segments is a tuple of ('key', name) / ('list',) steps so we can build
     a minimal nested dict that sets exactly one deep field.
     """
-    hints = inspect.get_annotations(cls)
+    hints = get_type_hints(cls, include_extras=True)
     for f in dataclasses.fields(cls):
         if f.metadata.get('runtime'):
             continue
@@ -271,7 +289,7 @@ def all_dataclasses():
         if cls in seen:
             continue
         seen.add(cls)
-        hints = inspect.get_annotations(cls)
+        hints = get_type_hints(cls, include_extras=True)
         for f in dataclasses.fields(cls):
             base, _ = _unwrap(hints[f.name])
             if dataclasses.is_dataclass(base) and base is not XY:

@@ -106,7 +106,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
 
     # SAFE_TAKEOFF_PERIOD_NS = control_config.safe_takeoff_period_ns
 
-    PLATFORM_INITIAL_POS = control_config.camera.platform_initial_pos
+    PLATFORM_INITIAL_POS = XY(0, 0)
 
     center = XY(0.5, 0.5)
     distance_r = 0.1

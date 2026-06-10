@@ -355,7 +355,7 @@ async def drone_controlling_thread_async(
     # Raw per-frame bbox size jitters enough to flap the switch near a
     # threshold; an EMA cuts that without much lag. alpha=0.3 → effective
     # window ~3-4 frames at the controller's loop rate.
-    CAMERA_SWITCH_SIZE_EMA_ALPHA = control_config.camera_switch_size_ema_alpha
+    CAMERA_SWITCH_SIZE_EMA_ALPHA = control_config.camera.switch_size_ema_alpha
 
 
     distance_r = 0.1
