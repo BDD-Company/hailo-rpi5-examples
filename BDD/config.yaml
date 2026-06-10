@@ -106,6 +106,7 @@ drone:
   #   udpout://192.168.0.3:14540  - direct comm with drone, slow to start, fails to connect on client restart
   #   udp://:14550                - mavlink-routerd
   #   serial:///dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00
+  #   usb -- auto-discover USB device to use
   connection_string: usb
   config:
     upside_down_angle_deg: 130

@@ -107,10 +107,6 @@ class MinItems(_Constraint):
             errors.append(f"{path}: needs at least {self.count} item(s), got {len(value)}")
 
 
-def _xy_factory(x: float, y: float):
-    return lambda: XY(x, y)
-
-
 # ---------------------------------------------------------------------------
 # Nested sections
 # ---------------------------------------------------------------------------
@@ -158,8 +154,7 @@ class CameraEntry:
     name:                   str = ""
     sensor_index:           Annotated[int, Range(min=0)] = 0
     # Per-camera horizontal/vertical FOV in degrees, (0, 360].
-    frame_angular_size_deg: Annotated[XY, Range(min=0.0, min_inclusive=False, max=360.0)] = \
-        field(default_factory=_xy_factory(107, 85))
+    frame_angular_size_deg: Annotated[XY, Range(min=0.0, min_inclusive=False, max=360.0)]
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -284,17 +279,14 @@ class Config:
     pd_coeff_p_dynamic_stage_3_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
 
     # Physical target size in meters; positive.
-    target_size_m: Annotated[XY, Range(min=0.0, min_inclusive=False)] = field(default_factory=_xy_factory(2, 2))
-    # Legacy / single-camera FOV fallback in degrees, (0, 360].
-    frame_angular_size_deg: Annotated[XY, Range(min=0.0, min_inclusive=False, max=360.0)] = \
-        field(default_factory=_xy_factory(120, 90))
+    target_size_m: Annotated[XY, Range(min=0.0, min_inclusive=False)]
 
     safe_takeoff_period_ns:                Annotated[int, Range(min=0)] = 1_000_000_000
     delay_takeof_until_n_detection_frames: Annotated[int, Range(min=0)] = 10
 
     # Normalized image coordinates, 0..1.
-    aim_point:            Annotated[XY, Range(0.0, 1.0)] = field(default_factory=_xy_factory(0.5, 0.5))
-    aim_point_max_offset: Annotated[XY, Range(0.0, 1.0)] = field(default_factory=_xy_factory(0.5, 0.6))
+    aim_point:            Annotated[XY, Range(0.0, 1.0)] = field(default_factory=lambda: XY(0.5, 0.5))
+    aim_point_max_offset: Annotated[XY, Range(0.0, 1.0)] = field(default_factory=lambda: XY(0.5, 0.6))
 
     follow_target_position_ned: bool = False
 

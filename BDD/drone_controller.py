@@ -300,7 +300,7 @@ async def drone_controlling_thread_async(
     # Legacy / single-camera fallback. When camera_switcher is provided, FOV
     # is looked up per-frame from the matching CameraConfig instead, so two
     # cameras with different FOVs (wide vs tele) yield correct steering angles.
-    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = control_config.frame_angular_size_deg
+    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = XY(120, 90)
 
     def fov_for_camera(cam_id : int) -> XY:
         if camera_switcher is not None:

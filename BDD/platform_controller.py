@@ -92,7 +92,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     # Legacy / single-camera fallback. With camera_switcher we resolve FOV
     # per-frame from the active CameraConfig so a tele-camera frame is steered
     # with the tele-camera FOV (not the wide-camera default).
-    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = control_config.frame_angular_size_deg
+    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = XY(120, 90)
 
     def fov_for_camera(cam_id : int) -> XY:
         if camera_switcher is not None:
