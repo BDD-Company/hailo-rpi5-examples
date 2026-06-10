@@ -116,7 +116,7 @@ def _xy_factory(x: float, y: float):
 # ---------------------------------------------------------------------------
 # Nested sections
 # ---------------------------------------------------------------------------
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class ByteTrackSection:
     """Parameters for the ByteTrack multi-object tracker.
 
@@ -149,7 +149,7 @@ class ByteTrackSection:
         }
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class CameraEntry:
     """One physical camera. Maps onto helpers.CameraConfig.
 
@@ -164,7 +164,7 @@ class CameraEntry:
         field(default_factory=_xy_factory(107, 85))
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class CameraSection:
     """Shared camera caps + the list of cameras.
 
@@ -185,10 +185,9 @@ class CameraSection:
     switch_size_ema_alpha: Annotated[float, Range(0.0, 1.0)] = 0.3
 
     # At least one camera must be configured explicitly (no default).
-    cameras: Annotated[list[CameraEntry], MinItems(1)] = field(kw_only=True)
+    cameras: Annotated[list[CameraEntry], MinItems(1)]
 
-
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class DroneControlConfig:
     """The `drone.config` block — consumed by DroneMover."""
     upside_down_angle_deg:           Annotated[float, Range(0.0, 360.0)] = 130.0
@@ -205,12 +204,11 @@ class DroneControlConfig:
     belly_down_min_horizontal_g_mss: Annotated[float, Range(min=0.0)] = 2.0
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class DroneSection:
     connection_string: str = 'usb'
     # The control block must be present explicitly (no default).
-    config: DroneControlConfig = field(kw_only=True)
-
+    config: DroneControlConfig
 
 # ---------------------------------------------------------------------------
 # Top-level config
@@ -266,12 +264,11 @@ class Config:
     # Per-axis P gain (x, y); non-negative. These must be set explicitly (no
     # default) — they directly shape the control response and silently
     # defaulting them is dangerous.
-    pd_coeff_p:          Annotated[XY, Range(min=0.0)] = field(kw_only=True)
+    pd_coeff_p:          Annotated[XY, Range(min=0.0)]
     pd_coeff_d:          float = 0.0
-    pd_coeff_p_safe_min: Annotated[XY, Range(min=0.0)] = field(kw_only=True)
-    pd_coeff_p_min:      Annotated[XY, Range(min=0.0)] = field(kw_only=True)
-    pd_coeff_p_max:      Annotated[XY, Range(min=0.0)] = field(kw_only=True)
-
+    pd_coeff_p_safe_min: Annotated[XY, Range(min=0.0)]
+    pd_coeff_p_min:      Annotated[XY, Range(min=0.0)]
+    pd_coeff_p_max:      Annotated[XY, Range(min=0.0)]
     pd_coeff_p_dynamic:               bool = False
     pd_coeff_p_dynamic_use_piecewise: bool = False
     # Normalized target size w*h (both in 0..1), so the product is in 0..1.
@@ -305,10 +302,9 @@ class Config:
 
     # Complex sub-sections must be present explicitly (no default) so an
     # incomplete config fails loudly instead of silently using a stand-in.
-    camera:    CameraSection    = field(kw_only=True)
-    drone:     DroneSection     = field(kw_only=True)
-    bytetrack: ByteTrackSection = field(kw_only=True)
-
+    camera:    CameraSection
+    drone:     DroneSection
+    bytetrack: ByteTrackSection
     # Runtime-only fields: set programmatically, NEVER read from the config
     # file (providing them in the file is reported as an unknown key).
     DEBUG:                bool = field(default=False, metadata={'runtime': True})
