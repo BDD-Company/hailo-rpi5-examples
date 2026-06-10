@@ -116,7 +116,7 @@ def _xy_factory(x: float, y: float):
 # ---------------------------------------------------------------------------
 # Nested sections
 # ---------------------------------------------------------------------------
-@dataclass(slots=True, kw_only=True)
+@dataclass(slots=True, kw_only=True, frozen=True)
 class ByteTrackSection:
     """Parameters for the ByteTrack multi-object tracker.
 
@@ -149,7 +149,7 @@ class ByteTrackSection:
         }
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(slots=True, kw_only=True, frozen=True)
 class CameraEntry:
     """One physical camera. Maps onto helpers.CameraConfig.
 
@@ -164,7 +164,7 @@ class CameraEntry:
         field(default_factory=_xy_factory(107, 85))
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(slots=True, kw_only=True, frozen=True)
 class CameraSection:
     """Shared camera caps + the list of cameras.
 
@@ -187,7 +187,7 @@ class CameraSection:
     # At least one camera must be configured explicitly (no default).
     cameras: Annotated[list[CameraEntry], MinItems(1)]
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(slots=True, kw_only=True, frozen=True)
 class DroneControlConfig:
     """The `drone.config` block — consumed by DroneMover."""
     upside_down_angle_deg:           Annotated[float, Range(0.0, 360.0)] = 130.0
@@ -204,7 +204,7 @@ class DroneControlConfig:
     belly_down_min_horizontal_g_mss: Annotated[float, Range(min=0.0)] = 2.0
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(slots=True, kw_only=True, frozen=True)
 class DroneSection:
     connection_string: str = 'usb'
     # The control block must be present explicitly (no default).
@@ -213,7 +213,7 @@ class DroneSection:
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
-@dataclass(slots=True, kw_only=True)
+@dataclass(slots=True, kw_only=True, frozen=True)
 class Config:
     """Validated runtime configuration.
 

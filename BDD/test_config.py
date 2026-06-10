@@ -122,9 +122,8 @@ def test_runtime_fields_rejected_from_file():
     with pytest.raises(ConfigError) as ei:
         parse_config({'DEBUG': True})
     assert any('DEBUG' in p and 'unknown' in p for p in ei.value.problems)
-    # but settable programmatically
-    cfg = parse_config(_valid_dict())
-    cfg.DEBUG = True
+    # but settable programmatically (the config is frozen, so via replace())
+    cfg = dataclasses.replace(parse_config(_valid_dict()), DEBUG=True)
     assert cfg.DEBUG is True
 
 
@@ -192,6 +191,18 @@ def test_camera_requires_at_least_one():
 def test_bool_is_not_int():
     with pytest.raises(ConfigError):
         parse_config(valid_with(safe_takeoff_period_ns=True))
+
+
+def test_config_is_frozen():
+    cfg = parse_config(_valid_dict())
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.confidence_min = 0.1
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.drone.connection_string = 'usb'
+    # replace() produces an updated copy without mutating the original
+    cfg2 = dataclasses.replace(cfg, confidence_min=0.1)
+    assert cfg2.confidence_min == 0.1
+    assert cfg.confidence_min == 0.4
 
 
 def test_optional_field_accepts_null_and_value():
