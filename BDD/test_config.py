@@ -8,10 +8,10 @@ from typing import Annotated, Union, get_args, get_origin, get_type_hints
 import pytest
 
 from config import (
-    Config, ByteTrackSection, CameraSection, CameraEntry, DroneSection,
+    Config, ByteTrackSection, Camera, CameraEntry, Drone,
     Range, Choices, _Constraint,
-    ConfigError, parse_config, load_config,
 )
+from parse_config import parse_config, load_config, ConfigError
 from helpers import XY
 
 
@@ -48,8 +48,8 @@ def test_shipped_yaml_parses_and_matches_legacy_values():
     assert cfg.target_size_m == XY(2, 2)
     assert cfg.safe_takeoff_period_ns == 1_000_000_000
     # nested sections
-    assert isinstance(cfg.camera, CameraSection)
-    assert isinstance(cfg.drone, DroneSection)
+    assert isinstance(cfg.camera, Camera)
+    assert isinstance(cfg.drone, Drone)
     assert isinstance(cfg.bytetrack, ByteTrackSection)
     assert cfg.camera.cameras[0].name == 'wide'
     assert cfg.camera.cameras[0].frame_angular_size_deg == XY(107, 85)
@@ -156,7 +156,7 @@ def test_constraints_resolve_to_real_types_like_annotated():
     assert plain['safe_takeoff_period_ns'] is int
     assert plain['estimation_3d_method'] is str
     assert plain['pd_coeff_p'] is XY
-    assert get_type_hints(CameraSection)['cameras'] == list[CameraEntry]
+    assert get_type_hints(Camera)['cameras'] == list[CameraEntry]
 
     extras = get_type_hints(Config, include_extras=True)
     ann = extras['confidence_min']
@@ -377,8 +377,8 @@ def test_missing_each_required_top_level_field_is_reported(name):
 def test_full_config_builds_full_object():
     cfg = parse_config(_valid_dict())
     # every nested section is materialised
-    assert isinstance(cfg.camera, CameraSection)
-    assert isinstance(cfg.drone, DroneSection)
+    assert isinstance(cfg.camera, Camera)
+    assert isinstance(cfg.drone, Drone)
     assert isinstance(cfg.bytetrack, ByteTrackSection)
     assert cfg.drone.config.use_set_attitude is False
 

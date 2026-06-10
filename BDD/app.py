@@ -30,7 +30,8 @@ from bytetrack import BYTETracker
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
 from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
-from config import load_config, Config
+from config import Config
+from parse_config import load_config
 from dataclasses import asdict, replace
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
