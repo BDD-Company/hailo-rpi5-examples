@@ -259,10 +259,12 @@ async def drone_controlling_thread_async(
     PD_COEFF_P_MIN                   = to_XY(control_config.pd_coeff.p_min)
     PD_COEFF_P_MAX                   = to_XY(control_config.pd_coeff.p_max)
 
-    OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = control_config.optical_methods_to_refine_target_size_and_center
-    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = control_config.adjust_aim_point_at_edge_of_frame
-    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD = control_config.adjust_aim_point_at_edge_of_frame_threshold
-    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_MAX_SIZE = control_config.adjust_aim_point_at_edge_of_frame_max_size
+    # optical_refinement is Optional: present (non-null) enables the feature.
+    _OPTICAL = control_config.optical_refinement
+    OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = bool(_OPTICAL)
+    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = bool(_OPTICAL and _OPTICAL.adjust_aim_point_at_edge_of_frame)
+    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_THRESHOLD = _OPTICAL.adjust_aim_point_at_edge_of_frame_threshold if _OPTICAL else 0.01
+    ADJUST_AIM_POINT_AT_EDGE_OF_FRAME_MAX_SIZE = _OPTICAL.adjust_aim_point_at_edge_of_frame_max_size if _OPTICAL else 0.25
 
 
     # Normalized target size thresholds for dynamic P profile:

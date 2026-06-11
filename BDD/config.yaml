@@ -6,6 +6,16 @@
 confidence_min: 0.4
 confidence_move: 0.3
 
+aim_point: [0.5, 0.5]
+aim_point_max_offset: [0.5, 0.6]
+
+# target_size_m: [0.2, 0.2]    # balloon
+target_size_m: [2, 2]          # large balloon
+# target_size_m: [1.2, 1.2]    # shahed small
+# target_size_m: [3.5, 2.5]    # shahed large
+
+follow_target_position_ned: false
+
 thrust:
   cruise: 0.53
   hover: 0.4
@@ -36,10 +46,10 @@ estimation_lookahead_dynamic_frames_near: 0
 estimation_lookahead_dynamic_frames_medium: 0
 estimation_lookahead_dynamic_frames_far: 0   # can't be too big -- estimation will be too FAR away.
 
-optical_methods_to_refine_target_size_and_center: true
-adjust_aim_point_at_edge_of_frame: true
-adjust_aim_point_at_edge_of_frame_threshold: 0.01
-adjust_aim_point_at_edge_of_frame_max_size: 0.25   # w*h, e.g. w=0.5, h=0.5, size=0.25
+optical_refinement:   # present = enabled; set to null to disable
+  adjust_aim_point_at_edge_of_frame: true
+  adjust_aim_point_at_edge_of_frame_threshold: 0.01
+  adjust_aim_point_at_edge_of_frame_max_size: 0.25   # w*h, e.g. w=0.5, h=0.5, size=0.25
 
 pd_coeff:
   p: [8, 2]          # per-axis P gain (x, y)
@@ -61,11 +71,6 @@ pd_coeff:
   p_dynamic_stage_2_ratio: 1
   p_dynamic_stage_3_ratio: 1
 
-# target_size_m: [0.2, 0.2]    # balloon
-target_size_m: [2, 2]          # large balloon
-# target_size_m: [1.2, 1.2]    # shahed small
-# target_size_m: [3.5, 2.5]    # shahed large
-
 takeoff:
   delay_until_n_detection_frames: 10
   duration_ns: 1000000000           # initial "safe" takeoff window
@@ -73,11 +78,6 @@ takeoff:
   # and we don't hit the guides with props.
   pd_coeff_p: [0.1, 0.1]
   thrust: 1.0
-
-aim_point: [0.5, 0.5]
-aim_point_max_offset: [0.5, 0.6]
-
-follow_target_position_ned: false
 
 # Multi-camera support. The shared caps (width/height/fps/video_format/
 # active_id/switch_to_wide_size/switch_to_zoom_size) apply to ALL cameras (a
@@ -125,8 +125,7 @@ drone:
     belly_down_yaw_max_rate_deg_s: 90.0   # clamp on commanded yaw rate
     belly_down_min_horizontal_g_mss: 2.0  # min in-plane gravity to engage
 
-bytetrack:
-  use_byte_track: false
+bytetrack:   # present = enabled; set to null to disable
   track_thresh: 0.3
   det_thresh: 0.35
   match_thresh: 0.3

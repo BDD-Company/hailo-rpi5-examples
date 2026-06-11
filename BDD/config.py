@@ -132,7 +132,6 @@ class Config:
         proportional_to_distance_medium_coeff:     Annotated[float, Range(min=0.0)] = 0.9
         proportional_to_distance_near_distance_m:   Annotated[float, Range(min=0.0)] = 10.0
         proportional_to_distance_near_coeff:       Annotated[float, Range(min=0.0)] = 1.1
-
     thrust: Thrust = field(default_factory=Thrust)
 
     # Per-frame multiplicative fade of target confidence after loss, 0..1.
@@ -152,11 +151,14 @@ class Config:
     estimation_lookahead_dynamic_frames_medium: Annotated[int, Range(min=0)] = 0
     estimation_lookahead_dynamic_frames_far:    Annotated[int, Range(min=0)] = 0
 
-    optical_methods_to_refine_target_size_and_center: bool = True
-    adjust_aim_point_at_edge_of_frame:                bool = True
-    adjust_aim_point_at_edge_of_frame_threshold:      Annotated[float, Range(0.0, 1.0)] = 0.01
-    # w*h, so a normalized area in 0..1.
-    adjust_aim_point_at_edge_of_frame_max_size:       Annotated[float, Range(0.0, 1.0)] = 0.25
+    @dataclass(slots=True, kw_only=True, frozen=True)
+    class OpticalRefinement:
+        # enabled: bool = True
+        adjust_aim_point_at_edge_of_frame:                bool = True
+        adjust_aim_point_at_edge_of_frame_threshold:      Annotated[float, Range(0.0, 1.0)] = 0.01
+        # w*h, so a normalized area in 0..1.
+        adjust_aim_point_at_edge_of_frame_max_size:       Annotated[float, Range(0.0, 1.0)] = 0.25
+    optical_refinement: Optional[OpticalRefinement]
 
     @dataclass(slots=True, kw_only=True, frozen=True)
     class PDCoeff:
@@ -182,7 +184,6 @@ class Config:
         p_dynamic_stage_1_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
         p_dynamic_stage_2_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
         p_dynamic_stage_3_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
-
     pd_coeff: PDCoeff
 
     @dataclass(slots=True, kw_only=True, frozen=True)
@@ -257,7 +258,6 @@ class Config:
             belly_down_yaw_max_rate_deg_s:   Annotated[float, Range(min=0.0)] = 90.0
             belly_down_min_horizontal_g_mss: Annotated[float, Range(min=0.0)] = 2.0
         config: DroneControlConfig
-
     drone:     Drone
 
     @dataclass(slots=True, kw_only=True, frozen=True)
@@ -268,7 +268,7 @@ class Config:
         from `tracker_kwargs()`; everything else is forwarded verbatim to
         BYTETracker.
         """
-        use_byte_track:    bool = False
+        # use_byte_track:    bool = False
         track_thresh:      Annotated[float, Range(0.0, 1.0)] = 0.5
         det_thresh:        Annotated[float, Range(0.0, 1.0)] = 0.6
         match_thresh:      Annotated[float, Range(0.0, 1.0)] = 0.8
@@ -286,7 +286,7 @@ class Config:
             # NOT valid BYTETracker constructor kwargs.
             controller_only = ('use_byte_track', 'target_lock')
             return {k: v for k, v in asdict(self).items() if k not in controller_only}
-    bytetrack: ByteTrack
+    bytetrack: Optional[ByteTrack]
 
     # Runtime-only fields: set programmatically, NEVER read from the config
     # file (providing them in the file is reported as an unknown key).
