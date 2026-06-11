@@ -153,7 +153,9 @@ class Config:
 
     @dataclass(slots=True, kw_only=True, frozen=True)
     class OpticalRefinement:
-        # enabled: bool = True
+        # enabled=False disables the whole feature (parser returns None for the
+        # section); check `config.optical_refinement is not None`, not .enabled.
+        enabled: bool = True
         adjust_aim_point_at_edge_of_frame:                bool = True
         adjust_aim_point_at_edge_of_frame_threshold:      Annotated[float, Range(0.0, 1.0)] = 0.01
         # w*h, so a normalized area in 0..1.
@@ -264,11 +266,13 @@ class Config:
     class ByteTrack:
         """Parameters for the ByteTrack multi-object tracker.
 
-        The controller-only flags (`use_byte_track`, `target_lock`) are excluded
-        from `tracker_kwargs()`; everything else is forwarded verbatim to
-        BYTETracker.
+        The controller-only flags (`enabled`, `target_lock`) are excluded from
+        `tracker_kwargs()`; everything else is forwarded verbatim to BYTETracker.
+
+        enabled=False disables tracking (parser returns None for the section);
+        check `config.bytetrack is not None`, not .enabled.
         """
-        # use_byte_track:    bool = False
+        enabled:           bool = False
         track_thresh:      Annotated[float, Range(0.0, 1.0)] = 0.5
         det_thresh:        Annotated[float, Range(0.0, 1.0)] = 0.6
         match_thresh:      Annotated[float, Range(0.0, 1.0)] = 0.8
@@ -282,9 +286,9 @@ class Config:
         target_lock:       bool = True
 
         def tracker_kwargs(self) -> dict:
-            # use_byte_track / target_lock are consumed by the app/controller,
+            # enabled / target_lock are consumed by the app/controller,
             # NOT valid BYTETracker constructor kwargs.
-            controller_only = ('use_byte_track', 'target_lock')
+            controller_only = ('enabled', 'target_lock')
             return {k: v for k, v in asdict(self).items() if k not in controller_only}
     bytetrack: Optional[ByteTrack]
 

@@ -334,7 +334,8 @@ async def drone_controlling_thread_async(
 
     DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.takeoff.delay_until_n_detection_frames
 
-    BYTETRACK_TARGET_LOCK = control_config.bytetrack.target_lock
+    # bytetrack is Optional (None when tracking disabled); default to locking.
+    BYTETRACK_TARGET_LOCK = control_config.bytetrack.target_lock if control_config.bytetrack is not None else True
 
     AIM_POINT = control_config.aim_point
     aim_point = AIM_POINT

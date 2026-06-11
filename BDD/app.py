@@ -383,10 +383,12 @@ def main():
     config = load_config(Path(__file__).resolve().parent / "config.yaml")
     config = replace(config, DEBUG=DEBUG)
 
+    # bytetrack is an Optional section: present (non-None) enables tracking,
+    # null / enabled=false disables it. Check the object, not a flag.
     global USE_TRACKER
-    USE_TRACKER = False
+    USE_TRACKER = config.bytetrack is not None
 
-    bytetracker = BYTETracker(**config.bytetrack.tracker_kwargs())
+    bytetracker = BYTETracker(**config.bytetrack.tracker_kwargs()) if config.bytetrack is not None else None
 
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True

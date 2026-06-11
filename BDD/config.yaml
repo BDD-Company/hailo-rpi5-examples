@@ -46,7 +46,8 @@ estimation_lookahead_dynamic_frames_near: 0
 estimation_lookahead_dynamic_frames_medium: 0
 estimation_lookahead_dynamic_frames_far: 0   # can't be too big -- estimation will be too FAR away.
 
-optical_refinement:   # present = enabled; set to null to disable
+optical_refinement:
+  enabled: true   # set false to disable the feature (section is still validated)
   adjust_aim_point_at_edge_of_frame: true
   adjust_aim_point_at_edge_of_frame_threshold: 0.01
   adjust_aim_point_at_edge_of_frame_max_size: 0.25   # w*h, e.g. w=0.5, h=0.5, size=0.25
@@ -125,7 +126,8 @@ drone:
     belly_down_yaw_max_rate_deg_s: 90.0   # clamp on commanded yaw rate
     belly_down_min_horizontal_g_mss: 2.0  # min in-plane gravity to engage
 
-bytetrack:   # present = enabled; set to null to disable
+bytetrack:
+  enabled: false   # set true to enable ByteTrack (section is still validated)
   track_thresh: 0.3
   det_thresh: 0.35
   match_thresh: 0.3

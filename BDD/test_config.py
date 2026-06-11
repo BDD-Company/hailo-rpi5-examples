@@ -19,6 +19,7 @@ Drone = Config.Drone
 ByteTrack = Config.ByteTrack
 PDCoeff = Config.PDCoeff
 TakeOff = Config.TakeOff
+OpticalRefinement = Config.OpticalRefinement
 
 
 CONFIG_YAML = Path(__file__).resolve().parent / "config.yaml"
@@ -56,13 +57,11 @@ def test_shipped_yaml_parses_and_matches_legacy_values():
     # nested sections
     assert isinstance(cfg.camera, Camera)
     assert isinstance(cfg.drone, Drone)
-    assert isinstance(cfg.bytetrack, ByteTrack)
+    assert cfg.bytetrack is None  # shipped: bytetrack disabled (enabled: false)
     assert cfg.camera.cameras[0].name == 'wide'
     assert cfg.camera.cameras[0].frame_angular_size_deg == XY(107, 85)
     assert cfg.drone.connection_string == 'usb'
     assert cfg.drone.config.upside_down_angle_deg == 130
-    assert cfg.bytetrack.track_thresh == 0.3
-    assert cfg.bytetrack.recovery_max_dist is None
 
 
 def test_empty_config_reports_missing_required_sections():
@@ -81,10 +80,10 @@ def test_optional_scalars_still_default_when_omitted():
 
 
 def test_bytetrack_tracker_kwargs_excludes_target_lock():
-    cfg = parse_config(_valid_dict())
+    cfg = parse_config(valid_section('bytetrack', enabled=True))
     kwargs = cfg.bytetrack.tracker_kwargs()
     assert 'target_lock' not in kwargs
-    assert 'use_byte_track' not in kwargs
+    assert 'enabled' not in kwargs
     assert kwargs['track_thresh'] == 0.3
 
 
@@ -213,9 +212,9 @@ def test_config_is_frozen():
 
 
 def test_optional_field_accepts_null_and_value():
-    cfg = parse_config(valid_section('bytetrack', recovery_max_dist=None))
+    cfg = parse_config(valid_section('bytetrack', enabled=True, recovery_max_dist=None))
     assert cfg.bytetrack.recovery_max_dist is None
-    cfg = parse_config(valid_section('bytetrack', recovery_max_dist=0.5))
+    cfg = parse_config(valid_section('bytetrack', enabled=True, recovery_max_dist=0.5))
     assert cfg.bytetrack.recovery_max_dist == 0.5
 
 
@@ -383,10 +382,10 @@ def test_missing_each_required_top_level_field_is_reported(name):
 
 def test_full_config_builds_full_object():
     cfg = parse_config(_valid_dict())
-    # every nested section is materialised
+    # every nested section is materialised (bytetrack disabled -> None in shipped)
     assert isinstance(cfg.camera, Camera)
     assert isinstance(cfg.drone, Drone)
-    assert isinstance(cfg.bytetrack, ByteTrack)
+    assert cfg.bytetrack is None
     assert cfg.drone.config.use_set_attitude is False
 
 
@@ -446,3 +445,65 @@ def test_unknown_key_rejected_in_every_section(section_data):
     with pytest.raises(ConfigError) as ei:
         parse_config(section_data)
     assert any('__bogus__' in p and 'unknown' in p for p in ei.value.problems)
+
+
+# ---------------------------------------------------------------------------
+# Optional sub-section quick-disable: an Optional[...] section whose `enabled`
+# field is False is still fully validated, but parses to None so the feature
+# can be switched off without commenting the whole section out. Consumers test
+# `section is not None`, never `section.enabled`.
+# ---------------------------------------------------------------------------
+def test_shipped_yaml_section_toggles():
+    cfg = load_config(CONFIG_YAML)
+    # shipped: optical_refinement enabled, bytetrack disabled
+    assert isinstance(cfg.optical_refinement, OpticalRefinement)
+    assert cfg.bytetrack is None
+
+
+def test_enabled_false_returns_none():
+    cfg = parse_config(valid_section('optical_refinement', enabled=False))
+    assert cfg.optical_refinement is None
+
+
+def test_enabled_true_returns_object():
+    cfg = parse_config(valid_section('bytetrack', enabled=True))
+    assert isinstance(cfg.bytetrack, ByteTrack)
+    assert cfg.bytetrack.enabled is True
+
+
+def test_enabled_default_drives_presence():
+    # optical default enabled=True (present when omitted), bytetrack default
+    # enabled=False (None when omitted).
+    d = _valid_dict()
+    d['optical_refinement'].pop('enabled', None)
+    d['bytetrack'].pop('enabled', None)
+    cfg = parse_config(d)
+    assert cfg.optical_refinement is not None
+    assert cfg.bytetrack is None
+
+
+def test_disabled_section_is_still_validated_bounds():
+    # enabled=False must NOT skip validation of the rest of the section.
+    with pytest.raises(ConfigError) as ei:
+        parse_config(valid_section('bytetrack', enabled=False, track_thresh=5.0))
+    assert any('bytetrack.track_thresh' in p and 'maximum' in p for p in ei.value.problems)
+
+
+def test_disabled_section_is_still_validated_unknown_key():
+    with pytest.raises(ConfigError) as ei:
+        parse_config(valid_section('optical_refinement', enabled=False, __bogus__=1))
+    assert any('optical_refinement.__bogus__' in p and 'unknown' in p for p in ei.value.problems)
+
+
+def test_disabled_section_is_still_validated_types():
+    with pytest.raises(ConfigError) as ei:
+        parse_config(valid_section('bytetrack', enabled=False, track_buffer="lots"))
+    assert any('bytetrack.track_buffer' in p for p in ei.value.problems)
+
+
+def test_tracker_kwargs_excludes_enabled_and_target_lock():
+    cfg = parse_config(valid_section('bytetrack', enabled=True))
+    kwargs = cfg.bytetrack.tracker_kwargs()
+    assert 'enabled' not in kwargs and 'target_lock' not in kwargs
+    # all remaining keys are valid BYTETracker constructor params
+    assert kwargs['track_thresh'] == 0.3

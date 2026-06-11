@@ -75,9 +75,11 @@ def _coerce(value, ann, path, errors):
     base, constraints = _split_constraint(ann)
 
     # Optional[...] / X | None
+    optional = False
     if _is_optional(base):
         if value is None:
             return None
+        optional = True
         base, inner_constraints = _split_constraint(_non_none_arg(base))
         constraints = constraints + inner_constraints
 
@@ -123,6 +125,13 @@ def _coerce(value, ann, path, errors):
         coerced = _coerce_xy(value, path, errors)
     elif is_dataclass(base):
         coerced = _parse_dataclass(base, value, path, errors)
+        # Quick-disable: an Optional sub-section whose `enabled` field parses to
+        # False is still fully validated (above), but yields None so the feature
+        # is off without commenting the whole section out. Consumers must test
+        # `section is not None`, not `section.enabled`.
+        if (optional and coerced is not _INVALID
+                and getattr(coerced, 'enabled', True) is False):
+            coerced = None
     elif get_origin(base) in (list, types.GenericAlias) or base is list:
         item_type = get_args(base)[0] if get_args(base) else Any
         if not isinstance(value, list):
