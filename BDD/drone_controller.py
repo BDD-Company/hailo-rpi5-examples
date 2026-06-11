@@ -199,7 +199,7 @@ def to_XY(val):
     if not isinstance(val, XY):
         val = XY(val, val)
 
-    return val
+    return copy(val)
 
 async def drone_controlling_thread_async(
         drone_connection_string,
@@ -226,38 +226,38 @@ async def drone_controlling_thread_async(
     CONFIDENCE_MIN  = control_config.confidence_min
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
 
-    THRUST_MAX      = control_config.thrust_max
-    THRUST_MIN      = control_config.thrust_min
-    THRUST_CRUISE   = control_config.thrust_cruise
-    THRUST_TAKEOFF  = control_config.thrust_takeoff
-    THRUST_HOVER    = control_config.thrust_hover
+    THRUST_MAX      = control_config.thrust.max
+    THRUST_MIN      = control_config.thrust.min
+    THRUST_CRUISE   = control_config.thrust.cruise
+    THRUST_TAKEOFF  = control_config.takeoff.thrust
+    THRUST_HOVER    = control_config.thrust.hover
 
-    THRUST_DYNAMIC  = control_config.thrust_dynamic
+    THRUST_DYNAMIC  = control_config.thrust.dynamic
 
-    THRUST_PROPORTIONAL_TO_DISTANCE                   = control_config.thrust_proportional_to_distance
-    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF        = control_config.thrust_proportional_to_distance_near_coeff
-    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF      = control_config.thrust_proportional_to_distance_medium_coeff
-    THRUST_PROPORTIONAL_TO_DISTANCE_FAR_COEFF         = control_config.thrust_proportional_to_distance_far_coeff
-    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M = control_config.thrust_proportional_to_distance_medium_distance_m
-    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M   = control_config.thrust_proportional_to_distance_near_distance_m
+    THRUST_PROPORTIONAL_TO_DISTANCE                   = control_config.thrust.proportional_to_distance
+    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF        = control_config.thrust.proportional_to_distance_near_coeff
+    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF      = control_config.thrust.proportional_to_distance_medium_coeff
+    THRUST_PROPORTIONAL_TO_DISTANCE_FAR_COEFF         = control_config.thrust.proportional_to_distance_far_coeff
+    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M = control_config.thrust.proportional_to_distance_medium_distance_m
+    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M   = control_config.thrust.proportional_to_distance_near_distance_m
 
 
     FADE_COEFF      = control_config.target_lost_fade_per_frame
     TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.target_estimator_clear_history_after_target_lost_frames
 
-    PD_COEFF_P                      = to_XY(control_config.pd_coeff_p)
-    PD_COEFF_D                      = control_config.pd_coeff_d
+    PD_COEFF_P                      = to_XY(control_config.pd_coeff.p)
+    PD_COEFF_D                      = control_config.pd_coeff.d
 
-    PD_COEFF_P_DYNAMIC               = control_config.pd_coeff_p_dynamic
-    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pd_coeff_p_dynamic_use_piecewise
-    PD_COEFF_P_MIN_TARGET_SIZE       = control_config.pd_coeff_p_dynamic_min_target_size
-    PD_COEFF_P_MAX_TARGET_SIZE       = control_config.pd_coeff_p_dynamic_max_target_size
-    PD_COEFF_P_DYNAMIC_MIN           = control_config.pd_coeff_p_dynamic_min
-    PD_COEFF_P_DYNAMIC_MAX           = control_config.pd_coeff_p_dynamic_max
+    PD_COEFF_P_DYNAMIC               = control_config.pd_coeff.p_dynamic
+    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pd_coeff.p_dynamic_use_piecewise
+    PD_COEFF_P_MIN_TARGET_SIZE       = control_config.pd_coeff.p_dynamic_min_target_size
+    PD_COEFF_P_MAX_TARGET_SIZE       = control_config.pd_coeff.p_dynamic_max_target_size
+    PD_COEFF_P_DYNAMIC_MIN           = control_config.pd_coeff.p_dynamic_min
+    PD_COEFF_P_DYNAMIC_MAX           = control_config.pd_coeff.p_dynamic_max
 
-    PD_COEFF_P_SAFE_MIN              = to_XY(control_config.pd_coeff_p_safe_min)
-    PD_COEFF_P_MIN                   = to_XY(control_config.pd_coeff_p_min)
-    PD_COEFF_P_MAX                   = to_XY(control_config.pd_coeff_p_max)
+    PD_COEFF_P_SAFE_MIN              = to_XY(control_config.takeoff.pd_coeff_p)
+    PD_COEFF_P_MIN                   = to_XY(control_config.pd_coeff.p_min)
+    PD_COEFF_P_MAX                   = to_XY(control_config.pd_coeff.p_max)
 
     OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = control_config.optical_methods_to_refine_target_size_and_center
     ADJUST_AIM_POINT_AT_EDGE_OF_FRAME = control_config.adjust_aim_point_at_edge_of_frame
@@ -271,14 +271,14 @@ async def drone_controlling_thread_async(
     #
     # Below STAGE_1_THRESHOLD:
     #   target is considered small / far, P grows quickly from minimum.
-    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pd_coeff_p_dynamic_stage_1_threshold
+    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pd_coeff.p_dynamic_stage_1_threshold
 
     # Between STAGE_1_THRESHOLD and STAGE_2_THRESHOLD:
     #   target is in the working mid-range, P continues growing up to maximum.
     # Above STAGE_2_THRESHOLD:
     #   target is considered large / near, P starts decreasing to avoid overshoot
     #   and overly aggressive control close to the target.
-    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pd_coeff_p_dynamic_stage_2_threshold
+    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pd_coeff.p_dynamic_stage_2_threshold
 
 
     # Relative P ratios inside [PD_COEFF_P_MIN, PD_COEFF_P_MAX]:
@@ -286,15 +286,15 @@ async def drone_controlling_thread_async(
     # Ratio reached at STAGE_1_THRESHOLD.
     # Example: 0.60 means that by s = 0.2, P reaches 60% of the full range
     # between PD_COEFF_P_MIN and PD_COEFF_P_MAX.
-    PD_COEFF_P_STAGE_1_RATIO = control_config.pd_coeff_p_dynamic_stage_1_ratio
+    PD_COEFF_P_STAGE_1_RATIO = control_config.pd_coeff.p_dynamic_stage_1_ratio
 
     # Ratio reached at STAGE_2_THRESHOLD.
     # Usually 1.00, meaning the maximum P is reached in the mid-range.
-    PD_COEFF_P_STAGE_2_RATIO = control_config.pd_coeff_p_dynamic_stage_2_ratio
+    PD_COEFF_P_STAGE_2_RATIO = control_config.pd_coeff.p_dynamic_stage_2_ratio
 
     # Ratio used when target is very large / very near (s -> 1.0).
     # This reduces P near the target to make control softer and reduce oscillation.
-    PD_COEFF_P_STAGE_3_RATIO = control_config.pd_coeff_p_dynamic_stage_3_ratio
+    PD_COEFF_P_STAGE_3_RATIO = control_config.pd_coeff.p_dynamic_stage_3_ratio
 
     TARGET_SIZE_M = control_config.target_size_m
     # Legacy / single-camera fallback. When camera_switcher is provided, FOV
@@ -330,14 +330,14 @@ async def drone_controlling_thread_async(
     FOLLOW_TARGET_POSITION_NED                 = control_config.follow_target_position_ned
 
 
-    DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.delay_takeof_until_n_detection_frames
+    DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.takeoff.delay_until_n_detection_frames
 
     BYTETRACK_TARGET_LOCK = control_config.bytetrack.target_lock
 
     AIM_POINT = control_config.aim_point
     aim_point = AIM_POINT
 
-    SAFE_TAKEOFF_PERIOD_NS = control_config.safe_takeoff_period_ns
+    SAFE_TAKEOFF_PERIOD_NS = control_config.takeoff.duration_ns
     if FOLLOW_TARGET_POSITION_NED and not ESTIMATION_3D:
         logger.warning("follow_target_position_ned requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True

@@ -44,19 +44,19 @@ async def platform_controlling_thread_async(platform_connection_string, platform
 
     MIN_CONFIDENCE  = control_config.confidence_min
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
-    # MAX_THRUST      = control_config.thrust_max
-    # MIN_THRUST      = control_config.thrust_min
+    # MAX_THRUST      = control_config.thrust.max
+    # MIN_THRUST      = control_config.thrust.min
     FADE_COEFF      = control_config.target_lost_fade_per_frame
 
-    PD_COEFF_P      = control_config.pd_coeff_p
-    PD_COEFF_D      = control_config.pd_coeff_d
+    PD_COEFF_P      = control_config.pd_coeff.p
+    PD_COEFF_D      = control_config.pd_coeff.d
 
-    PD_COEFF_P_DYNAMIC = control_config.pd_coeff_p_dynamic
-    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pd_coeff_p_dynamic_use_piecewise
-    PD_COEFF_P_MIN_TARGET_SIZE = control_config.pd_coeff_p_dynamic_min_target_size
-    PD_COEFF_P_MAX_TARGET_SIZE = control_config.pd_coeff_p_dynamic_max_target_size
-    PD_COEFF_P_MIN  = control_config.pd_coeff_p_dynamic_min
-    PD_COEFF_P_MAX  = control_config.pd_coeff_p_dynamic_max
+    PD_COEFF_P_DYNAMIC = control_config.pd_coeff.p_dynamic
+    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pd_coeff.p_dynamic_use_piecewise
+    PD_COEFF_P_MIN_TARGET_SIZE = control_config.pd_coeff.p_dynamic_min_target_size
+    PD_COEFF_P_MAX_TARGET_SIZE = control_config.pd_coeff.p_dynamic_max_target_size
+    PD_COEFF_P_MIN  = control_config.pd_coeff.p_dynamic_min
+    PD_COEFF_P_MAX  = control_config.pd_coeff.p_dynamic_max
 
     # Normalized target size thresholds for dynamic P profile:
     # s = 0.0 means target is at or below PD_COEFF_P_MIN_TARGET_SIZE
@@ -64,29 +64,29 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     #
     # Below STAGE_1_THRESHOLD:
     #   target is considered small / far, P grows quickly from minimum.
-    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pd_coeff_p_dynamic_stage_1_threshold
+    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pd_coeff.p_dynamic_stage_1_threshold
 
     # Between STAGE_1_THRESHOLD and STAGE_2_THRESHOLD:
     #   target is in the working mid-range, P continues growing up to maximum.
     # Above STAGE_2_THRESHOLD:
     #   target is considered large / near, P starts decreasing to avoid overshoot
     #   and overly aggressive control close to the target.
-    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pd_coeff_p_dynamic_stage_2_threshold
+    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pd_coeff.p_dynamic_stage_2_threshold
 
     # Relative P ratios inside [PD_COEFF_P_MIN, PD_COEFF_P_MAX]:
     #
     # Ratio reached at STAGE_1_THRESHOLD.
     # Example: 0.60 means that by s = 0.2, P reaches 60% of the full range
     # between PD_COEFF_P_MIN and PD_COEFF_P_MAX.
-    PD_COEFF_P_STAGE_1_RATIO = control_config.pd_coeff_p_dynamic_stage_1_ratio
+    PD_COEFF_P_STAGE_1_RATIO = control_config.pd_coeff.p_dynamic_stage_1_ratio
 
     # Ratio reached at STAGE_2_THRESHOLD.
     # Usually 1.00, meaning the maximum P is reached in the mid-range.
-    PD_COEFF_P_STAGE_2_RATIO = control_config.pd_coeff_p_dynamic_stage_2_ratio
+    PD_COEFF_P_STAGE_2_RATIO = control_config.pd_coeff.p_dynamic_stage_2_ratio
 
     # Ratio used when target is very large / very near (s -> 1.0).
     # This reduces P near the target to make control softer and reduce oscillation.
-    PD_COEFF_P_STAGE_3_RATIO = control_config.pd_coeff_p_dynamic_stage_3_ratio
+    PD_COEFF_P_STAGE_3_RATIO = control_config.pd_coeff.p_dynamic_stage_3_ratio
 
     TARGET_SIZE_M = control_config.target_size_m
     # Legacy / single-camera fallback. With camera_switcher we resolve FOV
@@ -104,7 +104,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     FRAME_ANGLUAR_SIZE_DEG : XY = FRAME_ANGLUAR_SIZE_DEG_DEFAULT
     last_camera_id : int | None = None
 
-    # SAFE_TAKEOFF_PERIOD_NS = control_config.safe_takeoff_period_ns
+    # SAFE_TAKEOFF_PERIOD_NS = control_config.takeoff.duration_ns
 
     PLATFORM_INITIAL_POS = XY(0, 0)
 

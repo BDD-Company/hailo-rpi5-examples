@@ -7,6 +7,7 @@ the offending line in the source file. See config.py for the schema itself.
 """
 
 from dataclasses import MISSING, fields, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 import types
@@ -101,6 +102,23 @@ def _coerce(value, ann, path, errors):
             errors.append(f"{path}: expected a string, got {type(value).__name__}")
         else:
             coerced = value
+    elif isinstance(base, type) and issubclass(base, Enum):
+        # TODO: for enums that doesn't have string literals as constants, use constant names instead (case insensitive).
+        # e.g.:
+        # class MyEnum(Enum):
+        #     FOO = 1
+        #     BAR = 2.0
+        # parse following string as values:
+        # 'foo' as MyEnum.FOO, 'FOO' as MyEnum.FOO, 'Bar' as MyEnum.BAR, etc.
+
+        # YAML carries the enum's *value* (e.g. 'numpy'); look up the member.
+        if isinstance(value, base):
+            coerced = value
+        else:
+            try:
+                coerced = base(value)
+            except ValueError:
+                errors.append(f"{path}: {value!r} is not one of {[m.value for m in base]}")
     elif base is XY:
         coerced = _coerce_xy(value, path, errors)
     elif is_dataclass(base):

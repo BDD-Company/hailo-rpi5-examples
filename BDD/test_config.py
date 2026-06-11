@@ -7,12 +7,18 @@ from typing import Annotated, Union, get_args, get_origin, get_type_hints
 
 import pytest
 
-from config import (
-    Config, ByteTrackSection, Camera, CameraEntry, Drone,
-    Range, Choices, _Constraint,
-)
+from config import Config, Range, Choices, _Constraint
 from parse_config import parse_config, load_config, ConfigError
 from helpers import XY
+from TargetEstimator import VelocityMethod
+
+# The section dataclasses are nested inside Config; alias them for readability.
+Camera = Config.Camera
+CameraEntry = Config.Camera.CameraEntry
+Drone = Config.Drone
+ByteTrack = Config.ByteTrack
+PDCoeff = Config.PDCoeff
+TakeOff = Config.TakeOff
 
 
 CONFIG_YAML = Path(__file__).resolve().parent / "config.yaml"
@@ -42,15 +48,15 @@ def test_shipped_yaml_parses_and_matches_legacy_values():
     cfg = load_config(CONFIG_YAML)
     assert isinstance(cfg, Config)
     assert cfg.confidence_min == 0.4
-    assert cfg.thrust_takeoff == 1.0
-    assert cfg.estimation_3d_method == 'numpy'
-    assert cfg.pd_coeff_p == XY(8, 2)
+    assert cfg.takeoff.thrust == 1.0
+    assert cfg.estimation_3d_method == VelocityMethod.NUMPY_REGRESSION
+    assert cfg.pd_coeff.p == XY(8, 2)
     assert cfg.target_size_m == XY(2, 2)
-    assert cfg.safe_takeoff_period_ns == 1_000_000_000
+    assert cfg.takeoff.duration_ns == 1_000_000_000
     # nested sections
     assert isinstance(cfg.camera, Camera)
     assert isinstance(cfg.drone, Drone)
-    assert isinstance(cfg.bytetrack, ByteTrackSection)
+    assert isinstance(cfg.bytetrack, ByteTrack)
     assert cfg.camera.cameras[0].name == 'wide'
     assert cfg.camera.cameras[0].frame_angular_size_deg == XY(107, 85)
     assert cfg.drone.connection_string == 'usb'
@@ -63,7 +69,7 @@ def test_empty_config_reports_missing_required_sections():
     with pytest.raises(ConfigError) as ei:
         parse_config({})
     probs = ei.value.problems
-    for name in ('camera', 'drone', 'bytetrack', 'pd_coeff_p'):
+    for name in ('camera', 'drone', 'bytetrack', 'pd_coeff', 'takeoff'):
         assert any(p.startswith(f"{name}:") and 'missing required' in p for p in probs), name
 
 
@@ -78,6 +84,7 @@ def test_bytetrack_tracker_kwargs_excludes_target_lock():
     cfg = parse_config(_valid_dict())
     kwargs = cfg.bytetrack.tracker_kwargs()
     assert 'target_lock' not in kwargs
+    assert 'use_byte_track' not in kwargs
     assert kwargs['track_thresh'] == 0.3
 
 
@@ -89,17 +96,17 @@ def test_type_error_reported():
 
 def test_bound_error_reported():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'confidence_min': 1.5, 'thrust_max': -0.2})
+        parse_config({'confidence_min': 1.5, 'thrust': {'max': -0.2}})
     probs = ei.value.problems
     assert any('confidence_min' in p and 'maximum' in p for p in probs)
-    assert any('thrust_max' in p and 'minimum' in p for p in probs)
+    assert any('thrust.max' in p and 'minimum' in p for p in probs)
 
 
 def test_errors_accumulated_in_bulk():
     with pytest.raises(ConfigError) as ei:
         parse_config({
             'confidence_min': 2.0,        # bound
-            'thrust_max': "x",            # type
+            'thrust': {'max': "x"},       # type
             'estimation_3d_method': 'nope',  # choices
             'totally_unknown': 1,         # unknown key
         })
@@ -129,8 +136,8 @@ def test_runtime_fields_rejected_from_file():
 
 def test_xy_validation():
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_with(pd_coeff_p=[1, 2, 3]))
-    assert any('pd_coeff_p' in p for p in ei.value.problems)
+        parse_config(valid_section('pd_coeff', p=[1, 2, 3]))
+    assert any('pd_coeff.p' in p for p in ei.value.problems)
     # mapping form works
     cfg = parse_config(valid_with(aim_point={'x': 0.4, 'y': 0.6}))
     assert cfg.aim_point == XY(0.4, 0.6)
@@ -153,9 +160,9 @@ def test_constraints_resolve_to_real_types_like_annotated():
     # via get_type_hints and the validator rides along as Annotated metadata.
     plain = get_type_hints(Config)
     assert plain['confidence_min'] is float
-    assert plain['safe_takeoff_period_ns'] is int
-    assert plain['estimation_3d_method'] is str
-    assert plain['pd_coeff_p'] is XY
+    assert get_type_hints(TakeOff)['duration_ns'] is int
+    assert plain['estimation_3d_method'] is VelocityMethod
+    assert get_type_hints(PDCoeff)['p'] is XY
     assert get_type_hints(Camera)['cameras'] == list[CameraEntry]
 
     extras = get_type_hints(Config, include_extras=True)
@@ -190,7 +197,7 @@ def test_camera_requires_at_least_one():
 
 def test_bool_is_not_int():
     with pytest.raises(ConfigError):
-        parse_config(valid_with(safe_takeoff_period_ns=True))
+        parse_config(valid_section('takeoff', duration_ns=True))
 
 
 def test_config_is_frozen():
@@ -361,7 +368,7 @@ REQUIRED_TOP = [(Config, n) for n in required_names(Config)]
 def test_schema_has_required_fields():
     # sanity: the complex sub-sections really are required (no silent defaults)
     names = {n for _, n in REQUIRED_TOP}
-    assert {'camera', 'drone', 'bytetrack', 'pd_coeff_p'} <= names
+    assert {'camera', 'drone', 'bytetrack', 'pd_coeff', 'takeoff'} <= names
 
 
 @pytest.mark.parametrize("name", [n for _, n in REQUIRED_TOP], ids=lambda n: n)
@@ -379,7 +386,7 @@ def test_full_config_builds_full_object():
     # every nested section is materialised
     assert isinstance(cfg.camera, Camera)
     assert isinstance(cfg.drone, Drone)
-    assert isinstance(cfg.bytetrack, ByteTrackSection)
+    assert isinstance(cfg.bytetrack, ByteTrack)
     assert cfg.drone.config.use_set_attitude is False
 
 
