@@ -507,3 +507,54 @@ def test_tracker_kwargs_excludes_enabled_and_target_lock():
     assert 'enabled' not in kwargs and 'target_lock' not in kwargs
     # all remaining keys are valid BYTETracker constructor params
     assert kwargs['track_thresh'] == 0.3
+
+
+# ---------------------------------------------------------------------------
+# Consumer contract: a feature backed by an Optional section with an `enabled`
+# field must be gated on `section is not None`, NEVER on `section.enabled`.
+# The controllers import hailo/mavsdk so they can't be imported on the host;
+# assert the contract by scanning their source instead.
+# ---------------------------------------------------------------------------
+_CONSUMER_FILES = ('app.py', 'drone_controller.py', 'platform_controller.py')
+
+
+def _optional_sections_with_enabled():
+    """Config fields typed Optional[<dataclass with an `enabled` field>]."""
+    out = []
+    hints = get_type_hints(Config)  # Annotated stripped, Optional kept as Union
+    for f in dataclasses.fields(Config):
+        ann = hints[f.name]
+        if get_origin(ann) not in (Union, types.UnionType):
+            continue
+        inner = [a for a in get_args(ann) if a is not type(None)]
+        if (len(inner) == 1 and dataclasses.is_dataclass(inner[0])
+                and any(ff.name == 'enabled' for ff in dataclasses.fields(inner[0]))):
+            out.append(f.name)
+    return out
+
+
+def _strip_comments(src: str) -> str:
+    return "\n".join(line.split('#', 1)[0] for line in src.splitlines())
+
+
+def test_schema_has_enabled_toggle_sections():
+    # sanity: the introspection finds the known toggle sections
+    assert {'optical_refinement', 'bytetrack'} <= set(_optional_sections_with_enabled())
+
+
+def test_consumers_gate_on_presence_not_enabled():
+    sections = _optional_sections_with_enabled()
+    base = CONFIG_YAML.parent
+    for fn in _CONSUMER_FILES:
+        code = _strip_comments((base / fn).read_text())
+        for sec in sections:
+            # gating on the flag (`.section.enabled`) is forbidden
+            assert f".{sec}.enabled" not in code, (
+                f"{fn} reads .{sec}.enabled; gate on `{sec} is not None` instead")
+        # legacy flag must be gone too
+        assert ".use_byte_track" not in code, f"{fn} still references .use_byte_track"
+
+
+def test_app_gates_tracker_on_bytetrack_presence():
+    app_code = _strip_comments((CONFIG_YAML.parent / 'app.py').read_text())
+    assert "config.bytetrack is not None" in app_code
