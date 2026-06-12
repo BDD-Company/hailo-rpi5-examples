@@ -46,7 +46,7 @@ def valid_section(section, **overrides):
 
 
 def test_shipped_yaml_parses_and_matches_legacy_values():
-    cfg = load_config(CONFIG_YAML)
+    cfg = load_config(Config, CONFIG_YAML)
     assert isinstance(cfg, Config)
     assert cfg.confidence_min == 0.4
     assert cfg.takeoff.thrust == 1.0
@@ -66,7 +66,7 @@ def test_shipped_yaml_parses_and_matches_legacy_values():
 
 def test_empty_config_reports_missing_required_sections():
     with pytest.raises(ConfigError) as ei:
-        parse_config({})
+        parse_config(Config, {})
     probs = ei.value.problems
     for name in ('camera', 'drone', 'bytetrack', 'pd_coeff', 'takeoff'):
         assert any(p.startswith(f"{name}:") and 'missing required' in p for p in probs), name
@@ -74,13 +74,13 @@ def test_empty_config_reports_missing_required_sections():
 
 def test_optional_scalars_still_default_when_omitted():
     # A complete config may still omit scalar knobs that carry sensible defaults.
-    cfg = parse_config(_valid_dict())
+    cfg = parse_config(Config, _valid_dict())
     assert cfg.confidence_min == 0.4
     assert cfg.camera.switch_size_ema_alpha == 0.3  # not in the shipped file
 
 
 def test_bytetrack_tracker_kwargs_excludes_target_lock():
-    cfg = parse_config(valid_section('bytetrack', enabled=True))
+    cfg = parse_config(Config, valid_section('bytetrack', enabled=True))
     kwargs = cfg.bytetrack.tracker_kwargs()
     assert 'target_lock' not in kwargs
     assert 'enabled' not in kwargs
@@ -89,13 +89,13 @@ def test_bytetrack_tracker_kwargs_excludes_target_lock():
 
 def test_type_error_reported():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'confidence_min': "high"})
+        parse_config(Config, {'confidence_min': "high"})
     assert any('confidence_min' in p and 'number' in p for p in ei.value.problems)
 
 
 def test_bound_error_reported():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'confidence_min': 1.5, 'thrust': {'max': -0.2}})
+        parse_config(Config, {'confidence_min': 1.5, 'thrust': {'max': -0.2}})
     probs = ei.value.problems
     assert any('confidence_min' in p and 'maximum' in p for p in probs)
     assert any('thrust.max' in p and 'minimum' in p for p in probs)
@@ -103,7 +103,7 @@ def test_bound_error_reported():
 
 def test_errors_accumulated_in_bulk():
     with pytest.raises(ConfigError) as ei:
-        parse_config({
+        parse_config(Config, {
             'confidence_min': 2.0,        # bound
             'thrust': {'max': "x"},       # type
             'estimation_3d_method': 'nope',  # choices
@@ -114,43 +114,43 @@ def test_errors_accumulated_in_bulk():
 
 def test_unknown_top_level_key():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'confidance_min': 0.4})  # typo
+        parse_config(Config, {'confidance_min': 0.4})  # typo
     assert any('confidance_min' in p and 'unknown' in p for p in ei.value.problems)
 
 
 def test_unknown_nested_key():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'drone': {'config': {'upside_down_angel_deg': 130}}})
+        parse_config(Config, {'drone': {'config': {'upside_down_angel_deg': 130}}})
     assert any('upside_down_angel_deg' in p and 'unknown' in p for p in ei.value.problems)
 
 
 def test_runtime_fields_rejected_from_file():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'DEBUG': True})
+        parse_config(Config, {'DEBUG': True})
     assert any('DEBUG' in p and 'unknown' in p for p in ei.value.problems)
     # but settable programmatically (the config is frozen, so via replace())
-    cfg = dataclasses.replace(parse_config(_valid_dict()), DEBUG=True)
+    cfg = dataclasses.replace(parse_config(Config, _valid_dict()), DEBUG=True)
     assert cfg.DEBUG is True
 
 
 def test_xy_validation():
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_section('pd_coeff', p=[1, 2, 3]))
+        parse_config(Config, valid_section('pd_coeff', p=[1, 2, 3]))
     assert any('pd_coeff.p' in p for p in ei.value.problems)
     # mapping form works
-    cfg = parse_config(valid_with(aim_point={'x': 0.4, 'y': 0.6}))
+    cfg = parse_config(Config, valid_with(aim_point={'x': 0.4, 'y': 0.6}))
     assert cfg.aim_point == XY(0.4, 0.6)
 
 
 def test_xy_component_bounds():
     with pytest.raises(ConfigError) as ei:
-        parse_config({'aim_point': [0.5, 1.5]})
+        parse_config(Config, {'aim_point': [0.5, 1.5]})
     assert any('aim_point.y' in p for p in ei.value.problems)
 
 
 def test_choices_validation():
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_section('camera', video_format='JPEG'))
+        parse_config(Config, valid_section('camera', video_format='JPEG'))
     assert any('video_format' in p for p in ei.value.problems)
 
 
@@ -190,17 +190,17 @@ def test_range_validates_each_numeric_field_of_any_dataclass():
 
 def test_camera_requires_at_least_one():
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_section('camera', cameras=[]))
+        parse_config(Config, valid_section('camera', cameras=[]))
     assert any('cameras' in p and 'at least' in p for p in ei.value.problems)
 
 
 def test_bool_is_not_int():
     with pytest.raises(ConfigError):
-        parse_config(valid_section('takeoff', duration_ns=True))
+        parse_config(Config, valid_section('takeoff', duration_ns=True))
 
 
 def test_config_is_frozen():
-    cfg = parse_config(_valid_dict())
+    cfg = parse_config(Config, _valid_dict())
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.confidence_min = 0.1
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -212,16 +212,16 @@ def test_config_is_frozen():
 
 
 def test_optional_field_accepts_null_and_value():
-    cfg = parse_config(valid_section('bytetrack', enabled=True, recovery_max_dist=None))
+    cfg = parse_config(Config, valid_section('bytetrack', enabled=True, recovery_max_dist=None))
     assert cfg.bytetrack.recovery_max_dist is None
-    cfg = parse_config(valid_section('bytetrack', enabled=True, recovery_max_dist=0.5))
+    cfg = parse_config(Config, valid_section('bytetrack', enabled=True, recovery_max_dist=0.5))
     assert cfg.bytetrack.recovery_max_dist == 0.5
 
 
 def test_missing_required_nested_section_reported():
     # drone present but its required `config` block omitted.
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_with(drone={'connection_string': 'usb'}))
+        parse_config(Config, valid_with(drone={'connection_string': 'usb'}))
     assert any(p.startswith('drone.config:') and 'missing required' in p
                for p in ei.value.problems)
 
@@ -240,7 +240,7 @@ def test_errors_annotated_with_file_line_numbers(tmp_path):
         "    bogus_key: 1\n"                          # line 9
     )
     with pytest.raises(ConfigError) as ei:
-        load_config(bad)
+        load_config(Config, bad)
     probs = ei.value.problems
     assert any('confidence_min' in p and 'broken.yaml line 1' in p for p in probs)
     assert any('aim_point.y' in p and 'broken.yaml line 2' in p for p in probs)
@@ -375,13 +375,13 @@ def test_missing_each_required_top_level_field_is_reported(name):
     data = _valid_dict()
     del data[name]
     with pytest.raises(ConfigError) as ei:
-        parse_config(data)
+        parse_config(Config, data)
     assert any(p.startswith(f"{name}:") and 'missing required' in p
                for p in ei.value.problems), ei.value.problems
 
 
 def test_full_config_builds_full_object():
-    cfg = parse_config(_valid_dict())
+    cfg = parse_config(Config, _valid_dict())
     # every nested section is materialised (bytetrack disabled -> None in shipped)
     assert isinstance(cfg.camera, Camera)
     assert isinstance(cfg.drone, Drone)
@@ -396,7 +396,7 @@ def test_every_field_rejects_wrong_type(segments, base):
         pytest.skip(f"no wrong-type sample for {base}")
     data = _build_nested(segments, WRONG_TYPED[base])
     with pytest.raises(ConfigError) as ei:
-        parse_config(data)
+        parse_config(Config, data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
 
 
@@ -416,7 +416,7 @@ def test_every_ranged_field_rejects_out_of_bounds(segments, base, rng):
     value = [bad, bad] if base is XY else bad
     data = _build_nested(segments, value)
     with pytest.raises(ConfigError) as ei:
-        parse_config(data)
+        parse_config(Config, data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
 
 
@@ -429,7 +429,7 @@ _CHOICE_FIELDS = [(s, [c for c in cs if isinstance(c, Choices)][0])
 def test_every_choices_field_rejects_unknown(segments, choices):
     data = _build_nested(segments, "__not_a_valid_choice__")
     with pytest.raises(ConfigError) as ei:
-        parse_config(data)
+        parse_config(Config, data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
 
 
@@ -443,7 +443,7 @@ def test_every_choices_field_rejects_unknown(segments, choices):
 ])
 def test_unknown_key_rejected_in_every_section(section_data):
     with pytest.raises(ConfigError) as ei:
-        parse_config(section_data)
+        parse_config(Config, section_data)
     assert any('__bogus__' in p and 'unknown' in p for p in ei.value.problems)
 
 
@@ -454,27 +454,27 @@ def test_unknown_key_rejected_in_every_section(section_data):
 # `section is not None`, never `section.enabled`.
 # ---------------------------------------------------------------------------
 def test_shipped_yaml_section_toggles():
-    cfg = load_config(CONFIG_YAML)
+    cfg = load_config(Config, CONFIG_YAML)
     # shipped: optical_refinement enabled, bytetrack disabled
     assert isinstance(cfg.optical_refinement, OpticalRefinement)
     assert cfg.bytetrack is None
 
 
 def test_enabled_false_returns_none():
-    cfg = parse_config(valid_section('optical_refinement', enabled=False))
+    cfg = parse_config(Config, valid_section('optical_refinement', enabled=False))
     assert cfg.optical_refinement is None
 
 
 def test_enabled_true_returns_object():
-    cfg = parse_config(valid_section('bytetrack', enabled=True))
+    cfg = parse_config(Config, valid_section('bytetrack', enabled=True))
     assert isinstance(cfg.bytetrack, ByteTrack)
 
 
 def test_enabled_is_not_reflected_on_the_dataclass():
     # `enabled` is a file-only toggle; it must NOT become an attribute.
-    cfg = parse_config(valid_section('bytetrack', enabled=True))
+    cfg = parse_config(Config, valid_section('bytetrack', enabled=True))
     assert not hasattr(cfg.bytetrack, 'enabled')
-    cfg = parse_config(valid_section('optical_refinement', enabled=True))
+    cfg = parse_config(Config, valid_section('optical_refinement', enabled=True))
     assert not hasattr(cfg.optical_refinement, 'enabled')
 
 
@@ -483,14 +483,14 @@ def test_enabled_omitted_defaults_to_present():
     d = _valid_dict()
     d['optical_refinement'].pop('enabled', None)
     d['bytetrack'].pop('enabled', None)
-    cfg = parse_config(d)
+    cfg = parse_config(Config, d)
     assert cfg.optical_refinement is not None
     assert cfg.bytetrack is not None
 
 
 def test_enabled_must_be_bool():
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_section('bytetrack', enabled="yes"))
+        parse_config(Config, valid_section('bytetrack', enabled="yes"))
     assert any('bytetrack.enabled' in p and 'boolean' in p for p in ei.value.problems)
 
 
@@ -498,7 +498,7 @@ def test_enabled_must_be_bool():
 def test_enabled_on_non_optional_section_is_error(section):
     # `enabled` only applies to Optional sections; elsewhere it's rejected.
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_section(section, enabled=True))
+        parse_config(Config, valid_section(section, enabled=True))
     assert any(p.startswith(f"{section}.enabled:") and 'only valid for optional' in p
                for p in ei.value.problems)
 
@@ -506,24 +506,24 @@ def test_enabled_on_non_optional_section_is_error(section):
 def test_disabled_section_is_still_validated_bounds():
     # enabled=False must NOT skip validation of the rest of the section.
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_section('bytetrack', enabled=False, track_thresh=5.0))
+        parse_config(Config, valid_section('bytetrack', enabled=False, track_thresh=5.0))
     assert any('bytetrack.track_thresh' in p and 'maximum' in p for p in ei.value.problems)
 
 
 def test_disabled_section_is_still_validated_unknown_key():
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_section('optical_refinement', enabled=False, __bogus__=1))
+        parse_config(Config, valid_section('optical_refinement', enabled=False, __bogus__=1))
     assert any('optical_refinement.__bogus__' in p and 'unknown' in p for p in ei.value.problems)
 
 
 def test_disabled_section_is_still_validated_types():
     with pytest.raises(ConfigError) as ei:
-        parse_config(valid_section('bytetrack', enabled=False, track_buffer="lots"))
+        parse_config(Config, valid_section('bytetrack', enabled=False, track_buffer="lots"))
     assert any('bytetrack.track_buffer' in p for p in ei.value.problems)
 
 
 def test_tracker_kwargs_excludes_enabled_and_target_lock():
-    cfg = parse_config(valid_section('bytetrack', enabled=True))
+    cfg = parse_config(Config, valid_section('bytetrack', enabled=True))
     kwargs = cfg.bytetrack.tracker_kwargs()
     assert 'enabled' not in kwargs and 'target_lock' not in kwargs
     # all remaining keys are valid BYTETracker constructor params

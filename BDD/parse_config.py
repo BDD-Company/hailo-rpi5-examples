@@ -9,11 +9,13 @@ the offending line in the source file. See config.py for the schema itself.
 from dataclasses import MISSING, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, TypeVar, Union, get_args, get_origin, get_type_hints
 import types
 
 from helpers import XY
-from config import Config, _Constraint
+from config import _Constraint
+
+T = TypeVar("T")
 
 
 class ConfigError(ValueError):
@@ -262,22 +264,24 @@ def _with_line_numbers(errors: list[str], line_map: dict[str, int], source: str)
     return enriched
 
 
-def parse_config(data: dict | None, line_map: dict[str, int] | None = None,
-                 source: str = "config file") -> Config:
-    """Validate a parsed-YAML mapping and return a Config, or raise ConfigError.
+def parse_config(config_type: type[T], data: dict | None,
+                 line_map: dict[str, int] | None = None,
+                 source: str = "config file") -> T:
+    """Validate a parsed-YAML mapping against `config_type`, or raise ConfigError.
 
+    `config_type` is the root dataclass the mapping is parsed into (e.g. Config).
     If `line_map` (path -> file line) is supplied, every reported problem is
     annotated with the offending line in `source`.
     """
     errors: list[str] = []
-    cfg = _parse_dataclass(Config, data or {}, "", errors)
+    cfg = _parse_dataclass(config_type, data or {}, "", errors)
     if errors:
         raise ConfigError(_with_line_numbers(errors, line_map, source) if line_map else errors)
     return cfg
 
 
-def load_config(path: str | Path) -> Config:
-    """Read a YAML file and return a validated Config (raises ConfigError).
+def load_config(config_type: type[T], path: str | Path) -> T:
+    """Read a YAML file and validate it against `config_type` (raises ConfigError).
 
     Errors are reported in bulk and annotated with the offending file line.
     """
@@ -290,4 +294,4 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError([f"<root>: top level must be a mapping, got {type(data).__name__}"])
     line_map: dict[str, int] = {}
     _collect_node_lines(yaml.compose(text), "", line_map)
-    return parse_config(data, line_map, source=Path(path).name)
+    return parse_config(config_type, data, line_map, source=Path(path).name)

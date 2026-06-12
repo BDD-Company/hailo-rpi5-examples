@@ -296,3 +296,17 @@ class Config:
     # file (providing them in the file is reported as an unknown key).
     DEBUG:                bool = field(default=False, metadata={'runtime': True})
     debug_telemetry_dict: Optional[dict] = field(default=None, metadata={'runtime': True})
+
+    # Convenience entry points: parse/validate a YAML file or an already-parsed
+    # mapping into a Config. The parser is generic over the root type; these
+    # forward `Config` so callers don't repeat it. (lazy import avoids a cycle:
+    # parse_config imports config for _Constraint.)
+    @staticmethod
+    def load(path) -> "Config":
+        from parse_config import load_config
+        return load_config(Config, path)
+
+    @staticmethod
+    def parse(data, **kwargs) -> "Config":
+        from parse_config import parse_config
+        return parse_config(Config, data, **kwargs)

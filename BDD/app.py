@@ -31,7 +31,6 @@ from bytetrack import BYTETracker
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
 from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
 from config import Config
-from parse_config import load_config
 from dataclasses import asdict, replace
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
@@ -380,7 +379,7 @@ def main():
     arg_parser.add_argument('--test-camera-switch-s', type=float, default=None,
                             help='Toggle active camera every N seconds (dual-camera verification only)')
 
-    config = load_config(Path(__file__).resolve().parent / "config.yaml")
+    config = Config.load(Path(__file__).resolve().parent / "config.yaml")
     config = replace(config, DEBUG=DEBUG)
 
     # bytetrack is an Optional section: present (non-None) enables tracking,
