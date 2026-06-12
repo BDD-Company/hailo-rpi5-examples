@@ -468,18 +468,39 @@ def test_enabled_false_returns_none():
 def test_enabled_true_returns_object():
     cfg = parse_config(valid_section('bytetrack', enabled=True))
     assert isinstance(cfg.bytetrack, ByteTrack)
-    assert cfg.bytetrack.enabled is True
 
 
-def test_enabled_default_drives_presence():
-    # optical default enabled=True (present when omitted), bytetrack default
-    # enabled=False (None when omitted).
+def test_enabled_is_not_reflected_on_the_dataclass():
+    # `enabled` is a file-only toggle; it must NOT become an attribute.
+    cfg = parse_config(valid_section('bytetrack', enabled=True))
+    assert not hasattr(cfg.bytetrack, 'enabled')
+    cfg = parse_config(valid_section('optical_refinement', enabled=True))
+    assert not hasattr(cfg.optical_refinement, 'enabled')
+
+
+def test_enabled_omitted_defaults_to_present():
+    # `enabled` absent -> section present (default True), uniformly.
     d = _valid_dict()
     d['optical_refinement'].pop('enabled', None)
     d['bytetrack'].pop('enabled', None)
     cfg = parse_config(d)
     assert cfg.optical_refinement is not None
-    assert cfg.bytetrack is None
+    assert cfg.bytetrack is not None
+
+
+def test_enabled_must_be_bool():
+    with pytest.raises(ConfigError) as ei:
+        parse_config(valid_section('bytetrack', enabled="yes"))
+    assert any('bytetrack.enabled' in p and 'boolean' in p for p in ei.value.problems)
+
+
+@pytest.mark.parametrize("section", ['camera', 'drone', 'pd_coeff', 'takeoff'])
+def test_enabled_on_non_optional_section_is_error(section):
+    # `enabled` only applies to Optional sections; elsewhere it's rejected.
+    with pytest.raises(ConfigError) as ei:
+        parse_config(valid_section(section, enabled=True))
+    assert any(p.startswith(f"{section}.enabled:") and 'only valid for optional' in p
+               for p in ei.value.problems)
 
 
 def test_disabled_section_is_still_validated_bounds():
@@ -518,8 +539,12 @@ def test_tracker_kwargs_excludes_enabled_and_target_lock():
 _CONSUMER_FILES = ('app.py', 'drone_controller.py', 'platform_controller.py')
 
 
-def _optional_sections_with_enabled():
-    """Config fields typed Optional[<dataclass with an `enabled` field>]."""
+def _optional_dataclass_sections():
+    """Config fields typed Optional[<dataclass>] — the toggleable sections.
+
+    `enabled` is a file-only toggle (not a dataclass field), so a section is
+    toggleable purely by virtue of being Optional[<dataclass>].
+    """
     out = []
     hints = get_type_hints(Config)  # Annotated stripped, Optional kept as Union
     for f in dataclasses.fields(Config):
@@ -527,8 +552,7 @@ def _optional_sections_with_enabled():
         if get_origin(ann) not in (Union, types.UnionType):
             continue
         inner = [a for a in get_args(ann) if a is not type(None)]
-        if (len(inner) == 1 and dataclasses.is_dataclass(inner[0])
-                and any(ff.name == 'enabled' for ff in dataclasses.fields(inner[0]))):
+        if len(inner) == 1 and dataclasses.is_dataclass(inner[0]):
             out.append(f.name)
     return out
 
@@ -539,11 +563,11 @@ def _strip_comments(src: str) -> str:
 
 def test_schema_has_enabled_toggle_sections():
     # sanity: the introspection finds the known toggle sections
-    assert {'optical_refinement', 'bytetrack'} <= set(_optional_sections_with_enabled())
+    assert {'optical_refinement', 'bytetrack'} <= set(_optional_dataclass_sections())
 
 
 def test_consumers_gate_on_presence_not_enabled():
-    sections = _optional_sections_with_enabled()
+    sections = _optional_dataclass_sections()
     base = CONFIG_YAML.parent
     for fn in _CONSUMER_FILES:
         code = _strip_comments((base / fn).read_text())

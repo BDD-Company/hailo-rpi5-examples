@@ -155,7 +155,7 @@ class Config:
     class OpticalRefinement:
         # enabled=False disables the whole feature (parser returns None for the
         # section); check `config.optical_refinement is not None`, not .enabled.
-        enabled: bool = True
+        # enabled: bool = True
         adjust_aim_point_at_edge_of_frame:                bool = True
         adjust_aim_point_at_edge_of_frame_threshold:      Annotated[float, Range(0.0, 1.0)] = 0.01
         # w*h, so a normalized area in 0..1.
@@ -272,7 +272,7 @@ class Config:
         enabled=False disables tracking (parser returns None for the section);
         check `config.bytetrack is not None`, not .enabled.
         """
-        enabled:           bool = False
+        # enabled:           bool = False
         track_thresh:      Annotated[float, Range(0.0, 1.0)] = 0.5
         det_thresh:        Annotated[float, Range(0.0, 1.0)] = 0.6
         match_thresh:      Annotated[float, Range(0.0, 1.0)] = 0.8
@@ -286,9 +286,9 @@ class Config:
         target_lock:       bool = True
 
         def tracker_kwargs(self) -> dict:
-            # enabled / target_lock are consumed by the app/controller,
-            # NOT valid BYTETracker constructor kwargs.
-            controller_only = ('enabled', 'target_lock')
+            # target_lock is consumed by the controller, NOT a valid BYTETracker
+            # constructor kwarg. (`enabled` is a file-only toggle, never a field.)
+            controller_only = ('target_lock',)
             return {k: v for k, v in asdict(self).items() if k not in controller_only}
     bytetrack: Optional[ByteTrack]
 

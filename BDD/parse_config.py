@@ -124,13 +124,24 @@ def _coerce(value, ann, path, errors):
     elif base is XY:
         coerced = _coerce_xy(value, path, errors)
     elif is_dataclass(base):
+        # `enabled` is a file-only toggle (NOT a dataclass field; never stored on
+        # the result). On an Optional section it decides presence: enabled=False
+        # still fully validates the section but yields None, so a feature can be
+        # switched off without commenting it out. Consumers test
+        # `section is not None`, never `section.enabled`. On a NON-optional
+        # section, `enabled` is not allowed and is reported as an error.
+        enabled = True
+        if isinstance(value, dict) and 'enabled' in value:
+            raw_enabled = value['enabled']
+            value = {k: v for k, v in value.items() if k != 'enabled'}
+            if not optional:
+                errors.append(f"{path}.enabled: 'enabled' is only valid for optional sections")
+            elif not isinstance(raw_enabled, bool):
+                errors.append(f"{path}.enabled: expected a boolean, got {type(raw_enabled).__name__}")
+            else:
+                enabled = raw_enabled
         coerced = _parse_dataclass(base, value, path, errors)
-        # Quick-disable: an Optional sub-section whose `enabled` field parses to
-        # False is still fully validated (above), but yields None so the feature
-        # is off without commenting the whole section out. Consumers must test
-        # `section is not None`, not `section.enabled`.
-        if (optional and coerced is not _INVALID
-                and getattr(coerced, 'enabled', True) is False):
+        if optional and enabled is False and coerced is not _INVALID:
             coerced = None
     elif get_origin(base) in (list, types.GenericAlias) or base is list:
         item_type = get_args(base)[0] if get_args(base) else Any
