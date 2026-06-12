@@ -117,7 +117,7 @@ def tvalid() -> dict:
     return yaml.safe_load(TEST_CONFIG_YAML)
 
 # just a littly halper to eye-validate that error messages are looking human-friendly
-__DEBUG_PRINT_ERROR_MESSAGES = True
+__DEBUG_PRINT_ERROR_MESSAGES = False
 
 def tparse(data):
     # Round-trip through YAML text (not parse_config(dict)) so the parser builds
