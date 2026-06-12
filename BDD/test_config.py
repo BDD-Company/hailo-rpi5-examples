@@ -119,7 +119,7 @@ def tvalid() -> dict:
 # just a littly halper to eye-validate that error messages are looking human-friendly
 __DEBUG_PRINT_ERROR_MESSAGES = False
 
-def tparse(data):
+def covert_to_config(data):
     # Round-trip through YAML text (not parse_config(dict)) so the parser builds
     # a line map and every error is annotated with its line — exactly like a
     # real config file. yaml.dump is the canonical source those line #s refer to.
@@ -148,7 +148,7 @@ def tvalid_section(section, **overrides):
 # Positive: a complete config parses, with nesting/enum/optional/list resolved.
 # ---------------------------------------------------------------------------
 def test_full_valid_config_parses():
-    cfg = tparse(tvalid())
+    cfg = covert_to_config(tvalid())
     assert isinstance(cfg, TestConfig)
     assert cfg.name == "hello"
     assert cfg.ratio == 0.5
@@ -169,7 +169,7 @@ def test_defaults_apply_when_omitted():
     d = tvalid()
     del d['name']          # has a default
     d['sub_section'].pop('label', None)   # nested default
-    cfg = tparse(d)
+    cfg = covert_to_config(d)
     assert cfg.name == "default"
     assert cfg.sub_section.label == 'a'
 
@@ -179,13 +179,13 @@ def test_defaults_apply_when_omitted():
 # ---------------------------------------------------------------------------
 def test_type_error_reported():
     with pytest.raises(ConfigError) as ei:
-        tparse({'ratio': "high"})
+        covert_to_config({'ratio': "high"})
     assert any('ratio' in p and 'number' in p for p in ei.value.problems)
 
 
 def test_bound_error_reported():
     with pytest.raises(ConfigError) as ei:
-        tparse({'ratio': 1.5, 'count': 0})
+        covert_to_config({'ratio': 1.5, 'count': 0})
     probs = ei.value.problems
     assert any('ratio' in p and 'maximum' in p for p in probs)
     assert any('count' in p and 'minimum' in p for p in probs)
@@ -193,19 +193,19 @@ def test_bound_error_reported():
 
 def test_choices_validation():
     with pytest.raises(ConfigError) as ei:
-        tparse(tvalid_section('sub_section', label='z'))
+        covert_to_config(tvalid_section('sub_section', label='z'))
     assert any('sub_section.label' in p and 'not one of' in p for p in ei.value.problems)
 
 
 def test_enum_validation():
     with pytest.raises(ConfigError) as ei:
-        tparse({'color': 'mauve'})
+        covert_to_config({'color': 'mauve'})
     assert any('color' in p and 'not one of' in p for p in ei.value.problems)
 
 
 def test_errors_accumulated_in_bulk():
     with pytest.raises(ConfigError) as ei:
-        tparse({
+        covert_to_config({
             'ratio': 2.0,            # bound
             'count': "x",            # type
             'color': 'mauve',        # enum
@@ -216,19 +216,19 @@ def test_errors_accumulated_in_bulk():
 
 def test_unknown_top_level_key():
     with pytest.raises(ConfigError) as ei:
-        tparse({'naem': "typo"})
+        covert_to_config({'naem': "typo"})
     assert any('naem' in p and 'unknown' in p for p in ei.value.problems)
 
 
 def test_unknown_nested_key():
     with pytest.raises(ConfigError) as ei:
-        tparse({'sub_section': {'required_value': 1.0, 'bogus': 1}})
+        covert_to_config({'sub_section': {'required_value': 1.0, 'bogus': 1}})
     assert any('sub_section.bogus' in p and 'unknown' in p for p in ei.value.problems)
 
 
 def test_bool_is_not_int():
     with pytest.raises(ConfigError):
-        tparse(tvalid_with(count=True))
+        covert_to_config(tvalid_with(count=True))
 
 
 # ---------------------------------------------------------------------------
@@ -236,27 +236,27 @@ def test_bool_is_not_int():
 # ---------------------------------------------------------------------------
 def test_xy_validation():
     with pytest.raises(ConfigError) as ei:
-        tparse(tvalid_with(gain=[1, 2, 3]))
+        covert_to_config(tvalid_with(gain=[1, 2, 3]))
     assert any('gain' in p for p in ei.value.problems)
     # mapping form works
-    cfg = tparse(tvalid_with(point={'x': 0.4, 'y': 0.6}))
+    cfg = covert_to_config(tvalid_with(point={'x': 0.4, 'y': 0.6}))
     assert cfg.point == XY(0.4, 0.6)
 
 
 def test_xy_component_bounds():
     with pytest.raises(ConfigError) as ei:
-        tparse({'point': [0.5, 1.5]})
+        covert_to_config({'point': [0.5, 1.5]})
     assert any('point.y' in p for p in ei.value.problems)
 
 
 def test_optional_scalar_accepts_null_and_value():
-    assert tparse(tvalid_with(threshold=None)).threshold is None
-    assert tparse(tvalid_with(threshold=0.5)).threshold == 0.5
+    assert covert_to_config(tvalid_with(threshold=None)).threshold is None
+    assert covert_to_config(tvalid_with(threshold=0.5)).threshold == 0.5
 
 
 def test_list_requires_min_items():
     with pytest.raises(ConfigError) as ei:
-        tparse(tvalid_with(items=[]))
+        covert_to_config(tvalid_with(items=[]))
     assert any('items' in p and 'at least' in p for p in ei.value.problems)
 
 
@@ -265,7 +265,7 @@ def test_list_requires_min_items():
 # ---------------------------------------------------------------------------
 def test_missing_required_top_level_reported():
     with pytest.raises(ConfigError) as ei:
-        tparse({})
+        covert_to_config({})
     probs = ei.value.problems
     for name in ('gain', 'sub_section', 'feature', 'items'):
         assert any(p.startswith(f"{name}:") and 'missing required' in p for p in probs), name
@@ -273,13 +273,13 @@ def test_missing_required_top_level_reported():
 
 def test_missing_required_nested_field_reported():
     with pytest.raises(ConfigError) as ei:
-        tparse(tvalid_with(sub_section={'label': 'a'}))   # drops required_value
+        covert_to_config(tvalid_with(sub_section={'label': 'a'}))   # drops required_value
     assert any(p.startswith('sub_section.required_value:') and 'missing required' in p
                for p in ei.value.problems)
 
 
 def test_config_is_frozen():
-    cfg = tparse(tvalid())
+    cfg = covert_to_config(tvalid())
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.ratio = 0.1
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -291,10 +291,10 @@ def test_config_is_frozen():
 
 def test_runtime_fields_rejected_from_file():
     with pytest.raises(ConfigError) as ei:
-        tparse({'DEBUG': True})
+        covert_to_config({'DEBUG': True})
     assert any('DEBUG' in p and 'unknown' in p for p in ei.value.problems)
     # but settable programmatically (frozen -> via replace)
-    cfg = dataclasses.replace(tparse(tvalid()), DEBUG=True)
+    cfg = dataclasses.replace(covert_to_config(tvalid()), DEBUG=True)
     assert cfg.DEBUG is True
 
 
@@ -362,53 +362,53 @@ def test_range_validates_each_numeric_field_of_any_dataclass():
 # an error. Consumers test `section is not None`, never `section.enabled`.
 # ---------------------------------------------------------------------------
 def test_enabled_false_returns_none():
-    cfg = tparse(tvalid_section('feature', enabled=False))
+    cfg = covert_to_config(tvalid_section('feature', enabled=False))
     assert cfg.feature is None
 
 
 def test_enabled_true_returns_object():
-    cfg = tparse(tvalid_section('feature', enabled=True))
+    cfg = covert_to_config(tvalid_section('feature', enabled=True))
     assert isinstance(cfg.feature, FeatureSection)
 
 
 def test_enabled_is_not_reflected_on_the_dataclass():
-    cfg = tparse(tvalid_section('feature', enabled=True))
+    cfg = covert_to_config(tvalid_section('feature', enabled=True))
     assert not hasattr(cfg.feature, 'enabled')
 
 
 def test_enabled_omitted_defaults_to_present():
     d = tvalid()
     d['feature'].pop('enabled', None)
-    assert tparse(d).feature is not None
+    assert covert_to_config(d).feature is not None
 
 
 def test_enabled_must_be_bool():
     with pytest.raises(ConfigError) as ei:
-        tparse(tvalid_section('feature', enabled="yes"))
+        covert_to_config(tvalid_section('feature', enabled="yes"))
     assert any('feature.enabled' in p and 'boolean' in p for p in ei.value.problems)
 
 
 def test_enabled_on_non_optional_section_is_error():
     with pytest.raises(ConfigError) as ei:
-        tparse(tvalid_section('sub_section', enabled=True))
+        covert_to_config(tvalid_section('sub_section', enabled=True))
     assert any(p.startswith('sub_section.enabled:') and 'only valid for optional' in p
                for p in ei.value.problems)
 
 
 def test_disabled_section_is_still_validated_bounds():
     with pytest.raises(ConfigError) as ei:
-        tparse(tvalid_section('feature', enabled=False, intensity=5.0))
+        covert_to_config(tvalid_section('feature', enabled=False, intensity=5.0))
     assert any('feature.intensity' in p and 'maximum' in p for p in ei.value.problems)
 
 
 def test_disabled_section_is_still_validated_unknown_key():
     with pytest.raises(ConfigError) as ei:
-        tparse(tvalid_section('feature', enabled=False, __bogus__=1))
+        covert_to_config(tvalid_section('feature', enabled=False, __bogus__=1))
     assert any('feature.__bogus__' in p and 'unknown' in p for p in ei.value.problems)
 
 
 def test_section_method_survives_parsing():
-    cfg = tparse(tvalid_section('feature', enabled=True))
+    cfg = covert_to_config(tvalid_section('feature', enabled=True))
     kwargs = cfg.feature.public_kwargs()
     assert 'mode' not in kwargs
     assert kwargs['intensity'] == 0.7
@@ -500,7 +500,7 @@ def test_schema_has_required_fields():
 
 
 def test_full_config_builds_full_object():
-    cfg = tparse(tvalid())
+    cfg = covert_to_config(tvalid())
     assert isinstance(cfg.sub_section, SubSection)
     assert isinstance(cfg.feature, FeatureSection)
     assert all(isinstance(i, Item) for i in cfg.items)
@@ -511,7 +511,7 @@ def test_missing_each_required_top_level_field_is_reported(name):
     data = tvalid()
     del data[name]
     with pytest.raises(ConfigError) as ei:
-        tparse(data)
+        covert_to_config(data)
     assert any(p.startswith(f"{name}:") and 'missing required' in p
                for p in ei.value.problems), ei.value.problems
 
@@ -527,7 +527,7 @@ def test_every_field_rejects_wrong_type(segments, base):
         pytest.skip(f"no wrong-type sample for {base}")
     data = _build_nested(segments, bad)
     with pytest.raises(ConfigError) as ei:
-        tparse(data)
+        covert_to_config(data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
 
 
@@ -547,7 +547,7 @@ def test_every_ranged_field_rejects_out_of_bounds(segments, base, rng):
     value = [bad, bad] if base is XY else bad
     data = _build_nested(segments, value)
     with pytest.raises(ConfigError) as ei:
-        tparse(data)
+        covert_to_config(data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
 
 
@@ -560,7 +560,7 @@ _CHOICE_FIELDS = [(s, [c for c in cs if isinstance(c, Choices)][0])
 def test_every_choices_field_rejects_unknown(segments, choices):
     data = _build_nested(segments, "__not_a_valid_choice__")
     with pytest.raises(ConfigError) as ei:
-        tparse(data)
+        covert_to_config(data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
 
 
@@ -573,7 +573,7 @@ def test_every_choices_field_rejects_unknown(segments, choices):
 ])
 def test_unknown_key_rejected_in_every_section(section_data):
     with pytest.raises(ConfigError) as ei:
-        tparse(section_data)
+        covert_to_config(section_data)
     assert any('__bogus__' in p and 'unknown' in p for p in ei.value.problems)
 
 
@@ -581,7 +581,7 @@ def test_deeply_nested_bound_error_uses_full_path():
     d = tvalid()
     d['sub_section']['limits'] = {'hi': 5.0}   # 2 levels deep, out of [0, 1]
     with pytest.raises(ConfigError) as ei:
-        tparse(d)
+        covert_to_config(d)
     assert any(p.startswith('sub_section.limits.hi:') and 'maximum' in p
                for p in ei.value.problems)
 
@@ -589,7 +589,7 @@ def test_deeply_nested_bound_error_uses_full_path():
 def test_missing_required_deep_section_reported():
     # `limits` (required) dropped from sub_section -> reported with full path.
     with pytest.raises(ConfigError) as ei:
-        tparse(tvalid_with(sub_section={'required_value': 4.0}))   # replaces section, no `limits`
+        covert_to_config(tvalid_with(sub_section={'required_value': 4.0}))   # replaces section, no `limits`
     assert any(p.startswith('sub_section.limits:') and 'missing required' in p
                for p in ei.value.problems)
 
