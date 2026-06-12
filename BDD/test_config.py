@@ -1,171 +1,317 @@
-"""Host-runnable tests for config parsing/validation (no hailo/mavsdk needed)."""
+"""Tests for config parsing/validation (host-runnable; no hailo/mavsdk needed).
+
+Most tests run against a self-contained ``TestConfig`` schema + its own YAML
+constant, NOT the production ``Config``/``config.yaml`` — so changing the real
+config does not break the parser/feature tests. A small set of clearly-marked
+tests stay on the real Config: a smoke test that ``config.yaml`` still loads,
+and the consumer-contract tests (which scan the real controllers' source).
+
+IMPORTANT: if a feature is added/removed/changed in Config or parse_config.py,
+it must be mirrored in ``TestConfig`` and covered here (see MEMORY).
+"""
 
 import dataclasses
+import enum
 import types
 from pathlib import Path
-from typing import Annotated, Union, get_args, get_origin, get_type_hints
+from typing import Annotated, Optional, Union, get_args, get_origin, get_type_hints
 
+import yaml
 import pytest
 
-from config import Config, Range, Choices, _Constraint
+from config import Config, Range, Choices, MinItems, _Constraint
 from parse_config import parse_config, load_config, ConfigError
 from helpers import XY
-from TargetEstimator import VelocityMethod
-
-# The section dataclasses are nested inside Config; alias them for readability.
-Camera = Config.Camera
-CameraEntry = Config.Camera.CameraEntry
-Drone = Config.Drone
-ByteTrack = Config.ByteTrack
-PDCoeff = Config.PDCoeff
-TakeOff = Config.TakeOff
-OpticalRefinement = Config.OpticalRefinement
 
 
-CONFIG_YAML = Path(__file__).resolve().parent / "config.yaml"
+# ===========================================================================
+# TestConfig: a synthetic schema exercising every parser feature, decoupled
+# from the production Config. Field names are arbitrary / feature-specific.
+# ===========================================================================
+class Color(enum.Enum):
+    RED = "red"
+    GREEN = "green"
+    BLUE = "blue"
 
 
-def _valid_dict():
-    """A complete, valid config mapping (the shipped one) to build cases from."""
-    import yaml
-    return yaml.safe_load(CONFIG_YAML.read_text())
+@dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+class TestConfig:
+    __test__ = False  # don't let pytest try to collect this as a test class
+
+    # scalars with defaults + constraints
+    name:   str = "default"
+    ratio:  Annotated[float, Range(0.0, 1.0)] = 0.5          # bounded float
+    count:  Annotated[int, Range(min=1)] = 3                 # bounded int
+    color:  Color = Color.GREEN                              # bare enum field
+    point:  Annotated[XY, Range(0.0, 1.0)] = \
+        dataclasses.field(default_factory=lambda: XY(0.5, 0.5))   # XY + bound
+    threshold: Annotated[Optional[float], Range(min=0.0)] = None   # optional scalar
+
+    # required (no default)
+    gain:   Annotated[XY, Range(min=0.0)]                    # required XY
+
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class SubSection:
+        required_value: Annotated[float, Range(0.0, 10.0)]   # nested required
+        label:          Annotated[str, Choices('a', 'b', 'c')] = 'a'   # Choices + default
+    sub_section: SubSection                                  # required non-optional section
+
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class FeatureSection:
+        intensity: Annotated[float, Range(0.0, 1.0)] = 0.7
+        mode:      str = "auto"
+
+        def public_kwargs(self) -> dict:
+            # a method that survives parsing (mirrors Config.ByteTrack.tracker_kwargs)
+            return {k: v for k, v in dataclasses.asdict(self).items() if k != 'mode'}
+    feature: Optional[FeatureSection]                        # Optional[dataclass] -> enabled toggle
+
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Item:
+        item_id: Annotated[int, Range(min=0)] = 0
+        angle:   Annotated[XY, Range(min=0.0, min_inclusive=False, max=360.0)]   # required
+    items: Annotated[list[Item], MinItems(1)]               # list + MinItems, required
+
+    # runtime-only: never read from the file (providing it is an unknown key)
+    DEBUG: bool = dataclasses.field(default=False, metadata={'runtime': True})
 
 
-def valid_with(**overrides):
-    """Shipped config with top-level keys overridden/added."""
-    d = _valid_dict()
+SubSection = TestConfig.SubSection
+FeatureSection = TestConfig.FeatureSection
+Item = TestConfig.Item
+
+
+TEST_CONFIG_YAML = """\
+name: hello
+ratio: 0.5
+count: 3
+color: blue
+point: [0.5, 0.5]
+threshold: null
+gain: [1.0, 2.0]
+sub_section:
+  required_value: 4.0
+  label: b
+feature:
+  intensity: 0.7
+  mode: auto
+items:
+  - item_id: 0
+    angle: [90, 60]
+  - item_id: 1
+    angle: [14, 8]
+"""
+
+
+def tvalid() -> dict:
+    """A complete, valid TestConfig mapping to build cases from."""
+    return yaml.safe_load(TEST_CONFIG_YAML)
+
+
+def tparse(data):
+    return parse_config(TestConfig, data)
+
+
+def tvalid_with(**overrides):
+    d = tvalid()
     d.update(overrides)
     return d
 
 
-def valid_section(section, **overrides):
-    """Shipped config with one nested section's keys overridden/added."""
-    d = _valid_dict()
+def tvalid_section(section, **overrides):
+    d = tvalid()
     d[section] = {**d.get(section, {}), **overrides}
     return d
 
 
-def test_shipped_yaml_parses_and_matches_legacy_values():
-    cfg = load_config(Config, CONFIG_YAML)
-    assert isinstance(cfg, Config)
-    assert cfg.confidence_min == 0.4
-    assert cfg.takeoff.thrust == 1.0
-    assert cfg.estimation_3d_method == VelocityMethod.NUMPY_REGRESSION
-    assert cfg.pd_coeff.p == XY(8, 2)
-    assert cfg.target_size_m == XY(2, 2)
-    assert cfg.takeoff.duration_ns == 1_000_000_000
-    # nested sections
-    assert isinstance(cfg.camera, Camera)
-    assert isinstance(cfg.drone, Drone)
-    assert cfg.bytetrack is None  # shipped: bytetrack disabled (enabled: false)
-    assert cfg.camera.cameras[0].name == 'wide'
-    assert cfg.camera.cameras[0].frame_angular_size_deg == XY(107, 85)
-    assert cfg.drone.connection_string == 'usb'
-    assert cfg.drone.config.upside_down_angle_deg == 130
+# ---------------------------------------------------------------------------
+# Positive: a complete config parses, with nesting/enum/optional/list resolved.
+# ---------------------------------------------------------------------------
+def test_full_valid_config_parses():
+    cfg = tparse(tvalid())
+    assert isinstance(cfg, TestConfig)
+    assert cfg.name == "hello"
+    assert cfg.ratio == 0.5
+    assert cfg.color is Color.BLUE                  # enum coerced from value
+    assert cfg.point == XY(0.5, 0.5)
+    assert cfg.gain == XY(1.0, 2.0)
+    assert cfg.threshold is None
+    assert isinstance(cfg.sub_section, SubSection)
+    assert cfg.sub_section.required_value == 4.0
+    assert isinstance(cfg.feature, FeatureSection)  # optional section present
+    assert [i.item_id for i in cfg.items] == [0, 1]
+    assert cfg.items[0].angle == XY(90, 60)
 
 
-def test_empty_config_reports_missing_required_sections():
-    with pytest.raises(ConfigError) as ei:
-        parse_config(Config, {})
-    probs = ei.value.problems
-    for name in ('camera', 'drone', 'bytetrack', 'pd_coeff', 'takeoff'):
-        assert any(p.startswith(f"{name}:") and 'missing required' in p for p in probs), name
+def test_defaults_apply_when_omitted():
+    d = tvalid()
+    del d['name']          # has a default
+    d['sub_section'].pop('label', None)   # nested default
+    cfg = tparse(d)
+    assert cfg.name == "default"
+    assert cfg.sub_section.label == 'a'
 
 
-def test_optional_scalars_still_default_when_omitted():
-    # A complete config may still omit scalar knobs that carry sensible defaults.
-    cfg = parse_config(Config, _valid_dict())
-    assert cfg.confidence_min == 0.4
-    assert cfg.camera.switch_size_ema_alpha == 0.3  # not in the shipped file
-
-
-def test_bytetrack_tracker_kwargs_excludes_target_lock():
-    cfg = parse_config(Config, valid_section('bytetrack', enabled=True))
-    kwargs = cfg.bytetrack.tracker_kwargs()
-    assert 'target_lock' not in kwargs
-    assert 'enabled' not in kwargs
-    assert kwargs['track_thresh'] == 0.3
-
-
+# ---------------------------------------------------------------------------
+# Negative: type / bound / choices / enum / bulk / unknown-key.
+# ---------------------------------------------------------------------------
 def test_type_error_reported():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, {'confidence_min': "high"})
-    assert any('confidence_min' in p and 'number' in p for p in ei.value.problems)
+        tparse({'ratio': "high"})
+    assert any('ratio' in p and 'number' in p for p in ei.value.problems)
 
 
 def test_bound_error_reported():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, {'confidence_min': 1.5, 'thrust': {'max': -0.2}})
+        tparse({'ratio': 1.5, 'count': 0})
     probs = ei.value.problems
-    assert any('confidence_min' in p and 'maximum' in p for p in probs)
-    assert any('thrust.max' in p and 'minimum' in p for p in probs)
+    assert any('ratio' in p and 'maximum' in p for p in probs)
+    assert any('count' in p and 'minimum' in p for p in probs)
+
+
+def test_choices_validation():
+    with pytest.raises(ConfigError) as ei:
+        tparse(tvalid_section('sub_section', label='z'))
+    assert any('sub_section.label' in p and 'not one of' in p for p in ei.value.problems)
+
+
+def test_enum_validation():
+    with pytest.raises(ConfigError) as ei:
+        tparse({'color': 'mauve'})
+    assert any('color' in p and 'not one of' in p for p in ei.value.problems)
 
 
 def test_errors_accumulated_in_bulk():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, {
-            'confidence_min': 2.0,        # bound
-            'thrust': {'max': "x"},       # type
-            'estimation_3d_method': 'nope',  # choices
-            'totally_unknown': 1,         # unknown key
+        tparse({
+            'ratio': 2.0,            # bound
+            'count': "x",            # type
+            'color': 'mauve',        # enum
+            'totally_unknown': 1,    # unknown key
         })
     assert len(ei.value.problems) >= 4
 
 
 def test_unknown_top_level_key():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, {'confidance_min': 0.4})  # typo
-    assert any('confidance_min' in p and 'unknown' in p for p in ei.value.problems)
+        tparse({'naem': "typo"})
+    assert any('naem' in p and 'unknown' in p for p in ei.value.problems)
 
 
 def test_unknown_nested_key():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, {'drone': {'config': {'upside_down_angel_deg': 130}}})
-    assert any('upside_down_angel_deg' in p and 'unknown' in p for p in ei.value.problems)
+        tparse({'sub_section': {'required_value': 1.0, 'bogus': 1}})
+    assert any('sub_section.bogus' in p and 'unknown' in p for p in ei.value.problems)
 
 
-def test_runtime_fields_rejected_from_file():
-    with pytest.raises(ConfigError) as ei:
-        parse_config(Config, {'DEBUG': True})
-    assert any('DEBUG' in p and 'unknown' in p for p in ei.value.problems)
-    # but settable programmatically (the config is frozen, so via replace())
-    cfg = dataclasses.replace(parse_config(Config, _valid_dict()), DEBUG=True)
-    assert cfg.DEBUG is True
+def test_bool_is_not_int():
+    with pytest.raises(ConfigError):
+        tparse(tvalid_with(count=True))
 
 
+# ---------------------------------------------------------------------------
+# XY handling, Optional scalars, MinItems.
+# ---------------------------------------------------------------------------
 def test_xy_validation():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, valid_section('pd_coeff', p=[1, 2, 3]))
-    assert any('pd_coeff.p' in p for p in ei.value.problems)
+        tparse(tvalid_with(gain=[1, 2, 3]))
+    assert any('gain' in p for p in ei.value.problems)
     # mapping form works
-    cfg = parse_config(Config, valid_with(aim_point={'x': 0.4, 'y': 0.6}))
-    assert cfg.aim_point == XY(0.4, 0.6)
+    cfg = tparse(tvalid_with(point={'x': 0.4, 'y': 0.6}))
+    assert cfg.point == XY(0.4, 0.6)
 
 
 def test_xy_component_bounds():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, {'aim_point': [0.5, 1.5]})
-    assert any('aim_point.y' in p for p in ei.value.problems)
+        tparse({'point': [0.5, 1.5]})
+    assert any('point.y' in p for p in ei.value.problems)
 
 
-def test_choices_validation():
+def test_optional_scalar_accepts_null_and_value():
+    assert tparse(tvalid_with(threshold=None)).threshold is None
+    assert tparse(tvalid_with(threshold=0.5)).threshold == 0.5
+
+
+def test_list_requires_min_items():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, valid_section('camera', video_format='JPEG'))
-    assert any('video_format' in p for p in ei.value.problems)
+        tparse(tvalid_with(items=[]))
+    assert any('items' in p and 'at least' in p for p in ei.value.problems)
 
 
+# ---------------------------------------------------------------------------
+# Required fields, frozen, runtime fields, line numbers.
+# ---------------------------------------------------------------------------
+def test_missing_required_top_level_reported():
+    with pytest.raises(ConfigError) as ei:
+        tparse({})
+    probs = ei.value.problems
+    for name in ('gain', 'sub_section', 'feature', 'items'):
+        assert any(p.startswith(f"{name}:") and 'missing required' in p for p in probs), name
+
+
+def test_missing_required_nested_field_reported():
+    with pytest.raises(ConfigError) as ei:
+        tparse(tvalid_with(sub_section={'label': 'a'}))   # drops required_value
+    assert any(p.startswith('sub_section.required_value:') and 'missing required' in p
+               for p in ei.value.problems)
+
+
+def test_config_is_frozen():
+    cfg = tparse(tvalid())
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.ratio = 0.1
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.sub_section.required_value = 1.0
+    cfg2 = dataclasses.replace(cfg, ratio=0.1)   # replace() yields an updated copy
+    assert cfg2.ratio == 0.1
+    assert cfg.ratio == 0.5
+
+
+def test_runtime_fields_rejected_from_file():
+    with pytest.raises(ConfigError) as ei:
+        tparse({'DEBUG': True})
+    assert any('DEBUG' in p and 'unknown' in p for p in ei.value.problems)
+    # but settable programmatically (frozen -> via replace)
+    cfg = dataclasses.replace(tparse(tvalid()), DEBUG=True)
+    assert cfg.DEBUG is True
+
+
+def test_errors_annotated_with_file_line_numbers(tmp_path):
+    bad = tmp_path / "broken.yaml"
+    bad.write_text(
+        "ratio: 1.7\n"                 # line 1 (bound)
+        "point: [0.5, 1.5]\n"          # line 2 (XY component -> .y)
+        "gain: [1, 2]\n"
+        "sub_section:\n"
+        "  required_value: 4.0\n"
+        "  bogus_key: 1\n"             # line 6 (unknown)
+        "feature:\n"
+        "  intensity: 0.5\n"
+        "items:\n"
+        "  - item_id: 0\n"
+        "    angle: [90, 60]\n"
+    )
+    with pytest.raises(ConfigError) as ei:
+        load_config(TestConfig, bad)
+    probs = ei.value.problems
+    assert any('ratio' in p and 'broken.yaml line 1' in p for p in probs)
+    assert any('point.y' in p and 'broken.yaml line 2' in p for p in probs)
+    assert any('sub_section.bogus_key' in p and 'broken.yaml line 6' in p for p in probs)
+
+
+# ---------------------------------------------------------------------------
+# Annotated introspection: fields keep a real base type + validator metadata.
+# ---------------------------------------------------------------------------
 def test_constraints_resolve_to_real_types_like_annotated():
-    # Fields use Annotated[type, Constraint], so the base type is introspectable
-    # via get_type_hints and the validator rides along as Annotated metadata.
-    plain = get_type_hints(Config)
-    assert plain['confidence_min'] is float
-    assert get_type_hints(TakeOff)['duration_ns'] is int
-    assert plain['estimation_3d_method'] is VelocityMethod
-    assert get_type_hints(PDCoeff)['p'] is XY
-    assert get_type_hints(Camera)['cameras'] == list[CameraEntry]
+    plain = get_type_hints(TestConfig)
+    assert plain['ratio'] is float
+    assert plain['count'] is int
+    assert plain['color'] is Color
+    assert plain['point'] is XY
+    assert get_type_hints(Item)['item_id'] is int
 
-    extras = get_type_hints(Config, include_extras=True)
-    ann = extras['confidence_min']
+    extras = get_type_hints(TestConfig, include_extras=True)
+    ann = extras['ratio']
     assert get_origin(ann) is Annotated
     assert get_args(ann)[0] is float
     meta = get_args(ann)[1]
@@ -173,8 +319,7 @@ def test_constraints_resolve_to_real_types_like_annotated():
 
 
 def test_range_validates_each_numeric_field_of_any_dataclass():
-    # TODO #1: Range applies the bound to every numeric field of a dataclass,
-    # not just XY. Verify with an ad-hoc 3-field dataclass.
+    # Range applies the bound to every numeric field of a dataclass, not just XY.
     @dataclasses.dataclass
     class Triple:
         a: float = 0.0
@@ -188,76 +333,71 @@ def test_range_validates_each_numeric_field_of_any_dataclass():
     assert not any(e.startswith("t.a:") for e in errors)
 
 
-def test_camera_requires_at_least_one():
+# ---------------------------------------------------------------------------
+# Optional sub-section quick-disable: `enabled` is a FILE-ONLY toggle (not a
+# dataclass field). On an Optional[<dataclass>] section it decides presence
+# (enabled=False -> validate but yield None); on a non-Optional section it is
+# an error. Consumers test `section is not None`, never `section.enabled`.
+# ---------------------------------------------------------------------------
+def test_enabled_false_returns_none():
+    cfg = tparse(tvalid_section('feature', enabled=False))
+    assert cfg.feature is None
+
+
+def test_enabled_true_returns_object():
+    cfg = tparse(tvalid_section('feature', enabled=True))
+    assert isinstance(cfg.feature, FeatureSection)
+
+
+def test_enabled_is_not_reflected_on_the_dataclass():
+    cfg = tparse(tvalid_section('feature', enabled=True))
+    assert not hasattr(cfg.feature, 'enabled')
+
+
+def test_enabled_omitted_defaults_to_present():
+    d = tvalid()
+    d['feature'].pop('enabled', None)
+    assert tparse(d).feature is not None
+
+
+def test_enabled_must_be_bool():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, valid_section('camera', cameras=[]))
-    assert any('cameras' in p and 'at least' in p for p in ei.value.problems)
+        tparse(tvalid_section('feature', enabled="yes"))
+    assert any('feature.enabled' in p and 'boolean' in p for p in ei.value.problems)
 
 
-def test_bool_is_not_int():
-    with pytest.raises(ConfigError):
-        parse_config(Config, valid_section('takeoff', duration_ns=True))
-
-
-def test_config_is_frozen():
-    cfg = parse_config(Config, _valid_dict())
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        cfg.confidence_min = 0.1
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        cfg.drone.connection_string = 'usb'
-    # replace() produces an updated copy without mutating the original
-    cfg2 = dataclasses.replace(cfg, confidence_min=0.1)
-    assert cfg2.confidence_min == 0.1
-    assert cfg.confidence_min == 0.4
-
-
-def test_optional_field_accepts_null_and_value():
-    cfg = parse_config(Config, valid_section('bytetrack', enabled=True, recovery_max_dist=None))
-    assert cfg.bytetrack.recovery_max_dist is None
-    cfg = parse_config(Config, valid_section('bytetrack', enabled=True, recovery_max_dist=0.5))
-    assert cfg.bytetrack.recovery_max_dist == 0.5
-
-
-def test_missing_required_nested_section_reported():
-    # drone present but its required `config` block omitted.
+def test_enabled_on_non_optional_section_is_error():
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, valid_with(drone={'connection_string': 'usb'}))
-    assert any(p.startswith('drone.config:') and 'missing required' in p
+        tparse(tvalid_section('sub_section', enabled=True))
+    assert any(p.startswith('sub_section.enabled:') and 'only valid for optional' in p
                for p in ei.value.problems)
 
 
-def test_errors_annotated_with_file_line_numbers(tmp_path):
-    bad = tmp_path / "broken.yaml"
-    bad.write_text(
-        "confidence_min: 1.7\n"                       # line 1
-        "aim_point: [0.5, 1.5]\n"                     # line 2 (XY component -> this line)
-        "camera:\n"
-        "  cameras:\n"
-        "    - camera_id: 0\n"
-        "      frame_angular_size_deg: [400, 85]\n"   # line 6
-        "drone:\n"
-        "  config:\n"
-        "    bogus_key: 1\n"                          # line 9
-    )
+def test_disabled_section_is_still_validated_bounds():
     with pytest.raises(ConfigError) as ei:
-        load_config(Config, bad)
-    probs = ei.value.problems
-    assert any('confidence_min' in p and 'broken.yaml line 1' in p for p in probs)
-    assert any('aim_point.y' in p and 'broken.yaml line 2' in p for p in probs)
-    assert any('frame_angular_size_deg.x' in p and 'broken.yaml line 6' in p for p in probs)
-    assert any('bogus_key' in p and 'broken.yaml line 9' in p for p in probs)
+        tparse(tvalid_section('feature', enabled=False, intensity=5.0))
+    assert any('feature.intensity' in p and 'maximum' in p for p in ei.value.problems)
+
+
+def test_disabled_section_is_still_validated_unknown_key():
+    with pytest.raises(ConfigError) as ei:
+        tparse(tvalid_section('feature', enabled=False, __bogus__=1))
+    assert any('feature.__bogus__' in p and 'unknown' in p for p in ei.value.problems)
+
+
+def test_section_method_survives_parsing():
+    cfg = tparse(tvalid_section('feature', enabled=True))
+    kwargs = cfg.feature.public_kwargs()
+    assert 'mode' not in kwargs
+    assert kwargs['intensity'] == 0.7
 
 
 # ---------------------------------------------------------------------------
-# Introspection-driven tests. These walk the Config schema, so any field added
-# later is automatically validated (correct type-checking, bound-checking and
-# unknown-key handling) without touching this file.
+# Introspection-driven tests: walk the TestConfig schema, so any field added
+# to it is automatically covered for type/bound/choices/unknown-key/required.
 # ---------------------------------------------------------------------------
 def _unwrap(ann):
-    """Split a field annotation into (base_type, [constraints]).
-
-    The constraints DSL produces typing.Annotated; Optional is unwrapped.
-    """
+    """Split a field annotation into (base_type, [constraints]); Optional unwrapped."""
     if get_origin(ann) is Annotated:
         args = get_args(ann)
         base, consts = args[0], [m for m in args[1:] if isinstance(m, _Constraint)]
@@ -278,11 +418,7 @@ def _list_item_type(base):
 
 
 def iter_leaf_fields(cls, prefix=()):
-    """Yield (path_segments, base_type, constraints) for every scalar/XY leaf.
-
-    path_segments is a tuple of ('key', name) / ('list',) steps so we can build
-    a minimal nested dict that sets exactly one deep field.
-    """
+    """Yield (path_segments, base_type, constraints) for every scalar/XY leaf."""
     hints = get_type_hints(cls, include_extras=True)
     for f in dataclasses.fields(cls):
         if f.metadata.get('runtime'):
@@ -299,23 +435,11 @@ def iter_leaf_fields(cls, prefix=()):
         yield seg, base, consts
 
 
-def all_dataclasses():
-    seen, stack = set(), [Config]
-    while stack:
-        cls = stack.pop()
-        if cls in seen:
-            continue
-        seen.add(cls)
-        hints = get_type_hints(cls, include_extras=True)
-        for f in dataclasses.fields(cls):
-            base, _ = _unwrap(hints[f.name])
-            if dataclasses.is_dataclass(base) and base is not XY:
-                stack.append(base)
-            else:
-                item = _list_item_type(base)
-                if item is not None and dataclasses.is_dataclass(item):
-                    stack.append(item)
-    return seen
+def required_names(cls):
+    return [f.name for f in dataclasses.fields(cls)
+            if not f.metadata.get('runtime')
+            and f.default is dataclasses.MISSING
+            and f.default_factory is dataclasses.MISSING]
 
 
 def _build_nested(segments, value):
@@ -330,10 +454,7 @@ def _build_nested(segments, value):
 def _path_str(segments):
     out = ""
     for kind in segments:
-        if kind[0] == 'key':
-            out += ("." if out else "") + kind[1]
-        else:
-            out += "[0]"
+        out += ("." if (out and kind[0] == 'key') else "") + (kind[1] if kind[0] == 'key' else "[0]")
     return out
 
 
@@ -342,51 +463,35 @@ def _problem_for(path, problems):
     return any(p.startswith(path + ":") or p.startswith(path + ".") for p in problems)
 
 
-LEAF_FIELDS = list(iter_leaf_fields(Config))
+LEAF_FIELDS = list(iter_leaf_fields(TestConfig))
 WRONG_TYPED = {bool: "not_a_bool", int: "not_an_int", float: "not_a_float",
                str: 12345, XY: "not_an_xy"}
+REQUIRED_TOP = required_names(TestConfig)
 
 
 def test_schema_has_leaf_fields():
-    # sanity: the introspection actually found a representative set
-    assert len(LEAF_FIELDS) > 30
-
-
-def required_names(cls):
-    return [f.name for f in dataclasses.fields(cls)
-            if not f.metadata.get('runtime')
-            and f.default is dataclasses.MISSING
-            and f.default_factory is dataclasses.MISSING]
-
-
-# (cls, field_name) for every required top-level / nested-section field. Adding
-# a new required field anywhere is automatically covered by the test below.
-REQUIRED_TOP = [(Config, n) for n in required_names(Config)]
+    assert len(LEAF_FIELDS) >= 8
 
 
 def test_schema_has_required_fields():
-    # sanity: the complex sub-sections really are required (no silent defaults)
-    names = {n for _, n in REQUIRED_TOP}
-    assert {'camera', 'drone', 'bytetrack', 'pd_coeff', 'takeoff'} <= names
-
-
-@pytest.mark.parametrize("name", [n for _, n in REQUIRED_TOP], ids=lambda n: n)
-def test_missing_each_required_top_level_field_is_reported(name):
-    data = _valid_dict()
-    del data[name]
-    with pytest.raises(ConfigError) as ei:
-        parse_config(Config, data)
-    assert any(p.startswith(f"{name}:") and 'missing required' in p
-               for p in ei.value.problems), ei.value.problems
+    assert {'gain', 'sub_section', 'feature', 'items'} <= set(REQUIRED_TOP)
 
 
 def test_full_config_builds_full_object():
-    cfg = parse_config(Config, _valid_dict())
-    # every nested section is materialised (bytetrack disabled -> None in shipped)
-    assert isinstance(cfg.camera, Camera)
-    assert isinstance(cfg.drone, Drone)
-    assert cfg.bytetrack is None
-    assert cfg.drone.config.use_set_attitude is False
+    cfg = tparse(tvalid())
+    assert isinstance(cfg.sub_section, SubSection)
+    assert isinstance(cfg.feature, FeatureSection)
+    assert all(isinstance(i, Item) for i in cfg.items)
+
+
+@pytest.mark.parametrize("name", REQUIRED_TOP, ids=lambda n: n)
+def test_missing_each_required_top_level_field_is_reported(name):
+    data = tvalid()
+    del data[name]
+    with pytest.raises(ConfigError) as ei:
+        tparse(data)
+    assert any(p.startswith(f"{name}:") and 'missing required' in p
+               for p in ei.value.problems), ei.value.problems
 
 
 @pytest.mark.parametrize("segments,base", [(s, b) for s, b, _ in LEAF_FIELDS],
@@ -396,7 +501,7 @@ def test_every_field_rejects_wrong_type(segments, base):
         pytest.skip(f"no wrong-type sample for {base}")
     data = _build_nested(segments, WRONG_TYPED[base])
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, data)
+        tparse(data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
 
 
@@ -416,7 +521,7 @@ def test_every_ranged_field_rejects_out_of_bounds(segments, base, rng):
     value = [bad, bad] if base is XY else bad
     data = _build_nested(segments, value)
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, data)
+        tparse(data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
 
 
@@ -429,125 +534,58 @@ _CHOICE_FIELDS = [(s, [c for c in cs if isinstance(c, Choices)][0])
 def test_every_choices_field_rejects_unknown(segments, choices):
     data = _build_nested(segments, "__not_a_valid_choice__")
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, data)
+        tparse(data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
 
 
 @pytest.mark.parametrize("section_data", [
     {'__bogus__': 1},
-    {'camera': {'__bogus__': 1}},
-    {'camera': {'cameras': [{'__bogus__': 1}]}},
-    {'drone': {'__bogus__': 1}},
-    {'drone': {'config': {'__bogus__': 1}}},
-    {'bytetrack': {'__bogus__': 1}},
+    {'sub_section': {'__bogus__': 1}},
+    {'feature': {'__bogus__': 1}},
+    {'items': [{'__bogus__': 1}]},
 ])
 def test_unknown_key_rejected_in_every_section(section_data):
     with pytest.raises(ConfigError) as ei:
-        parse_config(Config, section_data)
+        tparse(section_data)
     assert any('__bogus__' in p and 'unknown' in p for p in ei.value.problems)
 
 
-# ---------------------------------------------------------------------------
-# Optional sub-section quick-disable: an Optional[...] section whose `enabled`
-# field is False is still fully validated, but parses to None so the feature
-# can be switched off without commenting the whole section out. Consumers test
-# `section is not None`, never `section.enabled`.
-# ---------------------------------------------------------------------------
-def test_shipped_yaml_section_toggles():
-    cfg = load_config(Config, CONFIG_YAML)
-    # shipped: optical_refinement enabled, bytetrack disabled
-    assert isinstance(cfg.optical_refinement, OpticalRefinement)
-    assert cfg.bytetrack is None
+# ===========================================================================
+# Production Config integration (intentionally coupled to config.yaml): a tiny
+# smoke test that the shipped config still loads, plus the load/parse forwarders.
+# ===========================================================================
+CONFIG_YAML = Path(__file__).resolve().parent / "config.yaml"
 
 
-def test_enabled_false_returns_none():
-    cfg = parse_config(Config, valid_section('optical_refinement', enabled=False))
-    assert cfg.optical_refinement is None
+def test_real_config_yaml_loads():
+    cfg = Config.load(CONFIG_YAML)
+    assert isinstance(cfg, Config)
+    # structural sanity only (no tuning values, to avoid churn)
+    assert isinstance(cfg.camera, Config.Camera)
+    assert isinstance(cfg.drone, Config.Drone)
 
 
-def test_enabled_true_returns_object():
-    cfg = parse_config(Config, valid_section('bytetrack', enabled=True))
-    assert isinstance(cfg.bytetrack, ByteTrack)
+def test_config_parse_and_load_forwarders():
+    # Config.parse / Config.load forward to parse_config/load_config with Config.
+    assert isinstance(Config.load(CONFIG_YAML), Config)
+    with pytest.raises(ConfigError):
+        Config.parse({'totally_unknown_key': 1})
 
 
-def test_enabled_is_not_reflected_on_the_dataclass():
-    # `enabled` is a file-only toggle; it must NOT become an attribute.
-    cfg = parse_config(Config, valid_section('bytetrack', enabled=True))
-    assert not hasattr(cfg.bytetrack, 'enabled')
-    cfg = parse_config(Config, valid_section('optical_refinement', enabled=True))
-    assert not hasattr(cfg.optical_refinement, 'enabled')
-
-
-def test_enabled_omitted_defaults_to_present():
-    # `enabled` absent -> section present (default True), uniformly.
-    d = _valid_dict()
-    d['optical_refinement'].pop('enabled', None)
-    d['bytetrack'].pop('enabled', None)
-    cfg = parse_config(Config, d)
-    assert cfg.optical_refinement is not None
-    assert cfg.bytetrack is not None
-
-
-def test_enabled_must_be_bool():
-    with pytest.raises(ConfigError) as ei:
-        parse_config(Config, valid_section('bytetrack', enabled="yes"))
-    assert any('bytetrack.enabled' in p and 'boolean' in p for p in ei.value.problems)
-
-
-@pytest.mark.parametrize("section", ['camera', 'drone', 'pd_coeff', 'takeoff'])
-def test_enabled_on_non_optional_section_is_error(section):
-    # `enabled` only applies to Optional sections; elsewhere it's rejected.
-    with pytest.raises(ConfigError) as ei:
-        parse_config(Config, valid_section(section, enabled=True))
-    assert any(p.startswith(f"{section}.enabled:") and 'only valid for optional' in p
-               for p in ei.value.problems)
-
-
-def test_disabled_section_is_still_validated_bounds():
-    # enabled=False must NOT skip validation of the rest of the section.
-    with pytest.raises(ConfigError) as ei:
-        parse_config(Config, valid_section('bytetrack', enabled=False, track_thresh=5.0))
-    assert any('bytetrack.track_thresh' in p and 'maximum' in p for p in ei.value.problems)
-
-
-def test_disabled_section_is_still_validated_unknown_key():
-    with pytest.raises(ConfigError) as ei:
-        parse_config(Config, valid_section('optical_refinement', enabled=False, __bogus__=1))
-    assert any('optical_refinement.__bogus__' in p and 'unknown' in p for p in ei.value.problems)
-
-
-def test_disabled_section_is_still_validated_types():
-    with pytest.raises(ConfigError) as ei:
-        parse_config(Config, valid_section('bytetrack', enabled=False, track_buffer="lots"))
-    assert any('bytetrack.track_buffer' in p for p in ei.value.problems)
-
-
-def test_tracker_kwargs_excludes_enabled_and_target_lock():
-    cfg = parse_config(Config, valid_section('bytetrack', enabled=True))
-    kwargs = cfg.bytetrack.tracker_kwargs()
-    assert 'enabled' not in kwargs and 'target_lock' not in kwargs
-    # all remaining keys are valid BYTETracker constructor params
-    assert kwargs['track_thresh'] == 0.3
-
-
-# ---------------------------------------------------------------------------
-# Consumer contract: a feature backed by an Optional section with an `enabled`
-# field must be gated on `section is not None`, NEVER on `section.enabled`.
-# The controllers import hailo/mavsdk so they can't be imported on the host;
-# assert the contract by scanning their source instead.
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Consumer contract (real controllers): a feature backed by an Optional section
+# must be gated on `section is not None`, NEVER on `section.enabled`. The
+# controllers import hailo/mavsdk and can't be imported on host, so we scan
+# their source instead.
+# ===========================================================================
 _CONSUMER_FILES = ('app.py', 'drone_controller.py', 'platform_controller.py')
 
 
-def _optional_dataclass_sections():
-    """Config fields typed Optional[<dataclass>] — the toggleable sections.
-
-    `enabled` is a file-only toggle (not a dataclass field), so a section is
-    toggleable purely by virtue of being Optional[<dataclass>].
-    """
+def _optional_dataclass_sections(cls):
+    """Fields of `cls` typed Optional[<dataclass>] — the toggleable sections."""
     out = []
-    hints = get_type_hints(Config)  # Annotated stripped, Optional kept as Union
-    for f in dataclasses.fields(Config):
+    hints = get_type_hints(cls)
+    for f in dataclasses.fields(cls):
         ann = hints[f.name]
         if get_origin(ann) not in (Union, types.UnionType):
             continue
@@ -561,21 +599,18 @@ def _strip_comments(src: str) -> str:
     return "\n".join(line.split('#', 1)[0] for line in src.splitlines())
 
 
-def test_schema_has_enabled_toggle_sections():
-    # sanity: the introspection finds the known toggle sections
-    assert {'optical_refinement', 'bytetrack'} <= set(_optional_dataclass_sections())
+def test_config_has_optional_toggle_sections():
+    assert {'optical_refinement', 'bytetrack'} <= set(_optional_dataclass_sections(Config))
 
 
 def test_consumers_gate_on_presence_not_enabled():
-    sections = _optional_dataclass_sections()
+    sections = _optional_dataclass_sections(Config)
     base = CONFIG_YAML.parent
     for fn in _CONSUMER_FILES:
         code = _strip_comments((base / fn).read_text())
         for sec in sections:
-            # gating on the flag (`.section.enabled`) is forbidden
             assert f".{sec}.enabled" not in code, (
                 f"{fn} reads .{sec}.enabled; gate on `{sec} is not None` instead")
-        # legacy flag must be gone too
         assert ".use_byte_track" not in code, f"{fn} still references .use_byte_track"
 
 
