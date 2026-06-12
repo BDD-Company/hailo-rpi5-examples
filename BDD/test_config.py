@@ -52,8 +52,13 @@ class TestConfig:
 
     @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
     class SubSection:
+        @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+        class Limits:                                        # nested-within-nested section
+            lo: Annotated[float, Range(0.0, 1.0)] = 0.0
+            hi: Annotated[float, Range(0.0, 1.0)] = 1.0
         required_value: Annotated[float, Range(0.0, 10.0)]   # nested required
         label:          Annotated[str, Choices('a', 'b', 'c')] = 'a'   # Choices + default
+        limits:         Limits                               # required deeper (2-level) section
     sub_section: SubSection                                  # required non-optional section
 
     @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
@@ -77,6 +82,7 @@ class TestConfig:
 
 
 SubSection = TestConfig.SubSection
+Limits = TestConfig.SubSection.Limits
 FeatureSection = TestConfig.FeatureSection
 Item = TestConfig.Item
 
@@ -92,6 +98,9 @@ gain: [1.0, 2.0]
 sub_section:
   required_value: 4.0
   label: b
+  limits:
+    lo: 0.1
+    hi: 0.9
 feature:
   intensity: 0.7
   mode: auto
@@ -138,6 +147,8 @@ def test_full_valid_config_parses():
     assert cfg.threshold is None
     assert isinstance(cfg.sub_section, SubSection)
     assert cfg.sub_section.required_value == 4.0
+    assert isinstance(cfg.sub_section.limits, Limits)   # 2-level nesting
+    assert cfg.sub_section.limits.lo == 0.1
     assert isinstance(cfg.feature, FeatureSection)  # optional section present
     assert [i.item_id for i in cfg.items] == [0, 1]
     assert cfg.items[0].angle == XY(90, 60)
@@ -541,6 +552,7 @@ def test_every_choices_field_rejects_unknown(segments, choices):
 @pytest.mark.parametrize("section_data", [
     {'__bogus__': 1},
     {'sub_section': {'__bogus__': 1}},
+    {'sub_section': {'limits': {'__bogus__': 1}}},   # 2 levels deep
     {'feature': {'__bogus__': 1}},
     {'items': [{'__bogus__': 1}]},
 ])
@@ -548,6 +560,23 @@ def test_unknown_key_rejected_in_every_section(section_data):
     with pytest.raises(ConfigError) as ei:
         tparse(section_data)
     assert any('__bogus__' in p and 'unknown' in p for p in ei.value.problems)
+
+
+def test_deeply_nested_bound_error_uses_full_path():
+    d = tvalid()
+    d['sub_section']['limits'] = {'hi': 5.0}   # 2 levels deep, out of [0, 1]
+    with pytest.raises(ConfigError) as ei:
+        tparse(d)
+    assert any(p.startswith('sub_section.limits.hi:') and 'maximum' in p
+               for p in ei.value.problems)
+
+
+def test_missing_required_deep_section_reported():
+    # `limits` (required) dropped from sub_section -> reported with full path.
+    with pytest.raises(ConfigError) as ei:
+        tparse(tvalid_with(sub_section={'required_value': 4.0}))   # replaces section, no `limits`
+    assert any(p.startswith('sub_section.limits:') and 'missing required' in p
+               for p in ei.value.problems)
 
 
 # ===========================================================================
