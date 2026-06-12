@@ -20,7 +20,7 @@ import yaml
 import pytest
 
 from config import Config, Range, Choices, MinItems, _Constraint
-from parse_config import parse_config, load_config, ConfigError
+from parse_config import parse_config, load_config, loads_config, ConfigError
 from helpers import XY
 
 
@@ -116,9 +116,20 @@ def tvalid() -> dict:
     """A complete, valid TestConfig mapping to build cases from."""
     return yaml.safe_load(TEST_CONFIG_YAML)
 
+# just a littly halper to eye-validate that error messages are looking human-friendly
+__DEBUG_PRINT_ERROR_MESSAGES = True
 
 def tparse(data):
-    return parse_config(TestConfig, data)
+    # Round-trip through YAML text (not parse_config(dict)) so the parser builds
+    # a line map and every error is annotated with its line — exactly like a
+    # real config file. yaml.dump is the canonical source those line #s refer to.
+    text = yaml.dump(data, sort_keys=False, default_flow_style=False)
+    try:
+        return loads_config(TestConfig, text, source="<<dict-object>>")
+    except ConfigError as e:
+        if __DEBUG_PRINT_ERROR_MESSAGES:
+            print("\n----- config -----\n" + text + "----- error -----\n" + str(e) + "\n")
+        raise
 
 
 def tvalid_with(**overrides):

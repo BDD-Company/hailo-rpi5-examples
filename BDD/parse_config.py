@@ -280,13 +280,14 @@ def parse_config(config_type: type[T], data: dict | None,
     return cfg
 
 
-def load_config(config_type: type[T], path: str | Path) -> T:
-    """Read a YAML file and validate it against `config_type` (raises ConfigError).
+def loads_config(config_type: type[T], text: str, source: str = "<config>") -> T:
+    """Validate a YAML *string* against `config_type` (raises ConfigError).
 
-    Errors are reported in bulk and annotated with the offending file line.
+    Unlike `parse_config` (which takes an already-parsed mapping and therefore
+    can't reference line numbers), this composes the YAML so every error is
+    annotated with its line in `source`.
     """
     import yaml
-    text = Path(path).read_text()
     data = yaml.safe_load(text)
     if data is None:
         data = {}
@@ -294,4 +295,12 @@ def load_config(config_type: type[T], path: str | Path) -> T:
         raise ConfigError([f"<root>: top level must be a mapping, got {type(data).__name__}"])
     line_map: dict[str, int] = {}
     _collect_node_lines(yaml.compose(text), "", line_map)
-    return parse_config(config_type, data, line_map, source=Path(path).name)
+    return parse_config(config_type, data, line_map, source=source)
+
+
+def load_config(config_type: type[T], path: str | Path) -> T:
+    """Read a YAML file and validate it against `config_type` (raises ConfigError).
+
+    Errors are reported in bulk and annotated with the offending file line.
+    """
+    return loads_config(config_type, Path(path).read_text(), source=Path(path).name)
