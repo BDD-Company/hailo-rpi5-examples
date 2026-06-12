@@ -508,9 +508,13 @@ def test_missing_each_required_top_level_field_is_reported(name):
 @pytest.mark.parametrize("segments,base", [(s, b) for s, b, _ in LEAF_FIELDS],
                          ids=[_path_str(s) for s, _, _ in LEAF_FIELDS])
 def test_every_field_rejects_wrong_type(segments, base):
-    if base not in WRONG_TYPED:
+    if isinstance(base, type) and issubclass(base, enum.Enum):
+        bad = "__not_a_member__"            # invalid for any reasonable enum
+    elif base in WRONG_TYPED:
+        bad = WRONG_TYPED[base]
+    else:
         pytest.skip(f"no wrong-type sample for {base}")
-    data = _build_nested(segments, WRONG_TYPED[base])
+    data = _build_nested(segments, bad)
     with pytest.raises(ConfigError) as ei:
         tparse(data)
     assert _problem_for(_path_str(segments), ei.value.problems), ei.value.problems
