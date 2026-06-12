@@ -9,6 +9,7 @@ from helpers import XY
 from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator
 from platform_mover import PlatformMover
+from config import Config
 from helpers import Detection, Detections, MoveCommand, STOP, CameraSwitcher, DEFAULT_CAMERA_ID
 from estimate_distance import estimate_distance_class, DistanceClass
 
@@ -33,29 +34,29 @@ def platform_controlling_thread(*args, **kwargs):
         loop.close()
 
 
-async def platform_controlling_thread_async(platform_connection_string, platform_config, detections_queue, control_config = {}, output_queue = None, signal_event_when_ready = None, camera_switcher : CameraSwitcher | None = None):
+async def platform_controlling_thread_async(platform_connection_string, platform_config, detections_queue, control_config: Config, output_queue = None, signal_event_when_ready = None, camera_switcher : CameraSwitcher | None = None):
     # will owerwrite logger here many times, make sure that rest of the systems are not affected
     global global_logger
     logger = global_logger
 
     START_TIME_MS = time.monotonic_ns() / 1000_000
-    DEBUG           = control_config.pop('debug', False)
+    DEBUG           = control_config.DEBUG
 
-    MIN_CONFIDENCE  = control_config.pop('confidence_min', 0.1)
+    MIN_CONFIDENCE  = control_config.confidence_min
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
-    # MAX_THRUST      = control_config.pop('thrust_max', 0.5)
-    # MIN_THRUST      = control_config.pop('thrust_min', 0.4)
-    FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
+    # MAX_THRUST      = control_config.thrust.max
+    # MIN_THRUST      = control_config.thrust.min
+    FADE_COEFF      = control_config.target_lost_fade_per_frame
 
-    PD_COEFF_P      = control_config.pop('pd_coeff_p', 12)
-    PD_COEFF_D      = control_config.pop('pd_coeff_d', 1)
+    PD_COEFF_P      = control_config.pd_coeff.p
+    PD_COEFF_D      = control_config.pd_coeff.d
 
-    PD_COEFF_P_DYNAMIC = control_config.pop('pd_coeff_p_dynamic', False)
-    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pop('pd_coeff_p_dynamic_use_piecewise', False)
-    PD_COEFF_P_MIN_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_min_target_size', 0.003)
-    PD_COEFF_P_MAX_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_max_target_size', 0.005)
-    PD_COEFF_P_MIN  = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
-    PD_COEFF_P_MAX  = control_config.pop('pd_coeff_p_dynamic_max', 2)
+    PD_COEFF_P_DYNAMIC = control_config.pd_coeff.p_dynamic
+    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pd_coeff.p_dynamic_use_piecewise
+    PD_COEFF_P_MIN_TARGET_SIZE = control_config.pd_coeff.p_dynamic_min_target_size
+    PD_COEFF_P_MAX_TARGET_SIZE = control_config.pd_coeff.p_dynamic_max_target_size
+    PD_COEFF_P_MIN  = control_config.pd_coeff.p_dynamic_min
+    PD_COEFF_P_MAX  = control_config.pd_coeff.p_dynamic_max
 
     # Normalized target size thresholds for dynamic P profile:
     # s = 0.0 means target is at or below PD_COEFF_P_MIN_TARGET_SIZE
@@ -63,35 +64,35 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     #
     # Below STAGE_1_THRESHOLD:
     #   target is considered small / far, P grows quickly from minimum.
-    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pop('pd_coeff_p_dynamic_stage_1_threshold', 0.2)
+    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pd_coeff.p_dynamic_stage_1_threshold
 
     # Between STAGE_1_THRESHOLD and STAGE_2_THRESHOLD:
     #   target is in the working mid-range, P continues growing up to maximum.
     # Above STAGE_2_THRESHOLD:
     #   target is considered large / near, P starts decreasing to avoid overshoot
     #   and overly aggressive control close to the target.
-    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pop('pd_coeff_p_dynamic_stage_2_threshold', 0.6)
+    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pd_coeff.p_dynamic_stage_2_threshold
 
     # Relative P ratios inside [PD_COEFF_P_MIN, PD_COEFF_P_MAX]:
     #
     # Ratio reached at STAGE_1_THRESHOLD.
     # Example: 0.60 means that by s = 0.2, P reaches 60% of the full range
     # between PD_COEFF_P_MIN and PD_COEFF_P_MAX.
-    PD_COEFF_P_STAGE_1_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_1_ratio', 0.60)
+    PD_COEFF_P_STAGE_1_RATIO = control_config.pd_coeff.p_dynamic_stage_1_ratio
 
     # Ratio reached at STAGE_2_THRESHOLD.
     # Usually 1.00, meaning the maximum P is reached in the mid-range.
-    PD_COEFF_P_STAGE_2_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_2_ratio', 1.00)
+    PD_COEFF_P_STAGE_2_RATIO = control_config.pd_coeff.p_dynamic_stage_2_ratio
 
     # Ratio used when target is very large / very near (s -> 1.0).
     # This reduces P near the target to make control softer and reduce oscillation.
-    PD_COEFF_P_STAGE_3_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_3_ratio', 0.35)
+    PD_COEFF_P_STAGE_3_RATIO = control_config.pd_coeff.p_dynamic_stage_3_ratio
 
-    TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
+    TARGET_SIZE_M = control_config.target_size_m
     # Legacy / single-camera fallback. With camera_switcher we resolve FOV
     # per-frame from the active CameraConfig so a tele-camera frame is steered
     # with the tele-camera FOV (not the wide-camera default).
-    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = control_config.pop('frame_angular_size_deg', XY(120, 90))
+    FRAME_ANGLUAR_SIZE_DEG_DEFAULT = XY(120, 90)
 
     def fov_for_camera(cam_id : int) -> XY:
         if camera_switcher is not None:
@@ -103,12 +104,9 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     FRAME_ANGLUAR_SIZE_DEG : XY = FRAME_ANGLUAR_SIZE_DEG_DEFAULT
     last_camera_id : int | None = None
 
-    # SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
+    # SAFE_TAKEOFF_PERIOD_NS = control_config.takeoff.duration_ns
 
-    PLATFORM_INITIAL_POS = control_config.pop('platform_initiali_pos', XY(0, 0))
-
-    if len(control_config) > 0:
-        logger.warning("Unknown/unused config parameters: %s", control_config)
+    PLATFORM_INITIAL_POS = XY(0, 0)
 
     center = XY(0.5, 0.5)
     distance_r = 0.1
