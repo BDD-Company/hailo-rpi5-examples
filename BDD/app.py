@@ -271,8 +271,19 @@ class App(GStreamerDetectionApp):
 
 
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
+        # Always include an fpsdisplaysink named "hailo_display": Hailo
+        # elements / app_base look up that element by name, and removing it
+        # left the pipeline without a display-sink/clock-provider — observed
+        # to SIGSEGV at PLAYING on Pi5 + RTP source. We bind it to fakesink
+        # so no extra raw-video window pops up; --display uses a separate
+        # OpenCVShowImageSink subprocess for the annotated window.
+        display_branch = (f'queue leaky=downstream max-size-buffers=2 ! '
+                          f'videoconvert ! '
+                          f'fpsdisplaysink name=hailo_display video-sink=fakesink '
+                          f'sync={sync} text-overlay={show_fps} signal-fps-measurements=true')
+
         if not self.record_videos:
-            return "fakesink"
+            return display_branch
 
         record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         video_file_name = Path(self.video_filename_base if self.video_filename_base else f"RAW_{record_start_time_str}.mkv")
@@ -281,25 +292,43 @@ class App(GStreamerDetectionApp):
         video_file_name = video_file_name.stem + "_%05d" + (video_file_name.suffix if video_file_name.suffix else '.mkv')
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000_000_000
-        return f'''
-            videoconvert \
-            ! x264enc \
-                key-int-max=30 \
-                bframes=0 \
-                tune=zerolatency \
-                speed-preset=ultrafast \
-            ! h264parse config-interval=1 \
-            ! queue name=raw_video_output_queue \
-                leaky=downstream \
-                max-size-buffers=300 \
-                max-size-bytes=0 \
-                max-size-time=10000000000 \
-            ! splitmuxsink \
-                muxer-factory=matroskamux \
-                muxer-properties="properties,streamable=true" \
-                max-size-time={video_output_chunk_length_ns} async-finalize=true \
-                location="{self.video_output_directory}/{video_file_name}"
-        '''
+
+        # Prefer openh264enc: x264enc + Hailo + splitmuxsink + RTP source has
+        # been observed to SIGSEGV at PLAYING on this Pi5 build. openh264enc is
+        # stable in the same shape. Allow explicit opt-in to x264enc via env
+        # for hosts where it's known good.
+        force_x264 = os.environ.get('BDD_H264_ENCODER', '').lower() == 'x264enc'
+        if force_x264 and Gst.ElementFactory.find('x264enc') is not None:
+            encoder_str = ('x264enc key-int-max=30 bframes=0 '
+                           'tune=zerolatency speed-preset=ultrafast')
+            logger.info("recording with x264enc (BDD_H264_ENCODER=x264enc)")
+        elif Gst.ElementFactory.find('openh264enc') is not None:
+            encoder_str = 'openh264enc complexity=low gop-size=30 bitrate=4000000'
+            logger.info("recording with openh264enc")
+        elif Gst.ElementFactory.find('x264enc') is not None:
+            encoder_str = ('x264enc key-int-max=30 bframes=0 '
+                           'tune=zerolatency speed-preset=ultrafast')
+            logger.warning("openh264enc not installed, falling back to x264enc")
+        else:
+            logger.error("no H.264 encoder available (need openh264enc or x264enc); "
+                         "disabling video recording")
+            return display_branch
+
+        # tee output: one branch keeps the canonical display-sink path alive
+        # (clock provider), the other encodes + writes RAW_*.mkv segments.
+        record_branch = (f'queue leaky=downstream max-size-buffers=5 ! '
+                         f'videoconvert ! {encoder_str} ! '
+                         f'h264parse config-interval=1 ! '
+                         f'queue name=raw_video_output_queue leaky=downstream '
+                         f'max-size-buffers=300 max-size-bytes=0 max-size-time=10000000000 ! '
+                         f'splitmuxsink muxer-factory=matroskamux '
+                         f'muxer-properties="properties,streamable=true" '
+                         f'max-size-time={video_output_chunk_length_ns} async-finalize=true '
+                         f'location="{self.video_output_directory}/{video_file_name}"')
+
+        return (f'tee name=output_tee '
+                f'output_tee. ! {display_branch} '
+                f'output_tee. ! {record_branch}')
 
     def run(self, wait_event_before_starting=None):
         if wait_event_before_starting:
@@ -315,7 +344,13 @@ def main():
     env_path_str = str(env_file)
     os.environ["HAILO_ENV_FILE"] = env_path_str
 
-    configure_logging(level = logging.DEBUG)
+    # Tee logs to a file under _DEBUG/ — same dir/timestamp convention as the
+    # debug videos (debug_<ts>_NNNNN.mkv) and matches bdd-cpp's bdd.log behavior.
+    # start_time_str isn't ready yet, so compute it inline; reused below.
+    start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_file = Path('./_DEBUG') / f"bdd_{start_time_str}.log"
+    configure_logging(level=logging.DEBUG, log_file=str(log_file))
+    logger.info("logging to %s", log_file)
     # shushing verbose loggers
     logging.getLogger("picamera2").setLevel(logging.WARNING)
     logging.getLogger("mavsdk_server").setLevel(logging.ERROR)
@@ -335,39 +370,71 @@ def main():
     detections_queue = OverwriteQueue(maxsize=20)
     output_queue = OverwriteQueue(maxsize=200)
 
-    start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-
     event = threading.Event()
 
     arg_parser = get_default_parser()
     arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
+    arg_parser.add_argument(
+        '--rtp-port', type=int, default=None,
+        help="Receive video as RTP/H.264 on this UDP port (mirrors bdd-cpp --rtp-port). "
+             "Overrides --input. For PX4 sim use 5600 (matches test-flight/recv_check.sh).")
+    arg_parser.add_argument(
+        '--display', action='store_true',
+        help="Show a live window with annotated detections (adds OpenCVShowImageSink to the debug output).")
+    arg_parser.add_argument(
+        '--no-record', action='store_true',
+        help="Disable .mkv video recording (skips the x264enc/openh264enc -> splitmuxsink branch).")
+    arg_parser.add_argument(
+        '--mavsdk-connection', type=str, default='udp://:14550',
+        help="MAVSDK connection string. Default 'udp://:14550' (real drone, QGC-style port). "
+             "For PX4 SITL use 'udp://0.0.0.0:14540' — companion port; matches bdd-cpp's working "
+             "config. Note: this MAVSDK build has no udpin://, so use plain udp:// with the bind "
+             "IP 0.0.0.0 (or empty) to mean 'bind & accept'.")
+    arg_parser.add_argument(
+        '--control-config', type=str, default=None,
+        help="Path to a JSON file of control_config overrides (scalar keys). "
+             "Used by the SITL tuning harness to inject per-episode params.")
+
+    # Pre-scan CLI for flags we need *before* App.__init__ runs (it parses
+    # args inside create_pipeline()). Using parse_known_args so it ignores
+    # everything else; supports both "--flag value" and "--flag=value" forms.
+    import argparse as _argparse
+    _pre = _argparse.ArgumentParser(add_help=False)
+    _pre.add_argument('--rtp-port', type=int, default=None)
+    _pre.add_argument('--no-record', action='store_true')
+    _pre_args, _ = _pre.parse_known_args()
+    if _pre_args.rtp_port is not None:
+        sys.argv.extend(['--input', f'rtp://{_pre_args.rtp_port}'])
+    _record_videos = not _pre_args.no_record
 
     control_config = {
         'confidence_min': 0.4,
         'confidence_move': 0.3,
 
-        'thrust_takeoff' : 0.5,
-        'thrust_min': 0.7,
-        'thrust_max': 0.9,
+        'thrust_takeoff' : 0.5,         # keep takeoff gentle for a stable launch
+        'thrust_min': 0.7,              # in-flight thrust (thrust_dynamic=False => this is the actual thrust used)
+        'thrust_max': 1.0,              # MAX SPEED: full power ceiling
         'thrust_dynamic': False,
         'thrust_proportional_to_target_size' : False,
 
         'target_lost_fade_per_frame': 0.99,
-        'target_estimator_clear_history_after_target_lost_frames' : 3,
+        'target_estimator_clear_history_after_target_lost_frames' : 6, # was 3: tolerate brief detection dropouts (small far target) without wiping the takeoff progress
 
         'estimation_3d': True,
         'estimation_3d_method': 'cluster',
         'estimation_3d_use_initial_velocity' : True,
+        'estimation_3d_max_distance_m': 25, # beyond this, depth (bbox-size) is too noisy -> NED is garbage; fall back to 2D image-plane estimator. None = always 3D.
 
         'estimation_lookahead_frames': 2,
         'estimation_lookahead_dynamic': True,
         'estimation_lookahead_dynamic_sqrt': True,
+        'estimation_lookahead_dynamic_factor': 0, # 0 disables: factor default 1 made horizon = int(distance_m) (~61 frames @60m), throwing the target off-frame. Let sqrt mode govern.
         'estimation_lookahead_dynamic_frames_near':   1,
         'estimation_lookahead_dynamic_frames_medium': 1,
         'estimation_lookahead_dynamic_frames_far':    1, # can't be too big -- estimation will be too FAAR away.
 
-        'pd_coeff_p': 3,
-        'pd_coeff_d': 0, #-1, # -1
+        'pd_coeff_p': 3,                # P=10 caused attitude-rate commands to blow up (>140000 deg/s); reverted to proven value
+        'pd_coeff_d': 30, # damping to brake on approach (was 0 -> 90 m/s overshoot). Regulator divides Dk by dt_ms(~30), so effective gain ~= Dk/30 ~= 1. Tune from logs.
         'pd_coeff_p_safe_min': 0.6,
         'pd_coeff_p_min' : 0.5,
         'pd_coeff_p_max' : 10,
@@ -401,7 +468,7 @@ def main():
         'inertia_correction_min_speed_ms': 5,
 
         'safe_takeoff_period_ns': 300_000_000,
-        'delay_takeof_until_n_detection_frames' : 30,
+        'delay_takeof_until_n_detection_frames' : 12, # was 30: 30 consecutive detections of a tiny far target was unreachable (run peaked at 29 and never launched)
 
         'aim_point': XY(0.5, 0.5),
         'aim_point_max_offset': XY(0.5, 0.6),
@@ -413,6 +480,7 @@ def main():
         'drone_min_lift_fraction': 0.1,
         'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
         'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
+        'drone_max_attitude_rate_deg_s': 120, # saturate commanded angular rate; guards against estimator/regulator spikes (set 0/None to disable)
 
         'DEBUG': DEBUG,
 
@@ -439,7 +507,14 @@ def main():
         nms_dist_thresh=control_config.get('bytetrack_nms_dist_thresh'),
     )
     user_data = user_app_callback_class(detections_queue, bytetracker)
-    user_data.use_frame = True
+    # Stay False: when True, app_base.run() spawns display_user_data_frame in
+    # a multiprocessing.Process that calls cv2.waitKey() in a loop. We never
+    # feed it (user_data.set_frame() is never called from app_callback), so it
+    # would just idle — but with DISPLAY=:0 inherited it actually inits Qt in
+    # a forked child while GStreamer threads are running, which has been
+    # observed to SIGSEGV at pipeline PLAYING. Our --display path uses its own
+    # multiprocessing-based OpenCVShowImageSink instead.
+    user_data.use_frame = False
 
     app = App(
         app_callback,
@@ -448,7 +523,10 @@ def main():
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True)
+        record_videos=_record_videos)
+
+    from control_config_override import apply_overrides
+    apply_overrides(control_config, app.options_menu.control_config)
 
     logger.info("!!! Config: %s", control_config)
     if DEBUG:
@@ -479,7 +557,7 @@ def main():
         action_thread = threading.Thread(
             target = drone_controlling_thread,
             args = (
-                'udp://:14550',
+                app.options_menu.mavsdk_connection,
                 {
                     'upside_down_angle_deg': 130,
                     'upside_down_hold_s': 0.2,
@@ -495,15 +573,32 @@ def main():
         )
     action_thread.start()
 
-    sink = MultiSink([
+    debug_sinks = [
         # RtspStreamerSink(30, 8554),
         RecorderSink(30,
             "./_DEBUG",
             segment_seconds=10,
             filename_base=f"debug_{start_time_str}",
         ),
-        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
-    ])
+    ]
+    if app.options_menu.display:
+        # When launched from SSH neither DISPLAY nor XAUTHORITY are inherited,
+        # so Qt has nowhere to draw and imshow silently no-ops. Default to the
+        # local desktop on :0 (Pi OS seat0/tty1). XAUTHORITY is needed even if
+        # the user exported DISPLAY themselves, so set it unconditionally
+        # (setdefault leaves any pre-existing value alone). Must happen before
+        # OpenCVShowImageSink.start() spawns the display child process so it
+        # inherits the env.
+        os.environ.setdefault('DISPLAY', ':0')
+        os.environ.setdefault('XAUTHORITY', str(Path.home() / '.Xauthority'))
+        logger.info("--display: DISPLAY=%s XAUTHORITY=%s",
+                    os.environ['DISPLAY'], os.environ['XAUTHORITY'])
+        logger.info("--display: window appears only after the FIRST frame "
+                    "flows through MAVSDK->drone_controller->output_queue. "
+                    "If MAVSDK doesn't connect, there's no window.")
+        # Mirrors bdd-cpp --display: render annotated detections to a window.
+        debug_sinks.append(OpenCVShowImageSink(window_title='BDD'))
+    sink = MultiSink(debug_sinks)
 
     output_thread = threading.Thread(
         target = debug_output_thread,
