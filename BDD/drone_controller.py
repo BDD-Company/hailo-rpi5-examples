@@ -234,16 +234,19 @@ async def drone_controlling_thread_async(
 
     THRUST_DYNAMIC  = control_config.thrust.dynamic
 
-    THRUST_PROPORTIONAL_TO_DISTANCE                   = control_config.thrust.proportional_to_distance
-    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF        = control_config.thrust.proportional_to_distance_near_coeff
-    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF      = control_config.thrust.proportional_to_distance_medium_coeff
-    THRUST_PROPORTIONAL_TO_DISTANCE_FAR_COEFF         = control_config.thrust.proportional_to_distance_far_coeff
-    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M = control_config.thrust.proportional_to_distance_medium_distance_m
-    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M   = control_config.thrust.proportional_to_distance_near_distance_m
+    # proportional_to_distance is Optional: present (non-null) enables the feature.
+    _PROP_DIST = control_config.thrust.proportional_to_distance
+    THRUST_PROPORTIONAL_TO_DISTANCE                   = bool(_PROP_DIST)
+    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_COEFF        = _PROP_DIST.near_coeff        if _PROP_DIST else 1.1
+    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_COEFF      = _PROP_DIST.medium_coeff      if _PROP_DIST else 0.9
+    THRUST_PROPORTIONAL_TO_DISTANCE_FAR_COEFF         = _PROP_DIST.far_coeff         if _PROP_DIST else 1.0
+    THRUST_PROPORTIONAL_TO_DISTANCE_MEDIUM_DISTANCE_M = _PROP_DIST.medium_distance_m if _PROP_DIST else 20.0
+    THRUST_PROPORTIONAL_TO_DISTANCE_NEAR_DISTANCE_M   = _PROP_DIST.near_distance_m   if _PROP_DIST else 10.0
 
 
-    FADE_COEFF      = control_config.target_lost_fade_per_frame
-    TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.target_estimator_clear_history_after_target_lost_frames
+    FADE_COEFF      = control_config.target_lost.fade_per_frame
+    TARGET_LOST_REPEAT_SAME_COMMANDS_FRAMES = control_config.target_lost.repeat_same_commands_frames
+    TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.target_lost.clear_estimator_history_after_frames
 
     PD_COEFF_P                      = to_XY(control_config.pd_coeff.p)
     PD_COEFF_D                      = control_config.pd_coeff.d
@@ -315,19 +318,22 @@ async def drone_controlling_thread_async(
     # INERTIA_CORRECTION_LIMITS : XY = control_config.inertia_correction_limits
     # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.inertia_correction_min_speed_ms
 
-    ESTIMATION_3D = control_config.estimation_3d
+    # estimation_3d is Optional: present (non-null) enables 3D estimation.
+    _ESTIMATION_3D =
+    ESTIMATION_3D = bool(control_config.estimation.estimation_3d)
 
-    ESTIMATION_3D_METHOD = VelocityMethod(control_config.estimation_3d_method)
-    ESTIMATION_3D_USE_INITIAL_VELOCITY         = control_config.estimation_3d_use_initial_velocity
+    ESTIMATION_3D_METHOD = VelocityMethod(_ESTIMATION_3D.method) if _ESTIMATION_3D else VelocityMethod.NUMPY_REGRESSION
+    ESTIMATION_3D_USE_INITIAL_VELOCITY         = bool(_ESTIMATION_3D and _ESTIMATION_3D.use_initial_velocity)
 
-    ESTIMATION_LOOKAHEAD_FRAMES                = control_config.estimation_lookahead_frames
-    ESTIMATION_LOOKAHEAD_DYNAMIC               = control_config.estimation_lookahead_dynamic
-    ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT          = control_config.estimation_lookahead_dynamic_sqrt
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR        = control_config.estimation_lookahead_dynamic_factor
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.estimation_lookahead_dynamic_frames_near
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.estimation_lookahead_dynamic_frames_medium
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.estimation_lookahead_dynamic_frames_far
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MAX    = control_config.estimation_lookahead_dynamic_frames_max
+    _LOOKAHEAD = control_config.estimation.lookahead
+    ESTIMATION_LOOKAHEAD_FRAMES                = _LOOKAHEAD.frames
+    ESTIMATION_LOOKAHEAD_DYNAMIC               = _LOOKAHEAD.dynamic
+    ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT          = _LOOKAHEAD.dynamic_sqrt
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR        = _LOOKAHEAD.dynamic_factor
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = _LOOKAHEAD.dynamic_frames_near
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = _LOOKAHEAD.dynamic_frames_medium
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = _LOOKAHEAD.dynamic_frames_far
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MAX    = _LOOKAHEAD.dynamic_frames_max
 
     FOLLOW_TARGET_POSITION_NED                 = control_config.follow_target_position_ned
 
@@ -717,7 +723,9 @@ async def drone_controlling_thread_async(
                     )
                     target_estimator_2d.clear_history()
                     locked_track_id = None
-                    prev_angle_to_target = XY()
+                    # NOTE: keep prev_angle_to_target as-is just in case if switching actually looses target,
+                    # then we have a chance of re-acquiring target by moving in same general direction.
+                    # prev_angle_to_target = XY()
                     # S2: drop the smoothed target-size; the new camera's
                     # geometry rescales every dimension by ~zoom_factor, so
                     # carrying the old value across would mis-fire the
@@ -1130,14 +1138,18 @@ async def drone_controlling_thread_async(
                             moving = False
                             debug_info["mode"] = "hover"
                     else:
-                        prev_angle_to_target *= FADE_COEFF
+                        mode_extra = 'repeat'
+                        if abs(frame_id - last_seen_target_at_frame) > TARGET_LOST_REPEAT_SAME_COMMANDS_FRAMES:
+                            prev_angle_to_target *= FADE_COEFF
+                            mode_extra = 'fade'
+
                         # NOTE: perfroming conversion from camera referene frame to done's FRD
                         await drone.move_to_target_zenith_async(roll_degree=-prev_angle_to_target.x, pitch_degree=prev_angle_to_target.y, thrust=thrust, current_telemetry=telemetry_dict)
                         # Just t visualize the point we are moving to
                         target_relative_pos = prev_angle_to_target.divided_by_XY(FRAME_ANGLUAR_SIZE_DEG)
                         # await drone.standstill()
                         # moving = False
-                        debug_info["mode"] = "hover"
+                        debug_info["mode"] = f"hover+{mode_extra}"
                 else:
                     debug_info["mode"] = "idle"
                     if not FOLLOW_TARGET_POSITION_NED and frame_id % 30 == 0:

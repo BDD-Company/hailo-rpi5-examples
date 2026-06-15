@@ -46,7 +46,7 @@ async def platform_controlling_thread_async(platform_connection_string, platform
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
     # MAX_THRUST      = control_config.thrust.max
     # MIN_THRUST      = control_config.thrust.min
-    FADE_COEFF      = control_config.target_lost_fade_per_frame
+    FADE_COEFF      = control_config.target_lost.fade_per_frame
 
     PD_COEFF_P      = control_config.pd_coeff.p
     PD_COEFF_D      = control_config.pd_coeff.d

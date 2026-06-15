@@ -1016,7 +1016,7 @@ def display_user_data_frame(user_data: app_callback_class):
     cv2.destroyAllWindows()
 
 class GStreamerDetectionApp(GStreamerApp):
-    def __init__(self, app_callback, user_data, parser=None):
+    def __init__(self, app_callback, user_data, parser=None, inference=None):
         if parser == None:
             parser = get_default_parser()
 
@@ -1031,8 +1031,11 @@ class GStreamerDetectionApp(GStreamerApp):
         # Additional initialization code can be added here
         # Set Hailo parameters these parameters should be set based on the model used
         self.batch_size = 1
-        nms_score_threshold = 0.3
-        nms_iou_threshold = 0.45
+        # Model + NMS come from config.inference (config.yaml); CLI --hef-path /
+        # --labels-json still override for ad-hoc runs. `inference` is None only
+        # when no config is passed (legacy callers) — then fall back to defaults.
+        nms_score_threshold = inference.nms_score_threshold if inference is not None else 0.3
+        nms_iou_threshold   = inference.nms_iou_threshold   if inference is not None else 0.45
 
 
         # Determine the architecture if not specified
@@ -1045,23 +1048,26 @@ class GStreamerDetectionApp(GStreamerApp):
         else:
             self.arch = self.options_menu.arch
 
-
         if self.options_menu.hef_path is not None:
             self.hef_path = self.options_menu.hef_path
+        elif inference is not None:
+            self.hef_path = str(inference.hef_model_path)
         else:
             self.hef_path = get_resource_path(DETECTION_PIPELINE, RESOURCES_MODELS_DIR_NAME)
-
 
             # Set the post-processing shared object file
         self.post_process_so = get_resource_path(
             DETECTION_PIPELINE, RESOURCES_SO_DIR_NAME, DETECTION_POSTPROCESS_SO_FILENAME
         )
 
-
-
         self.post_function_name = DETECTION_POSTPROCESS_FUNCTION
-        # User-defined label JSON file
-        self.labels_json = self.options_menu.labels_json
+        # User-defined label JSON file: CLI override, else config.inference, else none.
+        if self.options_menu.labels_json is not None:
+            self.labels_json = self.options_menu.labels_json
+        elif inference is not None and inference.labels_json is not None:
+            self.labels_json = str(inference.labels_json)
+        else:
+            self.labels_json = None
 
         self.app_callback = app_callback
 

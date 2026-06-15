@@ -19,6 +19,7 @@ Design notes:
 from dataclasses import dataclass, field, fields, is_dataclass, asdict
 from enum import Enum
 from typing import Annotated, Any, Optional
+from pathlib import Path
 
 from helpers import XY
 
@@ -108,6 +109,19 @@ class MinItems(_Constraint):
         if isinstance(value, list) and len(value) < self.count:
             errors.append(f"{path}: needs at least {self.count} item(s), got {len(value)}")
 
+# Used as a field type (``hef_model_path: ExistingFile``): coerces a config
+# string to a pathlib.Path and requires the file to exist. Implemented as a
+# factory that RETURNS a plain Path rather than subclassing Path — subclassing
+# Path is fragile across versions (the Pi runs 3.11, the dev host 3.12: 3.11
+# parses in __new__, 3.12 in __init__), so a factory is the portable choice.
+class ExistingFile:
+    def __new__(cls, value):
+        path = Path(value)
+        if not path.is_file():
+            raise ValueError(f"{path} does not point to an existing file")
+        return path
+
+
 
 # ---------------------------------------------------------------------------
 # Top-level config
@@ -116,6 +130,23 @@ class MinItems(_Constraint):
 class Config:
     confidence_min:  Annotated[float, Range(0.0, 1.0)] = 0.4
     confidence_move: Annotated[float, Range(0.0, 1.0)] = 0.3
+
+    # Normalized image coordinates, 0..1.
+    aim_point:            Annotated[XY, Range(0.0, 1.0)] = field(default_factory=lambda: XY(0.5, 0.5))
+    aim_point_max_offset: Annotated[XY, Range(0.0, 1.0)] = field(default_factory=lambda: XY(0.5, 0.6))
+
+    # Physical target size in meters; positive.
+    target_size_m: Annotated[XY, Range(min=0.0, min_inclusive=False)]
+
+    follow_target_position_ned: bool = False
+
+    @dataclass(slots=True, kw_only=True, frozen=True)
+    class Inference:
+        hef_model_path:      ExistingFile
+        nms_score_threshold: Annotated[float, Range(0.0, 1.0)] = 0.3
+        nms_iou_threshold:   Annotated[float, Range(0.0, 1.0)] = 0.45
+        labels_json:         Optional[ExistingFile] = None
+    inference: Inference
 
     @dataclass(slots=True, kw_only=True, frozen=True)
     class Thrust:
@@ -126,30 +157,45 @@ class Config:
         max:     Annotated[float, Range(0.0, 1.0)] = 0.9
 
         dynamic:                  bool = False
-        proportional_to_distance: bool = True
-        proportional_to_distance_far_coeff:        Annotated[float, Range(min=0.0)] = 1.0
-        proportional_to_distance_medium_distance_m: Annotated[float, Range(min=0.0)] = 20.0
-        proportional_to_distance_medium_coeff:     Annotated[float, Range(min=0.0)] = 0.9
-        proportional_to_distance_near_distance_m:   Annotated[float, Range(min=0.0)] = 10.0
-        proportional_to_distance_near_coeff:       Annotated[float, Range(min=0.0)] = 1.1
+        @dataclass(slots=True, kw_only=True, frozen=True)
+        class ProportionalToDistance:
+            far_coeff:        Annotated[float, Range(min=0.0)] = 1.0
+            medium_distance_m: Annotated[float, Range(min=0.0)] = 20.0
+            medium_coeff:     Annotated[float, Range(min=0.0)] = 0.9
+            near_distance_m:   Annotated[float, Range(min=0.0)] = 10.0
+            near_coeff:       Annotated[float, Range(min=0.0)] = 1.1
+        proportional_to_distance : Optional[ProportionalToDistance] = None
     thrust: Thrust = field(default_factory=Thrust)
 
-    # Per-frame multiplicative fade of target confidence after loss, 0..1.
-    target_lost_fade_per_frame: Annotated[float, Range(0.0, 1.0)] = 0.99
-    target_estimator_clear_history_after_target_lost_frames: Annotated[int, Range(min=0)] = 3
+    @dataclass(slots=True, kw_only=True, frozen=True)
+    class TargetLost:
+        # Keep emitting same command for given number of frames before fading.
+        repeat_same_commands_frames: Annotated[int, Range(min=0)] = 1
+        # Per-frame multiplicative fade of target confidence after loss, 0..1.
+        fade_per_frame: Annotated[float, Range(0.0, 1.0)] = 0.99
+        clear_estimator_history_after_frames: Annotated[int, Range(min=0)] = 3
+    target_lost : TargetLost
 
-    estimation_3d:                      bool = True
-    estimation_3d_method:               VelocityMethod = VelocityMethod.NUMPY_REGRESSION
-    estimation_3d_use_initial_velocity: bool = False
+    @dataclass(slots=True, kw_only=True, frozen=True)
+    class Estimation:
+        @dataclass(slots=True, kw_only=True, frozen=True)
+        class Estimation3D:
+            method:               VelocityMethod = VelocityMethod.NUMPY_REGRESSION
+            use_initial_velocity: bool = False
+        estimation_3d : Optional[Estimation3D]
 
-    estimation_lookahead_frames:                Annotated[int, Range(min=0)] = 1
-    estimation_lookahead_dynamic:               bool = True
-    estimation_lookahead_dynamic_frames_max:    Annotated[int, Range(min=0)] = 5
-    estimation_lookahead_dynamic_sqrt:          bool = False
-    estimation_lookahead_dynamic_factor:        Annotated[float, Range(min=0.0)] = 0.1
-    estimation_lookahead_dynamic_frames_near:   Annotated[int, Range(min=0)] = 0
-    estimation_lookahead_dynamic_frames_medium: Annotated[int, Range(min=0)] = 0
-    estimation_lookahead_dynamic_frames_far:    Annotated[int, Range(min=0)] = 0
+        @dataclass(slots=True, kw_only=True, frozen=True)
+        class Lookahead:
+            frames:                Annotated[int, Range(min=0)] = 1
+            dynamic:               bool = True
+            dynamic_frames_max:    Annotated[int, Range(min=0)] = 5
+            dynamic_sqrt:          bool = False
+            dynamic_factor:        Annotated[float, Range(min=0.0)] = 0.1
+            dynamic_frames_near:   Annotated[int, Range(min=0)] = 0
+            dynamic_frames_medium: Annotated[int, Range(min=0)] = 0
+            dynamic_frames_far:    Annotated[int, Range(min=0)] = 0
+        lookahead : Lookahead
+    estimation : Estimation
 
     @dataclass(slots=True, kw_only=True, frozen=True)
     class OpticalRefinement:
@@ -195,15 +241,6 @@ class Config:
         pd_coeff_p:                     Annotated[XY, Range(min=0.0)]
         thrust:                         Annotated[float, Range(0.0, 1.0)] = 1.0
     takeoff: TakeOff
-
-    # Normalized image coordinates, 0..1.
-    aim_point:            Annotated[XY, Range(0.0, 1.0)] = field(default_factory=lambda: XY(0.5, 0.5))
-    aim_point_max_offset: Annotated[XY, Range(0.0, 1.0)] = field(default_factory=lambda: XY(0.5, 0.6))
-
-    # Physical target size in meters; positive.
-    target_size_m: Annotated[XY, Range(min=0.0, min_inclusive=False)]
-
-    follow_target_position_ned: bool = False
 
     @dataclass(slots=True, kw_only=True, frozen=True)
     class Camera:

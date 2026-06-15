@@ -601,6 +601,25 @@ def test_missing_required_deep_section_reported():
 CONFIG_YAML = Path(__file__).resolve().parent / "config.yaml"
 
 
+def _real_config_model_present() -> bool:
+    """Strict ExistingFile validation means the real config.yaml only loads where
+    the HEF model exists (deployed on the Pi, absent on dev hosts/CI). Used to
+    skip the load-the-real-file tests when the model is missing."""
+    try:
+        raw = yaml.safe_load(CONFIG_YAML.read_text()) or {}
+        hef = (raw.get('inference') or {}).get('hef_model_path')
+        return bool(hef) and Path(hef).is_file()
+    except Exception:
+        return False
+
+
+_requires_model = pytest.mark.skipif(
+    not _real_config_model_present(),
+    reason="real config.yaml needs the HEF model present (deployed on the Pi, absent on host/CI)",
+)
+
+
+@_requires_model
 def test_real_config_yaml_loads():
     cfg = Config.load(CONFIG_YAML)
     assert isinstance(cfg, Config)
@@ -610,10 +629,13 @@ def test_real_config_yaml_loads():
 
 
 def test_config_parse_and_load_forwarders():
-    # Config.parse / Config.load forward to parse_config/load_config with Config.
-    assert isinstance(Config.load(CONFIG_YAML), Config)
+    # Config.parse forwards to parse_config with Config — no model file needed.
     with pytest.raises(ConfigError):
         Config.parse({'totally_unknown_key': 1})
+    # Config.load forwards too, but the real config.yaml needs the HEF present.
+    if not _real_config_model_present():
+        pytest.skip("HEF model absent (host/CI)")
+    assert isinstance(Config.load(CONFIG_YAML), Config)
 
 
 # ===========================================================================

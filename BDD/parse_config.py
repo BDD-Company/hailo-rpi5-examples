@@ -13,7 +13,7 @@ from typing import Annotated, Any, TypeVar, Union, get_args, get_origin, get_typ
 import types
 
 from helpers import XY
-from config import _Constraint
+from config import _Constraint, ExistingFile
 
 T = TypeVar("T")
 
@@ -123,6 +123,17 @@ def _coerce(value, ann, path, errors):
                 coerced = base(value)
             except ValueError:
                 errors.append(f"{path}: {value!r} is not one of {[m.value for m in base]}")
+    elif base is ExistingFile or (isinstance(base, type) and issubclass(base, Path)):
+        # Path-typed fields coerce from a path string. ExistingFile is a factory
+        # that raises when the file is missing; surface that (and any plain Path
+        # construction error) as a config problem instead of crashing the parse.
+        if not isinstance(value, (str, Path)):
+            errors.append(f"{path}: expected a path string, got {type(value).__name__}")
+        else:
+            try:
+                coerced = base(value)
+            except Exception as exc:
+                errors.append(f"{path}: {exc}")
     elif base is XY:
         coerced = _coerce_xy(value, path, errors)
     elif is_dataclass(base):

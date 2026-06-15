@@ -16,6 +16,15 @@ target_size_m: [2, 2]          # large balloon
 
 follow_target_position_ned: false
 
+# Hailo inference: detection model + NMS post-processing. hef_model_path must
+# point to an EXISTING .hef on the machine running the app (deployed under
+# /home/bdd/models on the Pi; absent on dev hosts). labels_json is optional.
+inference:
+  hef_model_path: /home/bdd/models/2026-04-07_11n_ball_v2.hef
+  nms_score_threshold: 0.3
+  nms_iou_threshold: 0.45
+  # labels_json: /home/bdd/models/labels.json
+
 thrust:
   cruise: 0.53
   hover: 0.4
@@ -23,28 +32,36 @@ thrust:
   max: 0.9
 
   dynamic: false
-  proportional_to_distance: true
-  proportional_to_distance_far_coeff: 1
-  proportional_to_distance_medium_distance_m: 20
-  proportional_to_distance_medium_coeff: 0.9
-  proportional_to_distance_near_distance_m: 10
-  proportional_to_distance_near_coeff: 1.1
+  # Optional sub-section: set `enabled: false` to disable (section still validated).
+  proportional_to_distance:
+    enabled: true
+    far_coeff: 1
+    medium_distance_m: 20
+    medium_coeff: 0.9
+    near_distance_m: 10
+    near_coeff: 1.1
 
-target_lost_fade_per_frame: 0.99
-target_estimator_clear_history_after_target_lost_frames: 3
+target_lost:
+  repeat_same_commands_frames: 1   # keep emitting last command for this many lost frames before fading
+  fade_per_frame: 0.99
+  clear_estimator_history_after_frames: 3
 
-estimation_3d: true
-estimation_3d_method: numpy
-estimation_3d_use_initial_velocity: false
+estimation:
+  # Optional sub-section: set `enabled: false` to disable 3D estimation.
+  estimation_3d:
+    enabled: true
+    method: numpy
+    use_initial_velocity: false
 
-estimation_lookahead_frames: 1
-estimation_lookahead_dynamic: true
-estimation_lookahead_dynamic_frames_max: 5
-estimation_lookahead_dynamic_sqrt: false
-estimation_lookahead_dynamic_factor: 0.1
-estimation_lookahead_dynamic_frames_near: 0
-estimation_lookahead_dynamic_frames_medium: 0
-estimation_lookahead_dynamic_frames_far: 0   # can't be too big -- estimation will be too FAR away.
+  lookahead:
+    frames: 1
+    dynamic: true
+    dynamic_frames_max: 5
+    dynamic_sqrt: false
+    dynamic_factor: 0.1
+    dynamic_frames_near: 0
+    dynamic_frames_medium: 0
+    dynamic_frames_far: 0   # can't be too big -- estimation will be too FAR away.
 
 optical_refinement:
   enabled: true   # set false to disable the feature (section is still validated)
