@@ -262,6 +262,7 @@ class RecorderSink(interfaces.FrameSinkInterface):
                 name=smx
                 muxer-factory=matroskamux
                 muxer-properties="properties,streamable=true"
+                sink-properties="properties,buffer-mode=2,o-sync=true"
                 max-size-time={self.segment_ns}
                 async-finalize=true
                 location="{pattern_path}"
