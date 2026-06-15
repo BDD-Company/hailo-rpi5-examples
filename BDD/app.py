@@ -318,6 +318,7 @@ class App(GStreamerDetectionApp):
             ! splitmuxsink \
                 muxer-factory=matroskamux \
                 muxer-properties="properties,streamable=true" \
+                sink-properties="properties,buffer-mode=2,o-sync=true" \
                 max-size-time={video_output_chunk_length_ns} async-finalize=true \
                 location="{self.video_output_directory}/{video_file_name}"
         '''
