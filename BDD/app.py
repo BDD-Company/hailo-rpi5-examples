@@ -30,6 +30,8 @@ from bytetrack import BYTETracker
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
 from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
+from config import Config
+from dataclasses import asdict, replace
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 from video_sink_gstreamer import RecorderSink
@@ -278,12 +280,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
-        super().__init__(app_callback, user_data, parser)
+        super().__init__(app_callback, user_data, parser, inference=inference)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -377,198 +379,43 @@ def main():
     arg_parser.add_argument('--test-camera-switch-s', type=float, default=None,
                             help='Toggle active camera every N seconds (dual-camera verification only)')
 
-    control_config = {
-        'confidence_min': 0.4,
-        'confidence_move': 0.3,
+    config = Config.load(Path(__file__).resolve().parent / "config.yaml")
+    config = replace(config, DEBUG=DEBUG)
 
-        'thrust_takeoff' : 1.0,
-        'thrust_cruise' : 0.53,
-        'thrust_hover' : 0.4,
-
-        'thrust_min': 0.4,
-        'thrust_max': 0.9,
-
-        'thrust_dynamic': False,
-        'thrust_proportional_to_distance' : True,
-        'thrust_proportional_to_distance_far_coeff' : 1,
-        'thrust_proportional_to_distance_medium_distance_m' : 20,
-        'thrust_proportional_to_distance_medium_coeff'      : 0.9,
-        'thrust_proportional_to_distance_near_distance_m'   : 10,
-        'thrust_proportional_to_distance_near_coeff'        : 1.1,
-
-        'target_lost_fade_per_frame': 0.99,
-        'target_estimator_clear_history_after_target_lost_frames' : 3,
-
-        'estimation_3d': True,
-        'estimation_3d_method': 'numpy',
-        'estimation_3d_use_initial_velocity' : False,
-
-        'estimation_lookahead_frames': 1,
-        'estimation_lookahead_dynamic': True,
-        'estimation_lookahead_dynamic_frames_max' : 5,
-        'estimation_lookahead_dynamic_sqrt': False,
-        'estimation_lookahead_dynamic_factor': 0.1,
-        'estimation_lookahead_dynamic_frames_near':   0,
-        'estimation_lookahead_dynamic_frames_medium': 0,
-        'estimation_lookahead_dynamic_frames_far':    0, # can't be too big -- estimation will be too FAAR away.
-
-        'optical_methods_to_refine_target_size_and_center': True,
-        'adjust_aim_point_at_edge_of_frame': True,
-        'adjust_aim_point_at_edge_of_frame_threshold': 0.01,
-        'adjust_aim_point_at_edge_of_frame_max_size': 0.25, # w*h, e.g. w=0.5, h=0.5, size=0.25
-
-        'pd_coeff_p': XY(8, 2), # per-axis P gain (x, y)
-        'pd_coeff_d': 0, #-1, # -1
-        # stating from platform with guides, make sure that initial takeoff is almost perpendicular
-        'pd_coeff_p_safe_min': XY(0.1, 0.1),
-        'pd_coeff_p_min' : XY(0.5, 0.5),
-        'pd_coeff_p_max' : XY(4, 2),
-
-        # Dynamically adjust P coeff based on target size.
-        # Old mode: linear interpolation between min and max.
-        # New mode: piecewise profile controlled by stage thresholds and ratios.
-        'pd_coeff_p_dynamic': False,
-        'pd_coeff_p_dynamic_use_piecewise': False,
-        'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
-
-        'pd_coeff_p_dynamic_min' : 0.6,
-        'pd_coeff_p_dynamic_max_target_size' : 0.0120,  # normalized target size
-        'pd_coeff_p_dynamic_max' : 6,
-
-        'pd_coeff_p_dynamic_stage_1_threshold': 0.01,
-        'pd_coeff_p_dynamic_stage_2_threshold': 0.05,
-        'pd_coeff_p_dynamic_stage_1_ratio': 1,
-        'pd_coeff_p_dynamic_stage_2_ratio': 1,
-        'pd_coeff_p_dynamic_stage_3_ratio': 1,
-
-        # Multi-camera support. The 'camera' dict is the single source of
-        # truth: top-level keys (width/height/fps/video_format/active_id/
-        # switch_to_wide_size/switch_to_zoom_size) are SHARED across all
-        # cameras (a single appsrc downstream demands identical caps). The
-        # nested 'cameras' list holds per-camera CameraConfig dicts; the
-        # producer spawns one picamera thread per entry but only the camera
-        # with camera_id == active_id feeds inference at any moment. The
-        # drone/platform controller looks up frame_angular_size_deg from
-        # the active config so the wide FOV is never applied to a tele
-        # frame. zoom_factor is auto-derived by CameraSwitcher from the FOVs.
-        'camera': {
-            'width': 1280,
-            'height': 720,
-            'fps': 30,
-            'video_format': 'RGB',
-            'active_id': 0,
-            # Relative size of the tracked object (or bigger) that triggers switching to wide-angle camera.
-            # With wide 107° / zoom 14° FOVs (zoom_factor ~11x), 0.25 on zoom -> ~0.023 on wide after the
-            # switch, leaving a ~1.5x margin above switch_to_wide_size to prevent immediate flip-back.
-            'switch_to_wide_size': 0.25,
-            # Relative size of the tracked object (or smaller) that triggers switching to narrow-angle (zoomed) camera.
-            # 0.015 on wide -> ~0.165 on zoom after the switch, ~1.5x below switch_to_zoom_size.
-            'switch_to_zoom_size': 0.015,
-
-            'cameras': [
-                # NOTE: must be at least 1 camera
-                dict(
-                    camera_id=0,
-                    name='wide',
-                    sensor_index=0,
-                    frame_angular_size_deg=XY(107, 85),
-                ),
-                # dict(
-                #     camera_id=1,
-                #     name='zoom',
-                #     sensor_index=0,
-                #     frame_angular_size_deg=XY(14, 8),
-                # ),
-            ],
-        },
-
-
-        # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m' : XY(2, 2),             # large baloon
-        # 'target_size_m': XY(1.2, 1.2),            # shahed small
-        # 'target_size_m' : XY(3.5, 2.5),             # shahed large
-        # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
-
-        # Inertia correction is in another branch and not used since telemetry data is weird sometimes,
-        # leading to completely invalid corrections.
-        # 'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
-        # 'inertia_correction_limits': XY(1, 1),
-        # 'inertia_correction_min_speed_ms': 5,
-
-        'safe_takeoff_period_ns': 1_000_000_000,
-        'delay_takeof_until_n_detection_frames' : 10,
-
-        'aim_point': XY(0.5, 0.5),
-        'aim_point_max_offset': XY(0.5, 0.6),
-
-        'follow_target_position_ned' : False,
-
-        'drone' : {
-            # 'connection_string' : 'udpout://192.168.0.3:14540', # direct comm with drone, slow to start, fails to connect on client restart
-            #'connection_string' : 'udp://:14550', # mavlink-rounterd
-            # 'connection_string' : 'serial:///dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00',
-            'connection_string' : 'usb',
-            'config' : {
-                'upside_down_angle_deg': 130,
-                'upside_down_hold_s': 0.2,
-                'use_set_attitude': False,
-                'min_lift_fraction': 0.1,
-                'lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
-                'lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
-
-                # Belly-down yaw assist: yaw the nose toward the ground (forward
-                # axis points down) using the accelerometer-estimated gravity dir.
-                'belly_down_yaw': True,                  # set False to disable
-                'belly_down_yaw_kp': 1.5,                # deg/s per deg of heading error
-                'belly_down_yaw_max_rate_deg_s': 90.0,   # clamp on commanded yaw rate
-                'belly_down_min_horizontal_g_mss': 2.0,  # min in-plane gravity to engage
-            }
-        },
-
-        'DEBUG': DEBUG,
-
-        'bytetrack_track_thresh':   0.3,
-        'bytetrack_det_thresh':     0.35,
-        'bytetrack_match_thresh':   0.3,
-        'bytetrack_track_buffer':   30,
-        'bytetrack_frame_rate':     30,
-        'bytetrack_match_max_dist':    0.2,
-        'bytetrack_recovery_max_dist': None,
-        'bytetrack_nms_thresh':        0.3,
-        'bytetrack_nms_dist_thresh':   0.06,
-    }
+    # bytetrack is an Optional section: present (non-None) enables tracking,
+    # null / enabled=false disables it. Check the object, not a flag.
     global USE_TRACKER
-    USE_TRACKER = False
+    USE_TRACKER = config.bytetrack is not None
 
-    byte_track_config_params = {k.removeprefix('bytetrack_') : v for k, v in control_config.items() if k.startswith('bytetrack_')}
-    for k in byte_track_config_params:
-        control_config.pop('bytetrack_' + k)
-
-    bytetracker = BYTETracker(
-        **byte_track_config_params
-        # track_thresh=control_config['bytetrack_track_thresh'],
-        # det_thresh=control_config['bytetrack_det_thresh'],
-        # match_thresh=control_config['bytetrack_match_thresh'],
-        # track_buffer=control_config['bytetrack_track_buffer'],
-        # frame_rate=control_config['bytetrack_frame_rate'],
-        # match_max_dist=control_config.get('bytetrack_match_max_dist'),
-        # recovery_max_dist=control_config.get('bytetrack_recovery_max_dist'),
-        # nms_thresh=control_config.get('bytetrack_nms_thresh'),
-        # nms_dist_thresh=control_config.get('bytetrack_nms_dist_thresh'),
-    )
+    bytetracker = BYTETracker(**config.bytetrack.tracker_kwargs()) if config.bytetrack is not None else None
 
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True
 
-    # Build CameraSwitcher from the 'camera' dict in control_config.
-    # The dict is the kwargs for CameraSwitcher except for 'cameras' which
-    # is the list of per-camera dicts (each one a CameraConfig kwargs).
-    camera_block = control_config.pop('camera', None) or {}
-    camera_dicts = camera_block.pop('cameras', None) or []
+    # Build CameraSwitcher from the validated 'camera' section. Each CameraEntry
+    # maps onto a CameraConfig; the shared caps come from the section itself.
+    camera_section = config.camera
     camera_switcher = None
-    if camera_dicts:
-        camera_configs = [CameraConfig(**d) for d in camera_dicts]
-        camera_switcher = CameraSwitcher(camera_configs, **camera_block)
+    if camera_section.cameras:
+        camera_configs = [
+            CameraConfig(
+                camera_id=c.camera_id,
+                name=c.name,
+                sensor_index=c.sensor_index,
+                frame_angular_size_deg=c.frame_angular_size_deg,
+            )
+            for c in camera_section.cameras
+        ]
+        camera_switcher = CameraSwitcher(
+            camera_configs,
+            width=camera_section.width,
+            height=camera_section.height,
+            fps=camera_section.fps,
+            video_format=camera_section.video_format,
+            active_id=camera_section.active_id,
+            switch_to_wide_size=camera_section.switch_to_wide_size,
+            switch_to_zoom_size=camera_section.switch_to_zoom_size,
+        )
         logger.info("!!! Cameras configured: %s, active=%d, shared caps: %dx%d@%dfps %s, thresholds: wide>=%.3f zoom<=%.3f",
                     [(c.camera_id, c.name) for c in camera_configs],
                     camera_switcher.active_id(),
@@ -583,7 +430,8 @@ def main():
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True)
+        record_videos=True,
+        inference=config.inference)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
@@ -607,14 +455,15 @@ def main():
         threading.Thread(target=_switch_test_thread, name="camera-switch-test", daemon=True).start()
         logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
 
-    logger.info("!!! Config: %s", control_config)
+    logger.info("!!! Config: %s", config)
     if DEBUG:
         import math
         nan = math.nan
-        control_config['debug_telemetry_dict'] = {'attitude_euler': {'pitch_deg': 1.1012928485870361, 'roll_deg': -2.5803990364074707, 'timestamp_us': 4597491000, 'yaw_deg': -139.22280883789062}, 'odometry': {'angular_velocity_body': {'pitch_rad_s': 0.005480111576616764, 'roll_rad_s': -0.004354139324277639, 'yaw_rad_s': 0.00451350212097168}, 'child_frame_id': '1 (BODY_NED)', 'frame_id': '1 (BODY_NED)', 'pose_covariance': {'covariance_matrix': (0.0006513984990306199, nan, nan, nan, nan, nan, 0.0006680359947495162, nan, nan, nan, nan, 0.0795387253165245, nan, nan, nan, 0.00014700590691063553, nan, nan, 0.0001532444730401039, nan, 0.0037478541489690542)}, 'position_body': {'x_m': 10155.28515625, 'y_m': 1922.0908203125, 'z_m': 0.21114209294319153}, 'q': {'timestamp_us': 0, 'w': -0.3483775854110718, 'x': -0.0011684682685881853, 'y': -0.024444160982966423, 'z': 0.9370348453521729}, 'time_usec': 4597481426, 'velocity_body': {'x_m_s': 0.014301709830760956, 'y_m_s': -0.007258167490363121, 'z_m_s': 0.04777885600924492}, 'velocity_covariance': {'covariance_matrix': (0.002916615456342697, nan, nan, nan, nan, nan, 0.0030234858859330416, nan, nan, nan, nan, 0.005942340008914471, nan, nan, nan, nan, nan, nan, nan, nan, nan)}}, 'landed_state': None, 'imu': {'acceleration_frd': {'down_m_s2': -10.367236137390137, 'forward_m_s2': -0.11148512363433838, 'right_m_s2': 0.5069471597671509}, 'angular_velocity_frd': {'down_rad_s': -0.0006937360158190131, 'forward_rad_s': 0.004322248511016369, 'right_rad_s': 0.0015081189339980483}, 'magnetic_field_frd': {'down_gauss': 0.2559056580066681, 'forward_gauss': -0.3339233696460724, 'right_gauss': 0.3074171245098114}, 'temperature_degc': 15.0, 'timestamp_us': 4597496423}}
+        config = replace(config, debug_telemetry_dict={'attitude_euler': {'pitch_deg': 1.1012928485870361, 'roll_deg': -2.5803990364074707, 'timestamp_us': 4597491000, 'yaw_deg': -139.22280883789062}, 'odometry': {'angular_velocity_body': {'pitch_rad_s': 0.005480111576616764, 'roll_rad_s': -0.004354139324277639, 'yaw_rad_s': 0.00451350212097168}, 'child_frame_id': '1 (BODY_NED)', 'frame_id': '1 (BODY_NED)', 'pose_covariance': {'covariance_matrix': (0.0006513984990306199, nan, nan, nan, nan, nan, 0.0006680359947495162, nan, nan, nan, nan, 0.0795387253165245, nan, nan, nan, 0.00014700590691063553, nan, nan, 0.0001532444730401039, nan, 0.0037478541489690542)}, 'position_body': {'x_m': 10155.28515625, 'y_m': 1922.0908203125, 'z_m': 0.21114209294319153}, 'q': {'timestamp_us': 0, 'w': -0.3483775854110718, 'x': -0.0011684682685881853, 'y': -0.024444160982966423, 'z': 0.9370348453521729}, 'time_usec': 4597481426, 'velocity_body': {'x_m_s': 0.014301709830760956, 'y_m_s': -0.007258167490363121, 'z_m_s': 0.04777885600924492}, 'velocity_covariance': {'covariance_matrix': (0.002916615456342697, nan, nan, nan, nan, nan, 0.0030234858859330416, nan, nan, nan, nan, 0.005942340008914471, nan, nan, nan, nan, nan, nan, nan, nan, nan)}}, 'landed_state': None, 'imu': {'acceleration_frd': {'down_m_s2': -10.367236137390137, 'forward_m_s2': -0.11148512363433838, 'right_m_s2': 0.5069471597671509}, 'angular_velocity_frd': {'down_rad_s': -0.0006937360158190131, 'forward_rad_s': 0.004322248511016369, 'right_rad_s': 0.0015081189339980483}, 'magnetic_field_frd': {'down_gauss': 0.2559056580066681, 'forward_gauss': -0.3339233696460724, 'right_gauss': 0.3074171245098114}, 'temperature_degc': 15.0, 'timestamp_us': 4597496423}})
 
     if app.options_menu.connection_string:
-        control_config['drone']['connection_string'] = app.options_menu.connection_string
+        config = replace(config, drone=replace(config.drone,
+                                               connection_string=app.options_menu.connection_string))
 
     action_thread = None
     if app.options_menu.action == 'platform':
@@ -629,23 +478,22 @@ def main():
                     ),
                 detections_queue),
             kwargs = dict(
-                control_config= control_config,
+                control_config= config,
                 output_queue= output_queue,
                 signal_event_when_ready= event,
                 camera_switcher= camera_switcher,
             )
         )
     else:
-        drone_params = control_config.pop('drone')
         action_thread = threading.Thread(
             target = drone_controlling_thread,
             args = (
-                drone_params.pop('connection_string'), #'udp://10.41.10.2:14540',
-                drone_params.pop('config'),
+                config.drone.connection_string, #'udp://10.41.10.2:14540',
+                asdict(config.drone.config),
                 detections_queue
             ),
             kwargs= dict(
-                control_config= control_config,
+                control_config= config,
                 output_queue= output_queue,
                 signal_event_when_ready= event,
                 camera_switcher= camera_switcher,
