@@ -319,7 +319,7 @@ async def drone_controlling_thread_async(
     # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.inertia_correction_min_speed_ms
 
     # estimation_3d is Optional: present (non-null) enables 3D estimation.
-    _ESTIMATION_3D =
+    _ESTIMATION_3D = control_config.estimation.estimation_3d
     ESTIMATION_3D = bool(control_config.estimation.estimation_3d)
 
     ESTIMATION_3D_METHOD = VelocityMethod(_ESTIMATION_3D.method) if _ESTIMATION_3D else VelocityMethod.NUMPY_REGRESSION
