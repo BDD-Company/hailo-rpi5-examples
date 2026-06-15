@@ -19,7 +19,7 @@ from typing import Annotated, Optional, Union, get_args, get_origin, get_type_hi
 import yaml
 import pytest
 
-from config import Config, Range, Choices, MinItems, _Constraint
+from config import Config, Range, Choices, MinItems, ExistingFile, _Constraint
 from parse_config import parse_config, load_config, loads_config, ConfigError
 from helpers import XY
 
@@ -49,6 +49,7 @@ class TestConfig:
 
     # required (no default)
     gain:   Annotated[XY, Range(min=0.0)]                    # required XY
+    data_file: ExistingFile                                  # required: coerces to Path, file must exist
 
     @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
     class SubSection:
@@ -86,8 +87,13 @@ Limits = TestConfig.SubSection.Limits
 FeatureSection = TestConfig.FeatureSection
 Item = TestConfig.Item
 
+# Path to THIS test file: a file guaranteed to exist while the tests run, used as
+# a valid value for the required ExistingFile field (which coerces a config string
+# to a Path and requires the file to exist, like Config.Inference.hef_model_path).
+THIS_FILE = str(Path(__file__).resolve())
 
-TEST_CONFIG_YAML = """\
+
+TEST_CONFIG_YAML = f"""\
 name: hello
 ratio: 0.5
 count: 3
@@ -95,6 +101,7 @@ color: blue
 point: [0.5, 0.5]
 threshold: null
 gain: [1.0, 2.0]
+data_file: {THIS_FILE}
 sub_section:
   required_value: 4.0
   label: b
@@ -258,6 +265,26 @@ def test_list_requires_min_items():
     with pytest.raises(ConfigError) as ei:
         covert_to_config(tvalid_with(items=[]))
     assert any('items' in p and 'at least' in p for p in ei.value.problems)
+
+
+# ---------------------------------------------------------------------------
+# ExistingFile: a path string is coerced to a pathlib.Path and the file must
+# exist (mirrors Config.Inference.hef_model_path). THIS test file is the always-
+# present target; a bogus path is rejected with a clear, path-prefixed problem.
+# ---------------------------------------------------------------------------
+def test_existing_file_loads_when_present():
+    cfg = covert_to_config(tvalid())            # data_file -> THIS_FILE (exists)
+    assert isinstance(cfg.data_file, Path)
+    assert cfg.data_file == Path(THIS_FILE)
+    assert cfg.data_file.is_file()
+
+
+def test_existing_file_errors_when_missing():
+    missing = str(Path(THIS_FILE).with_name("definitely_missing_zzz.yaml"))
+    with pytest.raises(ConfigError) as ei:
+        covert_to_config(tvalid_with(data_file=missing))
+    assert any(p.startswith('data_file:') and 'does not point to an existing file' in p
+               for p in ei.value.problems), ei.value.problems
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +514,7 @@ def _problem_for(path, problems):
 
 LEAF_FIELDS = list(iter_leaf_fields(TestConfig))
 WRONG_TYPED = {bool: "not_a_bool", int: "not_an_int", float: "not_a_float",
-               str: 12345, XY: "not_an_xy"}
+               str: 12345, XY: "not_an_xy", ExistingFile: 12345}   # ExistingFile wants a path string
 REQUIRED_TOP = required_names(TestConfig)
 
 
