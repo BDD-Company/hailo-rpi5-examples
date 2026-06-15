@@ -48,8 +48,16 @@ cd ./hailo-rpi5-examples/
 readonly start_time=$(date +%Y%m%d-%H%M%S)
 mkdir -p ./_DEBUG/ ||:
 
-# Mirror stdout/stderr to log file while still showing live in the tmux pane.
-exec > >(tee "./_DEBUG/BDD_${start_time}.log") 2>&1
+# Share this run id with the app so the log file and the MKV segments all carry
+# the same timestamp.
+export BDD_START_TIME="${start_time}"
+
+# Mirror EVERYTHING (Python logging + native GStreamer/libcamera stderr) into a
+# SINGLE log file, still shown live in the tmux pane. durable_tee.py fsyncs that
+# file (immediately on ERROR/CRITICAL/FATAL, else ~2x/s) so an abrupt power cut
+# loses at most a fraction of a second -- see scripts/setup_durability.sh for the
+# kernel-side writeback tuning that backs this up.
+exec > >(python3 ./scripts/durable_tee.py "./_DEBUG/BDD_${start_time}.log") 2>&1
 
 set -ex
 

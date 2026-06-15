@@ -336,7 +336,10 @@ def main():
     env_path_str = str(env_file)
     os.environ["HAILO_ENV_FILE"] = env_path_str
 
-    start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    # One timestamp for the whole run. bdd.sh exports BDD_START_TIME so the single
+    # durable log (written by scripts/durable_tee.py) and the MKV segments share a
+    # run id; fall back to now() when app.py is launched directly.
+    start_time_str = os.environ.get("BDD_START_TIME") or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     configure_logging(level = logging.DEBUG, log_file_name=start_time_str)
     # shushing verbose loggers
     logging.getLogger("picamera2").setLevel(logging.WARNING)
