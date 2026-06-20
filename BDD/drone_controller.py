@@ -319,6 +319,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     PHASED_FAR_VMAX   = cfg.phased_far_vmax
     PHASED_FAR_SPEED  = cfg.phased_far_speed
     PHASED_FAR_VZ_MAX = cfg.phased_far_vz_max
+    PHASED_ADAPTIVE   = cfg.phased_adaptive
     if GUIDANCE_PHASED:
         PRONAV_USE_KALMAN = True    # phased needs a clean NED target pos/vel
 
@@ -923,8 +924,19 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                         and (not ESTIMATION_3D_MAX_DISTANCE_M
                                              or estimated_distance_m <= ESTIMATION_3D_MAX_DISTANCE_M))
                     if GUIDANCE_PHASED and drone_pose is not None and _reliable_phased:
+                        if PHASED_ADAPTIVE:
+                            # scale lead/closing by estimated target speed (10->26 m/s): fast
+                            # targets lead more + hold FAR longer; slow targets engage MID sooner.
+                            _tspd = math.hypot(_pronav_vel.north_m_s, _pronav_vel.east_m_s)
+                            _t = max(0.0, min(1.0, (_tspd - 10.0) / 16.0))
+                            _mid = 28.0 + _t * (46.0 - 28.0)
+                            _pn = 2.0 + _t * (2.8 - 2.0)
+                            _tmax = 4.5 + _t * (3.0 - 4.5)
+                            _pclose = 17.0 + _t * (14.0 - 17.0)
+                        else:
+                            _mid, _pn, _tmax, _pclose = PHASED_MID_DIST, PRONAV_N, LEAD_T_MAX, PRONAV_CLOSING_SPEED
                         _phase = select_phase(estimated_distance_m if estimated_distance_m else 1e9,
-                                              PHASED_MID_DIST, LEAD_VISUAL_DIST)
+                                              _mid, LEAD_VISUAL_DIST)
                         # terminal handoff on apparent SIZE (reliable up close) OR range:
                         # monocular range is unreliable <~15m, so a range-only gate lets the
                         # velocity-command FAR/MID phases blow through the target. box_frac is
@@ -943,7 +955,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                 drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
                                 _pronav_pos.north_m, _pronav_pos.east_m, _pronav_pos.down_m,
                                 _pronav_vel.north_m_s, _pronav_vel.east_m_s, _pronav_vel.down_m_s,
-                                v_close=PRONAV_CLOSING_SPEED, n=PRONAV_N, v_max=PRONAV_V_MAX, vz_max=PRONAV_VZ_MAX)
+                                v_close=_pclose, n=_pn, v_max=PRONAV_V_MAX, vz_max=PRONAV_VZ_MAX)
                             _pcmd = NedVelCmd(_pv.north_m_s, _pv.east_m_s, _pv.down_m_s, _pv.yaw_deg, "MID")
                             _ptag = "PHASED-MID"
                         else:  # FAR (or CLOSE without a visual LOS yet)
@@ -951,7 +963,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                 drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
                                 _pronav_pos.north_m, _pronav_pos.east_m, _pronav_pos.down_m,
                                 _pronav_vel.north_m_s, _pronav_vel.east_m_s, _pronav_vel.down_m_s,
-                                v_max=PHASED_FAR_VMAX, v_drone=PHASED_FAR_SPEED, t_max=LEAD_T_MAX,
+                                v_max=PHASED_FAR_VMAX, v_drone=PHASED_FAR_SPEED, t_max=_tmax,
                                 vz_max=PHASED_FAR_VZ_MAX, lead_max_alt_m=LEAD_MAX_ALT_M)
                             _pcmd = NedVelCmd(_fv.north_m_s, _fv.east_m_s, _fv.down_m_s, _fv.yaw_deg, "FAR")
                             _ptag = "PHASED-FAR"

@@ -155,6 +155,7 @@ class InterceptConfig:
     phased_far_vmax: float = 25.0
     phased_far_speed: float = 25.0
     phased_far_vz_max: float = 10.0
+    phased_adaptive: bool = False
 
     def __post_init__(self):
         # Replace None sentinel defaults with actual list defaults from YAML

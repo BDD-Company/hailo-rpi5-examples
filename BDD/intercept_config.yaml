@@ -135,3 +135,4 @@ phased_mid_dist: 35.0       # FAR->MID range threshold (m)
 phased_far_vmax: 25.0       # FAR velocity command magnitude (m/s) — the speed lever
 phased_far_speed: 25.0      # drone speed used in the FAR lead-point time-to-go solve
 phased_far_vz_max: 10.0     # FAR vertical command cap (m/s)
+phased_adaptive: false      # scale mid_dist/pronav_n/lead_t_max/closing by est target speed
