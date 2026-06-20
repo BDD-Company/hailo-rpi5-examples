@@ -679,7 +679,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 target_relative_pos_old = target_relative_pos
 
                 use_3d = ESTIMATION_3D and estimated_distance_m is not None and drone_pose
-                if (GUIDANCE_VISUAL or (GUIDANCE_LEAD and (LEAD_VISUAL_TERMINAL or LEAD_FAR_VISUAL))) and drone_pose is not None:
+                if (GUIDANCE_VISUAL or (GUIDANCE_LEAD and (LEAD_VISUAL_TERMINAL or LEAD_FAR_VISUAL)) or GUIDANCE_PHASED) and drone_pose is not None:
                     # range-free LOS (image bearing + attitude, no distance) for VISUAL guidance / LEAD terminal handoff
                     visual_los_prev, visual_los_ts_prev = visual_los, visual_los_ts
                     _raw_los = los_unit_ned(detection.bbox.center.x, detection.bbox.center.y,
@@ -921,7 +921,12 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     if GUIDANCE_PHASED and _pronav_pos is not None and _pronav_vel is not None and drone_pose is not None:
                         _phase = select_phase(estimated_distance_m if estimated_distance_m else 1e9,
                                               PHASED_MID_DIST, LEAD_VISUAL_DIST)
-                        if _phase == "CLOSE" and visual_los is not None:
+                        # terminal handoff on apparent SIZE (reliable up close) OR range:
+                        # monocular range is unreliable <~15m, so a range-only gate lets the
+                        # velocity-command FAR/MID phases blow through the target. box_frac is
+                        # robust close-in -> switch to the visual servo before overshoot.
+                        _close = (_phase == "CLOSE") or (visual_box_frac >= VISUAL_NEAR_THRESH)
+                        if _close and visual_los is not None:
                             _vdt = ((visual_los_ts - visual_los_ts_prev) / 1e9) if visual_los_ts_prev else 0.0
                             _vc = visual_velocity_ned(visual_los, visual_los_prev, _vdt, visual_box_frac,
                                 v_far=VISUAL_V_FAR, v_close=VISUAL_V_CLOSE, n_gain=VISUAL_N_GAIN,
