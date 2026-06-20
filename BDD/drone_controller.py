@@ -12,6 +12,9 @@ from CommandRegulator import CommandRegulator
 from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
 from telemetry_position import PositionNED, VelocityNED
 from estimate_distance import estimate_distance_class, DistanceClass, measure_object_size
+from target_kalman import TargetKalman
+from pronav_guidance import lead_intercept_point, closest_approach_point
+from visual_guidance import los_unit_ned, visual_velocity_ned
 from telemetry_position import (
     # get_position_ned,
     # get_orientation_quaternion,
@@ -237,6 +240,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     PD_COEFF_P_STAGE_3_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_3_ratio', 0.35)
 
     TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
+    DISTANCE_SCALE = control_config.pop('distance_scale', 1.0)   # empirical range calibration (monocular range undershoots)
     FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
 
     # INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
@@ -251,6 +255,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     ESTIMATION_3D_METHOD = VelocityMethod(control_config.pop('estimation_3d_method', None))
     ESTIMATION_3D_USE_INITIAL_VELOCITY         = control_config.pop('estimation_3d_use_initial_velocity', True)
+    # Above this distance (m) the camera->NED reprojection is too noisy (a few px /
+    # 1 px bbox-size jitter swings the NED position by tens of metres), so the 3D
+    # velocity/position estimate is meaningless. Fall back to the 2D image-plane
+    # estimator, which doesn't depend on the (noisy) depth. None disables the fallback.
+    ESTIMATION_3D_MAX_DISTANCE_M               = control_config.pop('estimation_3d_max_distance_m', None)
 
     ESTIMATION_LOOKAHEAD_FRAMES                = control_config.pop('estimation_lookahead_frames', 2)
     ESTIMATION_LOOKAHEAD_DYNAMIC               = control_config.pop('estimation_lookahead_dynamic', False)
@@ -262,6 +271,48 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     FOLLOW_TARGET_POSITION_NED                 = control_config.pop('follow_target_position_ned', False)
 
+    # Proportional-navigation (collision-course) velocity guidance — see
+    # pronav_guidance.py / drone.move_to_target_pronav.
+    GUIDANCE_PRONAV       = control_config.pop('guidance_pronav', False)
+    PRONAV_CLOSING_SPEED  = control_config.pop('pronav_closing_speed', 15.0)  # m/s along LOS
+    PRONAV_N              = control_config.pop('pronav_n', 1.0)               # perpendicular-match gain
+    PRONAV_V_MAX          = control_config.pop('pronav_v_max', 25.0)          # m/s command cap
+    PRONAV_VZ_MAX         = control_config.pop('pronav_vz_max', 10.0)         # m/s vertical command cap
+    GUIDANCE_VISUAL       = control_config.pop('guidance_visual', False)      # range-free 3-phase image guidance
+    VISUAL_V_FAR          = control_config.pop('visual_v_far', 12.0)
+    VISUAL_V_CLOSE        = control_config.pop('visual_v_close', 14.0)
+    VISUAL_N_GAIN         = control_config.pop('visual_n_gain', 8.0)
+    VISUAL_TERM_GAIN      = control_config.pop('visual_term_gain', 16.0)
+    VISUAL_MID_THRESH     = control_config.pop('visual_mid_thresh', 0.06)
+    VISUAL_NEAR_THRESH    = control_config.pop('visual_near_thresh', 0.20)
+    VISUAL_V_MAX          = control_config.pop('visual_v_max', 30.0)
+    VISUAL_CLIMB_MIN      = control_config.pop('visual_climb_min', 3.0)
+    # Constant-velocity Kalman filter on the 3D target state (smooth pos+vel ->
+    # stable ProNav lead on a fast crossing target). See target_kalman.py.
+    PRONAV_USE_KALMAN     = control_config.pop('pronav_use_kalman', False)
+    PRONAV_KALMAN_Q       = control_config.pop('pronav_kalman_q', 1.0)        # process noise scale
+    PRONAV_KALMAN_R       = control_config.pop('pronav_kalman_r', 2.0)        # measurement noise scale
+    # Anticipatory lead-intercept via POSITION setpoints (pre-position to the
+    # predicted crossing point; works within a slow envelope, no blast-through).
+    GUIDANCE_LEAD         = control_config.pop('guidance_lead', False)
+    LEAD_SPEED            = control_config.pop('lead_speed', 12.0)            # drone speed used for time-to-go
+    LEAD_T_MAX            = control_config.pop('lead_t_max', 4.0)             # max lead lookahead (s)
+    LEAD_ALT_OFFSET       = control_config.pop('lead_alt_offset', 0.0)       # +down correction to the held altitude (counters camera altitude bias)
+    LEAD_MAX_LAT          = control_config.pop('lead_max_lat', 60.0)         # max lateral offset of the intercept point from takeoff spot (m)
+    LEAD_MAX_ALT_M        = control_config.pop('lead_max_alt_m', 70.0)        # hard altitude cap on the LEAD setpoint (anti-runaway)
+    # HYBRID terminal: hand LEAD off to range-free visual servo for the last metres,
+    # where monocular range is worst (huge unstable bbox) but the angle (bbox centre)
+    # is precise. Drives the terminal miss down without trusting noisy close-range depth.
+    LEAD_VISUAL_TERMINAL  = control_config.pop('lead_visual_terminal', False)  # enable hybrid LEAD->visual terminal
+    LEAD_VISUAL_DIST      = control_config.pop('lead_visual_dist', 12.0)       # switch to visual servo when est. range < this (m)
+    # INVERTED hybrid: monocular range is WORST far (huge error) and BEST close (big bbox +
+    # known 3 m size). So far away DON'T trust range -> range-free visual centring (keep the
+    # ball centred + climb) until within LEAD_FAR_DIST, where LEAD can lead precisely.
+    LEAD_FAR_VISUAL       = control_config.pop('lead_far_visual', False)       # range-free centring while far
+    LEAD_FAR_DIST         = control_config.pop('lead_far_dist', 30.0)          # use visual centring when est. range > this (m)
+    if GUIDANCE_LEAD:
+        PRONAV_USE_KALMAN = True    # lead needs a clean target velocity
+
 
     DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.pop('delay_takeof_until_n_detection_frames', 3)
 
@@ -272,8 +323,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     # AIM_POINT = XY(0.5, 0.5)
 
     SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
-    if FOLLOW_TARGET_POSITION_NED and not ESTIMATION_3D:
-        logger.warning("follow_target_position_ned requires 3D estimation, enabling it automatically")
+    if (FOLLOW_TARGET_POSITION_NED or GUIDANCE_PRONAV or GUIDANCE_LEAD) and not ESTIMATION_3D:
+        logger.warning("NED/pronav/lead guidance requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True
 
     DRONE_CONFIG_PREFIX = 'drone_'
@@ -345,6 +396,18 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     target_position_ned = None
     target_position_prev_ned = None
     estimated_velocity_ned = None
+    target_kalman = TargetKalman(PRONAV_KALMAN_Q, PRONAV_KALMAN_R)
+    kalman_target_pos_ned = None
+    kalman_target_vel_ned = None
+    visual_los = None
+    visual_los_prev = None
+    visual_los_ts = None
+    visual_los_ts_prev = None
+    visual_box_frac = 0.0
+    lead_home_ned = None       # captured takeoff spot for guidance_lead
+    lead_last_down = None      # last known target altitude (down) for the lead-hold
+    lead_last_setpoint = None  # last intercept-point setpoint (n, e, down) to hold when target lost
+    lead_dir_vel = None        # robust line-fit target velocity (direction) for the intercept foot
     locked_track_id: int | None = None
 
     # NOTE: HUGE age to avoid purging prev positions, since it doesn't work as expected RN
@@ -559,6 +622,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 #     estimated_distance_m = 80
 
                 estimated_distance_m = estimated_distance_m if estimated_distance_m else 1
+                estimated_distance_m *= DISTANCE_SCALE   # correct the known monocular range undershoot
                 # logger.debug(f"!!! estimated_distance: {estimated_distance_m}")
                 # NOTE: At large distances estimation higly undershoots, formula corrects it to be good enough
                 # estimated_distance_m *= math.e #(math.log(estimated_distance_m, 10) + 0.5)
@@ -607,7 +671,33 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 estimate_mode = ''
                 target_relative_pos_old = target_relative_pos
 
-                if ESTIMATION_3D and estimated_distance_m is not None and drone_pose:
+                use_3d = ESTIMATION_3D and estimated_distance_m is not None and drone_pose
+                if (GUIDANCE_VISUAL or (GUIDANCE_LEAD and (LEAD_VISUAL_TERMINAL or LEAD_FAR_VISUAL))) and drone_pose is not None:
+                    # range-free LOS (image bearing + attitude, no distance) for VISUAL guidance / LEAD terminal handoff
+                    visual_los_prev, visual_los_ts_prev = visual_los, visual_los_ts
+                    _raw_los = los_unit_ned(detection.bbox.center.x, detection.bbox.center.y,
+                                            AIM_POINT.x, AIM_POINT.y,
+                                            FRAME_ANGLUAR_SIZE_DEG.x, FRAME_ANGLUAR_SIZE_DEG.y,
+                                            drone_pose.quaternion)
+                    if visual_los is None:
+                        visual_los = _raw_los
+                    else:
+                        _a = 0.5   # EMA smoothing: kill per-frame detection jitter that the PN gain amplifies
+                        _mx = _a * _raw_los[0] + (1 - _a) * visual_los[0]
+                        _my = _a * _raw_los[1] + (1 - _a) * visual_los[1]
+                        _mz = _a * _raw_los[2] + (1 - _a) * visual_los[2]
+                        _mm = math.sqrt(_mx * _mx + _my * _my + _mz * _mz) or 1.0
+                        visual_los = (_mx / _mm, _my / _mm, _mz / _mm)
+                    visual_los_ts = current_frame_timestamp_ns
+                    visual_box_frac = max(object_corrected_size.x, object_corrected_size.y)
+                if use_3d and ESTIMATION_3D_MAX_DISTANCE_M and estimated_distance_m > ESTIMATION_3D_MAX_DISTANCE_M:
+                    # Too far for reliable depth -> NED is noise. Use the 2D estimator instead.
+                    use_3d = False
+                    mode += ' 2D-FAR '
+                    logger.debug("distance %.1fm > %.1fm: 3D NED too noisy, using 2D estimator",
+                                 estimated_distance_m, ESTIMATION_3D_MAX_DISTANCE_M)
+
+                if use_3d:
                     target_estimator = target_estimator_3d
                     # --- 3-D world-frame position estimation ---
                     try:
@@ -625,13 +715,29 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                             drone_pose.position,
                         )
                         target_estimator_3d.add(target_pos_ned, current_frame_timestamp_ns)
+                        if PRONAV_USE_KALMAN:
+                            _kp, _kv = target_kalman.update(
+                                target_pos_ned.north_m, target_pos_ned.east_m,
+                                target_pos_ned.down_m, current_frame_timestamp_ns / 1e9, estimated_distance_m)
+                            kalman_target_pos_ned = PositionNED(_kp[0], _kp[1], _kp[2])
+                            kalman_target_vel_ned = VelocityNED(_kv[0], _kv[1], _kv[2])
+                        if GUIDANCE_LEAD:
+                            # Robust direction for the intercept foot: least-squares line
+                            # fit over ALL accumulated 3D positions (averages out the
+                            # per-frame noise that wrecks the recursive velocity direction).
+                            try:
+                                lead_dir_vel = target_estimator_3d.estimate_velocity(
+                                    estimate_at_ns, None, method=VelocityMethod.NUMPY_REGRESSION)
+                            except Exception:
+                                lead_dir_vel = None
                         logger.debug("!!! drone pos NED: N=%.2f E=%.2f D=%.2f\n\ttarget NED: N=%.2f E=%.2f D=%.2f (distance=%.1fm)",
                                 drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
                                 target_pos_ned.north_m, target_pos_ned.east_m, target_pos_ned.down_m,
                                 estimated_distance_m)
 
-                        if ESTIMATION_3D_USE_INITIAL_VELOCITY and target_estimator_3d.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES:
-                            # still accumulating trajectory estimation
+                        if GUIDANCE_PRONAV or (ESTIMATION_3D_USE_INITIAL_VELOCITY and target_estimator_3d.history_size() < DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES):
+                            # pronav needs the target velocity EVERY frame (not only
+                            # during the initial accumulation) — keep it fresh
                             estimated_velocity_ned = target_estimator_3d.estimate_velocity(
                                 estimate_at_ns,
                                 None,
@@ -675,7 +781,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
                 # NOTE: ??? maybe use as fallback if 3d estimation is not available
                 else:
-                    if ESTIMATION_3D:
+                    if ESTIMATION_3D and estimated_distance_m is not None and drone_pose:
+                        # use_3d was disabled by the distance fallback (logged above)
+                        pass
+                    elif ESTIMATION_3D:
                         logger.warning("!!! USING 2D estimator because either POSE or DISTANCE are unavailable")
 
                     target_estimator = target_estimator_2d
@@ -790,7 +899,76 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     logger.warning("Delaying takeoff for %s frames (now have %s)", DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES, target_estimator.history_size())
                     pass
                 else:
-                    if FOLLOW_TARGET_POSITION_NED and target_position_ned:
+                    _pronav_pos = kalman_target_pos_ned if PRONAV_USE_KALMAN else target_position_ned
+                    _pronav_vel = kalman_target_vel_ned if PRONAV_USE_KALMAN else estimated_velocity_ned
+                    # HYBRID: when LEAD has flown the drone into the vicinity, hand off to
+                    # the range-free visual servo for the terminal homing (last metres).
+                    _lead_term = (GUIDANCE_LEAD and LEAD_VISUAL_TERMINAL and visual_los is not None
+                                  and estimated_distance_m is not None
+                                  and estimated_distance_m < LEAD_VISUAL_DIST)
+                    # INVERTED: while FAR (range unreliable) use range-free centring instead of LEAD;
+                    # the mid band (LEAD_VISUAL_DIST..LEAD_FAR_DIST) falls through to precise LEAD.
+                    _far_vis = (GUIDANCE_LEAD and LEAD_FAR_VISUAL and visual_los is not None
+                                and estimated_distance_m is not None
+                                and estimated_distance_m > LEAD_FAR_DIST)
+                    if (GUIDANCE_VISUAL or _lead_term or _far_vis) and visual_los is not None and drone_pose is not None:
+                        _vdt = ((visual_los_ts - visual_los_ts_prev) / 1e9) if visual_los_ts_prev else 0.0
+                        _vc = visual_velocity_ned(visual_los, visual_los_prev, _vdt, visual_box_frac,
+                            v_far=VISUAL_V_FAR, v_close=VISUAL_V_CLOSE, n_gain=VISUAL_N_GAIN,
+                            term_gain=VISUAL_TERM_GAIN, mid_thresh=VISUAL_MID_THRESH,
+                            near_thresh=VISUAL_NEAR_THRESH, v_max=VISUAL_V_MAX, climb_min=VISUAL_CLIMB_MIN)
+                        mode += (' LEADFAR-' if _far_vis else (' LEADTERM-' if _lead_term else ' VISUAL-')) + _vc.phase + ' '
+                        debug_info['mode'] = mode
+                        await drone.move_to_target_visual(_vc)
+                        moving = True
+                    elif GUIDANCE_LEAD and _pronav_pos is not None and _pronav_vel is not None and drone_pose is not None:
+                        # ACTIVE intercept: fly to the closest-approach point (the
+                        # perpendicular foot onto the target's straight path — where the
+                        # one-way pass comes nearest) and climb to its altitude. Robust:
+                        # always climb to the target altitude; only move HORIZONTALLY once
+                        # the target velocity estimate is trustworthy (|v| in a sane band),
+                        # else just climb at the current spot; clamp the intercept point to
+                        # +/-LEAD_MAX_LAT of the takeoff spot so a noisy estimate can't fling
+                        # it away.
+                        if lead_home_ned is None:
+                            lead_home_ned = drone_pose.position
+                        # Intercept the crossing point (perpendicular foot onto the
+                        # target's path), blended with a bounded lead by LEAD_T_MAX.
+                        # When the velocity estimate isn't trustworthy yet, HOLD the
+                        # current horizontal and just keep climbing (don't chase).
+                        _dv = lead_dir_vel if lead_dir_vel is not None else _pronav_vel
+                        _ftn, _fte, _ftd = closest_approach_point(
+                            drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
+                            _pronav_pos.north_m, _pronav_pos.east_m, _pronav_pos.down_m,
+                            _dv.north_m_s, _dv.east_m_s, _dv.down_m_s)
+                        _vmag = math.sqrt(_dv.north_m_s ** 2 + _dv.east_m_s ** 2 + _dv.down_m_s ** 2)
+                        logger.warning("LEADDBG vmag=%.1f dv=(%.1f,%.1f) tgtNE=(%.1f,%.1f) drNE=(%.1f,%.1f) tgt_down=%.1f",
+                                       _vmag, _dv.north_m_s, _dv.east_m_s, _pronav_pos.north_m, _pronav_pos.east_m,
+                                       drone_pose.position.north_m, drone_pose.position.east_m, _pronav_pos.down_m)
+                        if 5.0 <= _vmag <= 40.0:
+                            _fn, _fe = _ftn, _fte
+                        else:
+                            _fn, _fe = drone_pose.position.north_m, drone_pose.position.east_m
+                        _hn, _he = lead_home_ned.north_m, lead_home_ned.east_m
+                        _fn = max(_hn - LEAD_MAX_LAT, min(_hn + LEAD_MAX_LAT, _fn))
+                        _fe = max(_he - LEAD_MAX_LAT, min(_he + LEAD_MAX_LAT, _fe))
+                        _down = _pronav_pos.down_m + LEAD_ALT_OFFSET
+                        _down = max(_down, -LEAD_MAX_ALT_M)   # never target above the altitude cap (kills the runaway climb)
+                        lead_last_down = _down
+                        lead_last_setpoint = (_fn, _fe, _down)
+                        mode += " LEAD "
+                        debug_info["mode"] = mode
+                        await drone.move_to_target_ned(PositionNED(_fn, _fe, _down), telemetry_dict)
+                        moving = True
+                    elif GUIDANCE_PRONAV and _pronav_pos is not None and _pronav_vel is not None and drone_pose is not None:
+                        mode += (" PRONAV-K " if PRONAV_USE_KALMAN else " PRONAV ")
+                        debug_info["mode"] = mode
+                        await drone.move_to_target_pronav(
+                            _pronav_pos, _pronav_vel, drone_pose.position,
+                            v_close=PRONAV_CLOSING_SPEED, n=PRONAV_N, v_max=PRONAV_V_MAX,
+                            vz_max=PRONAV_VZ_MAX)
+                        moving = True
+                    elif FOLLOW_TARGET_POSITION_NED and target_position_ned:
                         mode += " NED "
                         debug_info["mode"] = mode
                         await drone.move_to_target_ned(target_position_ned, telemetry_dict)
@@ -804,12 +982,28 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         takeoff_time_ns = time.monotonic_ns()
                         # logger.info("!!! IN AIR since: %s", takeoff_time_ns)
 
+            elif GUIDANCE_VISUAL and drone_pose is not None and takeoff_time_ns is not None:
+                # target out of view: HOVER so the persistent offboard velocity
+                # setpoint does not fly the drone away (range-free uses velocity).
+                await drone.move_to_target_visual_hold()
+                moving = True
+                debug_info['mode'] = 'VISUAL-hold'
+            elif GUIDANCE_LEAD and lead_last_setpoint is not None and drone_pose is not None:
+                # Target briefly out of view: KEEP flying to / holding the last
+                # intercept point (and its altitude) so the drone doesn't fall and
+                # stays on the crossing point as the one-way target arrives.
+                await drone.move_to_target_ned(
+                    PositionNED(lead_last_setpoint[0], lead_last_setpoint[1], lead_last_setpoint[2]),
+                    telemetry_dict)
+                moving = True
+                debug_info["mode"] = "LEAD-hold"
             else:
                 # IF no detection or NONE of the detections has big confidence
                 if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES and target_estimator_2d.history_size() > 0:
                     logger.warning("!!! CLEARING HISTORY")
                     target_estimator_2d.clear_history()
                     target_estimator_3d.clear_history()
+                    target_kalman.reset()
                     locked_track_id = None
 
                 if seen_target:

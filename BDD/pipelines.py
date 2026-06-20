@@ -44,6 +44,15 @@ def QUEUE(name, max_size_buffers=1, max_size_bytes=0, max_size_time=0, leaky='do
     return q_string
 
 
+def get_source_type_extended(video_source):
+    """Like Hailo's get_source_type, but also recognizes `rtp://PORT` as an
+    RTP/H.264 receiver over UDP (matches bdd-cpp's --rtp-port pipeline)."""
+    s = str(video_source)
+    if s.startswith('rtp://') or s.startswith('udp://'):
+        return 'rtp'
+    return get_source_type(s)
+
+
 def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
                     name='source', no_webcam_compression=False,
                     frame_rate=30, sync=True,
@@ -64,7 +73,7 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
     Returns:
         str: A string representing the GStreamer pipeline for the video source.
     """
-    source_type = get_source_type(video_source)
+    source_type = get_source_type_extended(video_source)
 
     if source_type == 'usb':
         if no_webcam_compression:
@@ -110,6 +119,19 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
             f'ximagesrc xid={video_source} ! '
             f'{QUEUE(name=f"{name}queue_scale_")} ! '
             f'videoscale ! '
+        )
+    elif source_type == 'rtp':
+        # RTP/H.264 receive over UDP (matches bdd-cpp --rtp-port). Format is
+        # "rtp://PORT" or "udp://PORT"; PORT is the local UDP port to listen on.
+        # Software decode (Pi 5 has no HW H.264). No rtpjitterbuffer — matches
+        # the C++ side, which works on local/lab networks; add one here only
+        # if packet reordering becomes a real issue.
+        port = video_source.split('//', 1)[1]
+        source_element = (
+            f'udpsrc port={port} ! '
+            f'application/x-rtp,encoding-name=H264,payload=96 ! '
+            f'rtph264depay ! '
+            f'avdec_h264 ! '
         )
     else:
         source_element = (

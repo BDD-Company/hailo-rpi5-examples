@@ -327,7 +327,11 @@ class TargetEstimator3D(TargetEstimatorInterface):
             return VelocityNED(0, 0, 0)
 
         vn, ve, vd = self._estimate_velocity(method)
-        return VelocityNED(vn, ve, vd)
+        # _estimate_velocity returns m/ns (positions carry ns timestamps); scale
+        # to m/s so callers get a real velocity. Returning m/ns made vmag ~ 0 and
+        # starved both LEAD and ProNav guidance of the target velocity.
+        NS_PER_S = 1_000_000_000.0
+        return VelocityNED(vn * NS_PER_S, ve * NS_PER_S, vd * NS_PER_S)
 
     def estimate(self, at_timestamp_ns: int, fallback: PositionNED | None = None,
                  method: VelocityMethod = VelocityMethod.WLS) -> PositionNED | None:
@@ -371,11 +375,11 @@ class TargetEstimator3D(TargetEstimatorInterface):
         if len(self._positions) == 1:
             return newest
 
-        dt = at_timestamp_ns - ts
+        dt_s = (at_timestamp_ns - ts) / 1_000_000_000.0   # velocity is m/s
         return PositionNED(
-            north_m=newest.north_m + velocity.north_m_s * dt,
-            east_m=newest.east_m + velocity.east_m_s * dt,
-            down_m=newest.down_m + velocity.down_m_s * dt,
+            north_m=newest.north_m + velocity.north_m_s * dt_s,
+            east_m=newest.east_m + velocity.east_m_s * dt_s,
+            down_m=newest.down_m + velocity.down_m_s * dt_s,
         )
 
     @property

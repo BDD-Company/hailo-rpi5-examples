@@ -35,8 +35,8 @@ from pipelines import (
 # Based on hailo_app_python/core/gstreamer/gstreamer_app.py
 
 
-from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import (
-    get_source_type,
+from pipelines import (
+    get_source_type_extended as get_source_type,
 )
 
 
@@ -75,6 +75,62 @@ import logging
 
 logger = logging.getLogger("GSTApp")
 
+
+def check_hailo_device_free(device_glob="/dev/hailo*"):
+    """Abort startup if another live process still has a Hailo device open.
+
+    A previous run that hung on shutdown (commonly: main thread blocked in a
+    cv2 highgui call, which also prevents the Ctrl-C handler from running)
+    keeps /dev/hailo0 open. HailoRT then SIGSEGVs in the *next* run when it
+    tries to acquire the busy NPU, instead of returning a clean error. We scan
+    /proc/<pid>/fd ourselves (no lsof dependency) and exit with an actionable
+    message — including the holding PID — so the failure is obvious and the
+    fix (kill that PID) is one command away.
+    """
+    import glob as _glob
+
+    devices = set(os.path.realpath(d) for d in _glob.glob(device_glob))
+    if not devices:
+        return  # no Hailo device nodes present; nothing to guard
+
+    my_pid = os.getpid()
+    holders = []  # list of (pid, device, comm)
+    for fd_dir in _glob.glob("/proc/[0-9]*/fd"):
+        pid_str = fd_dir.split("/")[2]
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        if pid == my_pid:
+            continue
+        try:
+            for fd in os.listdir(fd_dir):
+                try:
+                    target = os.readlink(os.path.join(fd_dir, fd))
+                except OSError:
+                    continue
+                if os.path.realpath(target) in devices:
+                    try:
+                        with open(f"/proc/{pid}/comm") as f:
+                            comm = f.read().strip()
+                    except OSError:
+                        comm = "?"
+                    holders.append((pid, target, comm))
+        except OSError:
+            # process vanished or fd dir not readable (other user / perms)
+            continue
+
+    if holders:
+        for pid, dev, comm in holders:
+            logger.error("Hailo device %s is held by PID %s (%s)", dev, pid, comm)
+        pids = " ".join(str(p) for p, _, _ in holders)
+        logger.error(
+            "Refusing to start: a previous run is still holding the Hailo device. "
+            "It likely hung on shutdown (e.g. blocked in a cv2 window). "
+            "Free it with:  kill %s   (add -9 if it ignores TERM), then retry.",
+            pids,
+        )
+        sys.exit(1)
 
 
 # -----------------------------------------------------------------------------------------------
@@ -133,8 +189,18 @@ class GStreamerApp:
         # Create options menu
         self.options_menu = args.parse_args()
 
-        # Set up signal handler for SIGINT (Ctrl-C)
+        # Pre-flight: refuse to start if another process still holds the Hailo
+        # device. A run that hangs on exit (e.g. blocked in a cv2 highgui call,
+        # which also swallows Ctrl-C) keeps /dev/hailo0 open; the next run then
+        # SIGSEGVs deep in HailoRT instead of getting a clean "busy" error.
+        # Fail fast with an actionable message naming the offending PID.
+        check_hailo_device_free()
+
+        # Set up signal handlers for SIGINT (Ctrl-C) and SIGTERM (`kill`) so a
+        # `kill <pid>` also tears the pipeline down cleanly and releases the
+        # Hailo VDevice, instead of leaving the device locked for the next run.
         signal.signal(signal.SIGINT, self.shutdown)
+        signal.signal(signal.SIGTERM, self.shutdown)
 
         # Load environment variables
         x=os.environ.get("HAILO_ENV_FILE")
@@ -282,16 +348,33 @@ class GStreamerApp:
 
 
     def shutdown(self, signum=None, frame=None):
+        if getattr(self, '_shutting_down', False):
+            return
+        self._shutting_down = True
         logger.info("Shutting down... Hit Ctrl-C again to force quit.")
+        # Next signal falls through to the default handler and force-quits.
         signal.signal(signal.SIGINT, signal.SIG_DFL)
-        self.pipeline.set_state(Gst.State.PAUSED)
-        GLib.usleep(100000)  # 0.1 second delay
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        # Run the actual teardown on the main-loop thread, never directly here.
+        # A SIGINT handler interrupts the main thread mid-`loop.run()` (a C
+        # call), so doing GStreamer state changes inline runs them reentrantly
+        # from the signal context. The PLAYING->NULL transition is where
+        # hailonet releases the Hailo VDevice; if that release runs reentrantly
+        # or is cut short, the NPU is left locked and the *next* run segfaults
+        # at startup. idle_add() defers it to a clean iteration of the loop.
+        GLib.idle_add(self._do_shutdown)
 
-        self.pipeline.set_state(Gst.State.READY)
-        GLib.usleep(100000)  # 0.1 second delay
-
-        self.pipeline.set_state(Gst.State.NULL)
-        GLib.idle_add(self.loop.quit)
+    def _do_shutdown(self):
+        self.user_data.running = False
+        # Step the pipeline down one state at a time, blocking until each
+        # transition actually completes (get_state) instead of a fixed sleep,
+        # so the Hailo VDevice is fully released before the process exits.
+        for state in (Gst.State.PAUSED, Gst.State.READY, Gst.State.NULL):
+            self.pipeline.set_state(state)
+            # ASYNC transitions need to settle; wait up to 5s per step.
+            self.pipeline.get_state(5 * Gst.SECOND)
+        self.loop.quit()
+        return False  # one-shot idle source
 
 
     def update_fps_caps(self, new_fps=30, source_name='source'):
@@ -663,11 +746,16 @@ class GStreamerDetectionApp(GStreamerApp):
             tracker_pipeline = f'{tracker_pipeline} ! '
 
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
-        if self.source_type == 'rpi':
-            # production case == video from camera, use custom pipeline
+        if self.source_type in ('rpi', 'rtp'):
+            # Live sources (camera, RTP) — use the custom output pipeline
+            # (splitmuxsink for recording / fakesink when off). The default
+            # DISPLAY_PIPELINE ends in fpsdisplaysink->autovideosink, which
+            # would pop up its own *unannotated* video window — drowning out
+            # the OpenCVShowImageSink window that has the debug overlays.
             display_pipeline = self.get_output_pipeline_string(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
         else:
-            # here custom pipeline might break rewinding of initial source, use default display pipeline
+            # File sources need the default pipeline so on-EOS rewind works
+            # (the custom path's splitmuxsink doesn't tolerate seeking).
             display_pipeline = DISPLAY_PIPELINE(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
 
         pipeline_string = (

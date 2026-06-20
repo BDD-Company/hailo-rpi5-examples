@@ -79,6 +79,10 @@ class DroneMover():
         self.lift_velocity_headroom = self.config.get('lift_velocity_headroom_ms', 3.0)
         # Same for net upward acceleration (m/s²), after subtracting gravity.
         self.lift_accel_headroom = self.config.get('lift_accel_headroom_mss', 5.0)
+        # Saturation for commanded angular rate (deg/s) in set_attitude_rate mode.
+        # Guards against estimator/regulator spikes producing absurd commands
+        # (observed >140000 deg/s). 0 / None disables the clamp.
+        self.max_attitude_rate_deg_s = self.config.get('max_attitude_rate_deg_s', 120.0)
         self.tasks : list[asyncio.Task] = []
         self.drone_connection_string = drone_connection_string
         self.aborted = False
@@ -326,6 +330,44 @@ class DroneMover():
         logger.info("!!! executing: %s ", drone_offboard.last_command())
 
 
+    async def move_to_target_pronav(self, target_position_ned, target_velocity_ned,
+                                    drone_position_ned, *, v_close, n, v_max, vz_max=10.0):
+        """Collision-course (proportional-navigation) velocity guidance.
+
+        Commands an NED velocity that LEADS a crossing target (matches its motion
+        perpendicular to the line of sight + closes along it) instead of chasing its
+        current bearing like move_to_target_zenith/move_to_target_ned. See
+        pronav_guidance.pronav_velocity_ned."""
+        from pronav_guidance import pronav_velocity_ned
+        cmd = pronav_velocity_ned(
+            drone_position_ned.north_m, drone_position_ned.east_m, drone_position_ned.down_m,
+            target_position_ned.north_m, target_position_ned.east_m, target_position_ned.down_m,
+            target_velocity_ned.north_m_s, target_velocity_ned.east_m_s, target_velocity_ned.down_m_s,
+            v_close=v_close, n=n, v_max=v_max, vz_max=vz_max,
+        )
+        drone_offboard = debug_collect_call_info(self.drone.offboard)
+        await drone_offboard.set_velocity_ned(
+            VelocityNedYaw(cmd.north_m_s, cmd.east_m_s, cmd.down_m_s, cmd.yaw_deg)
+        )
+        logger.info("!!! executing: %s ", drone_offboard.last_command())
+
+
+    async def move_to_target_visual_hold(self):
+        """Hover in place (zero body velocity) so a stale offboard velocity
+        setpoint cannot fly the drone away when the target is briefly lost."""
+        from mavsdk.offboard import VelocityBodyYawspeed
+        drone_offboard = debug_collect_call_info(self.drone.offboard)
+        await drone_offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+        logger.info("!!! VISUAL-hold (hover)")
+
+    async def move_to_target_visual(self, cmd):
+        """Send the range-free image-guidance NED velocity setpoint."""
+        from mavsdk.offboard import VelocityNedYaw
+        drone_offboard = debug_collect_call_info(self.drone.offboard)
+        await drone_offboard.set_velocity_ned(
+            VelocityNedYaw(cmd.north_m_s, cmd.east_m_s, cmd.down_m_s, cmd.yaw_deg))
+        logger.info("!!! VISUAL %s: %s", cmd.phase, drone_offboard.last_command())
+
     def _vertical_energy_bonus(self, current_telemetry) -> float:
         """Return a [0, 1] factor representing how much the min_lift constraint
         can be relaxed based on current upward velocity and acceleration.
@@ -437,10 +479,23 @@ class DroneMover():
                 )
             )
         else:
+            rate_roll, rate_pitch = roll_degree, pitch_degree
+            if self.max_attitude_rate_deg_s:
+                lim = self.max_attitude_rate_deg_s
+                # Scale the whole (roll, pitch) command uniformly so the commanded
+                # DIRECTION toward the target is preserved; only the magnitude is capped.
+                # (Per-axis clamping would distort the direction when both axes saturate.)
+                peak = max(abs(roll_degree), abs(pitch_degree))
+                if peak > lim:
+                    scale = lim / peak
+                    rate_roll = roll_degree * scale
+                    rate_pitch = pitch_degree * scale
+                    logger.warning("Attitude rate clamped to +-%.0f deg/s (scale=%.3f): roll %.1f->%.1f, pitch %.1f->%.1f",
+                                   lim, scale, roll_degree, rate_roll, pitch_degree, rate_pitch)
             await drone_offboard.set_attitude_rate(
                 AttitudeRate(
-                    roll_deg_s=roll_degree,
-                    pitch_deg_s=pitch_degree,
+                    roll_deg_s=rate_roll,
+                    pitch_deg_s=rate_pitch,
                     yaw_deg_s=0,
                     thrust_value=thrust,
                 )

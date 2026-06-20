@@ -459,7 +459,9 @@ def main():
         'frame_angular_size_deg' : XY(107, 85),
 
         # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        'target_size_m' : XY(1.8, 1.8),             # shahed small
+        # 'target_size_m' : XY(1.0, 1.0),           # shahed small
+        'target_size_m' : XY(3.0, 3.0),             # red_sphere 3 m (Shahed-sized)
+        'distance_scale' : 1.0,                  # empirical monocular range calibration
         # 'target_size_m' : XY(3.5, 2.5),             # shahed large
         # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
 
@@ -474,6 +476,33 @@ def main():
         'aim_point_max_offset': XY(0.5, 0.6),
 
         'follow_target_position_ned' : False,
+        'guidance_pronav' : False,
+        'pronav_closing_speed' : 15.0,
+        'pronav_n' : 1.0,
+        'pronav_v_max' : 25.0,
+        'pronav_vz_max' : 10.0,
+        'guidance_visual' : False,
+        'visual_v_far' : 12.0,
+        'visual_v_close' : 14.0,
+        'visual_n_gain' : 8.0,
+        'visual_term_gain' : 16.0,
+        'visual_mid_thresh' : 0.06,
+        'visual_near_thresh' : 0.20,
+        'visual_v_max' : 30.0,
+        'visual_climb_min' : 3.0,
+        'pronav_use_kalman' : False,
+        'pronav_kalman_q' : 1.0,
+        'pronav_kalman_r' : 2.0,
+        'guidance_lead' : False,
+        'lead_speed' : 12.0,
+        'lead_t_max' : 4.0,
+        'lead_alt_offset' : 0.0,
+        'lead_max_lat' : 60.0,
+        'lead_max_alt_m' : 70.0,
+        'lead_visual_terminal' : False,
+        'lead_visual_dist' : 12.0,
+        'lead_far_visual' : False,
+        'lead_far_dist' : 30.0,
 
         # params to go to the drone config ("drone_" prefix is stripped then)
         'drone_use_set_attitude': False,

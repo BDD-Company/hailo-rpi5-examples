@@ -365,7 +365,11 @@ def log_execution_time(logger=logging.debug, threshold = datetime.timedelta(micr
     return wrapper_outer
 
 
-def configure_logging(level=logging.NOTSET, process_prefix=""):
+def configure_logging(level=logging.NOTSET, process_prefix="", log_file=None):
+    """Configure root logger. If `log_file` is given, also tee output to that
+    file (parent dir created if missing). The file always gets plain text —
+    ANSI color escapes used on the console are stripped from the file record.
+    """
     class _ExcludeGrpcCallInitFilter(logging.Filter):
         def filter(self, record):
             return not (record.module == "_call")
@@ -376,9 +380,27 @@ def configure_logging(level=logging.NOTSET, process_prefix=""):
             # )
 
     process_prefix = f"{process_prefix}-" if process_prefix else ""
-    logging.basicConfig(level=level,
-        format="%(asctime)s.%(msecs)03d [" + process_prefix + "%(threadName)s] @ { %(filename)s:%(lineno)s : %(funcName)20s() } <%(levelname)s> :\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S")
+    log_format = "%(asctime)s.%(msecs)03d [" + process_prefix + "%(threadName)s] @ { %(filename)s:%(lineno)s : %(funcName)20s() } <%(levelname)s> :\t%(message)s"
+    log_datefmt = "%Y-%m-%d %H:%M:%S"
+
+    handlers = [logging.StreamHandler()]
+    if log_file is not None:
+        from pathlib import Path as _Path
+        import re as _re
+        _Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        _ANSI_RE = _re.compile(r'\x1b\[[0-9;]*m')
+
+        class _PlainFormatter(logging.Formatter):
+            """Strip ANSI color escapes so the file stays grep-friendly."""
+            def format(self, record):
+                return _ANSI_RE.sub('', super().format(record))
+
+        file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+        file_handler.setFormatter(_PlainFormatter(fmt=log_format, datefmt=log_datefmt))
+        handlers.append(file_handler)
+
+    logging.basicConfig(level=level, format=log_format, datefmt=log_datefmt,
+                        handlers=handlers, force=True)
 
     exclude_grpc_call_init_filter = _ExcludeGrpcCallInitFilter()
     for handler in logging.getLogger().handlers:

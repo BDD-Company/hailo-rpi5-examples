@@ -407,7 +407,7 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
             detection_dict = frame_queue.get()
             frame : np.ndarray = detection_dict['detections'].frame
         frame_h, frame_w, _ = frame.shape
-        logger.debug("Got first frame of size W:%u, H:%u", frame_w, frame_h)
+        logger.info("debug_output_thread: got first frame W:%u H:%u, starting sinks (this is when --display window appears)", frame_w, frame_h)
 
         sink.start((frame_w, frame_h))
 
@@ -434,6 +434,7 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
 
 
 if __name__ == '__main__':
+    import argparse
     import threading
     import time
     import math
@@ -446,6 +447,18 @@ if __name__ == '__main__':
     output_queue = Queue()
 
     configure_logging(logging.DEBUG)
+
+    _cli = argparse.ArgumentParser(description="debug_output.py standalone test")
+    _src = _cli.add_mutually_exclusive_group()
+    _src.add_argument('--rtp-port', type=int, default=None,
+                      help="Pull H.264/RTP frames from this UDP port (gst-python appsink).")
+    _src.add_argument('--video', type=str, default=None,
+                      help="Read frames from this video file via cv2.VideoCapture.")
+    _cli_args = _cli.parse_args()
+    if _cli_args.rtp_port is None and _cli_args.video is None:
+        # 5600 matches the sim sender used by test-flight/recv_check.sh
+        # (RTP on udp/5600 + MAVLink on udp/14540 from the sim host).
+        _cli_args.rtp_port = 5600
 
     # def generate_frames():
     #     from picamera2 import Picamera2
@@ -514,18 +527,70 @@ if __name__ == '__main__':
     #             yield frame
 
     #             frame_count += 1
-    def generate_frames():
-        video_capture = cv2.VideoCapture("/home/bdd/hailo-rpi5-examples/TEST_DATA/sample.mp4")
+    def _gst_rtp_frame_generator(port):
+        # opencv-python here is built without GStreamer, so we can't use
+        # cv2.VideoCapture(pipeline, CAP_GSTREAMER). Use gi.repository.Gst
+        # directly: udpsrc -> rtph264depay -> avdec_h264 -> appsink with
+        # drop=true/max-buffers=1 (matches bdd-cpp's recv pipeline and yields
+        # the freshest BGR frame).
+        import gi
+        gi.require_version('Gst', '1.0')
+        from gi.repository import Gst
+        Gst.init(None)
+        pipeline_str = (
+            f"udpsrc port={port} ! application/x-rtp,encoding-name=H264,payload=96 "
+            f"! rtph264depay ! avdec_h264 ! videoconvert "
+            f"! video/x-raw,format=BGR ! appsink name=sink emit-signals=false "
+            f"max-buffers=1 drop=true sync=false"
+        )
+        logger.info("RTP source pipeline: %s", pipeline_str)
+        pipeline = Gst.parse_launch(pipeline_str)
+        appsink = pipeline.get_by_name("sink")
+        if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+            raise RuntimeError("Failed to start gst pipeline")
+        logger.info("Waiting for RTP frames on udp/%d ...", port)
+        try:
+            while True:
+                sample = appsink.emit("try-pull-sample", Gst.SECOND * 5)
+                if sample is None:
+                    logger.warning("No RTP frame in last 5s on udp/%d", port)
+                    continue
+                buf = sample.get_buffer()
+                caps = sample.get_caps().get_structure(0)
+                w = caps.get_value('width')
+                h = caps.get_value('height')
+                ok, mapinfo = buf.map(Gst.MapFlags.READ)
+                if not ok:
+                    continue
+                try:
+                    # .copy() because mapinfo.data is invalidated by buf.unmap()
+                    frame = np.frombuffer(mapinfo.data, dtype=np.uint8).reshape((h, w, 3)).copy()
+                finally:
+                    buf.unmap(mapinfo)
+                yield frame
+        finally:
+            pipeline.set_state(Gst.State.NULL)
+
+
+    def _file_frame_generator(path):
+        video_capture = cv2.VideoCapture(path)
         if not video_capture.isOpened():
-            raise RuntimeError("Cannot open video")
+            raise RuntimeError(f"Cannot open video {path!r}")
+        try:
+            while True:
+                ret, frame = video_capture.read()
+                if not ret:
+                    break
+                yield frame
+        finally:
+            video_capture.release()
 
-        while True:
-            ret, frame = video_capture.read()
-            if not ret:
-                break   # end of video
-            yield frame
 
-        video_capture.release()
+    def generate_frames():
+        if _cli_args.rtp_port is not None:
+            yield from _gst_rtp_frame_generator(_cli_args.rtp_port)
+        else:
+            yield from _file_frame_generator(_cli_args.video)
 
 
     def producer_thread_func(n_frames = 1000, delay_between_frames_ms=10):

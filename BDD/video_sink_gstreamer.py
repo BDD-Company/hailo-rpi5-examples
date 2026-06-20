@@ -240,6 +240,29 @@ class RecorderSink(interfaces.FrameSinkInterface):
         # Build pipeline
         # NOTE: appsrc block=true to naturally backpressure if disk/encoder is slow
         pattern_path = str(self.out_dir / f"{self.filename_base}_%05d.mkv")
+
+        # Match App.get_output_pipeline_string priority: prefer openh264enc
+        # (stable on this Pi5 with splitmuxsink), allow x264enc via env override.
+        import os as _os
+        force_x264 = _os.environ.get('BDD_H264_ENCODER', '').lower() == 'x264enc'
+        if force_x264 and Gst.ElementFactory.find('x264enc') is not None:
+            encoder_str = (f'x264enc tune=zerolatency speed-preset=ultrafast '
+                           f'bframes=0 bitrate={self.bitrate} key-int-max={self.keyint}')
+            logger.info("[RecorderSink] using x264enc (BDD_H264_ENCODER=x264enc)")
+        elif Gst.ElementFactory.find('openh264enc') is not None:
+            # Bitrate prop is bits/sec; self.bitrate is kbps in this class.
+            encoder_str = (f'openh264enc complexity=low '
+                           f'gop-size={self.keyint} bitrate={self.bitrate * 1000}')
+            logger.info("[RecorderSink] using openh264enc")
+        elif Gst.ElementFactory.find('x264enc') is not None:
+            encoder_str = (f'x264enc tune=zerolatency speed-preset=ultrafast '
+                           f'bframes=0 bitrate={self.bitrate} key-int-max={self.keyint}')
+            logger.warning("[RecorderSink] openh264enc not installed, falling back to x264enc")
+        else:
+            raise RuntimeError(
+                "[RecorderSink] no H.264 encoder (need openh264enc or x264enc) — "
+                "install gstreamer1.0-plugins-bad or gstreamer1.0-plugins-ugly")
+
         launch = (
             f'''
             appsrc
@@ -250,12 +273,7 @@ class RecorderSink(interfaces.FrameSinkInterface):
                 do-timestamp=true
                 caps=video/x-raw,format=RGB,width={self.w},height={self.h}
             ! videoconvert
-            ! x264enc
-                tune=zerolatency
-                speed-preset=ultrafast
-                bframes=0
-                bitrate={self.bitrate}
-                key-int-max={self.keyint}
+            ! {encoder_str}
             ! h264parse
                 config-interval=1
             ! splitmuxsink
