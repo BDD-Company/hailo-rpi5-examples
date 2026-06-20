@@ -36,3 +36,12 @@ def test_yaml_and_dataclass_keys_match():
         ykeys = set(yaml.safe_load(f))
     fkeys = {fld.name for fld in fields(InterceptConfig)}
     assert ykeys == fkeys, f"missing in dataclass: {ykeys-fkeys}; missing in yaml: {fkeys-ykeys}"
+
+
+def test_phased_keys_present():
+    cfg = InterceptConfig.load_defaults()
+    assert cfg.guidance_phased is False
+    assert cfg.phased_mid_dist == 35.0
+    assert cfg.phased_far_vmax == 25.0
+    assert cfg.phased_far_speed == 25.0
+    assert cfg.phased_far_vz_max == 10.0

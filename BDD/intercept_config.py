@@ -149,6 +149,13 @@ class InterceptConfig:
     bytetrack_nms_dist_thresh: float = 0.06
     bytetrack_target_lock: bool = True
 
+    # guidance: phased
+    guidance_phased: bool = False
+    phased_mid_dist: float = 35.0
+    phased_far_vmax: float = 25.0
+    phased_far_speed: float = 25.0
+    phased_far_vz_max: float = 10.0
+
     def __post_init__(self):
         # Replace None sentinel defaults with actual list defaults from YAML
         if self.frame_angular_size_deg is None:
