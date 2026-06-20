@@ -127,3 +127,4 @@ bytetrack_match_max_dist: 0.2
 bytetrack_recovery_max_dist: null
 bytetrack_nms_thresh: 0.3
 bytetrack_nms_dist_thresh: 0.06
+bytetrack_target_lock: true

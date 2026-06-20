@@ -147,6 +147,7 @@ class InterceptConfig:
     bytetrack_recovery_max_dist: Optional[float] = None
     bytetrack_nms_thresh: float = 0.3
     bytetrack_nms_dist_thresh: float = 0.06
+    bytetrack_target_lock: bool = True
 
     def __post_init__(self):
         # Replace None sentinel defaults with actual list defaults from YAML

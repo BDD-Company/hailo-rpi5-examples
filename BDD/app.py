@@ -407,122 +407,17 @@ def main():
         sys.argv.extend(['--input', f'rtp://{_pre_args.rtp_port}'])
     _record_videos = not _pre_args.no_record
 
-    control_config = {
-        'confidence_min': 0.4,
-        'confidence_move': 0.3,
-
-        'thrust_takeoff' : 0.5,         # keep takeoff gentle for a stable launch
-        'thrust_min': 0.7,              # in-flight thrust (thrust_dynamic=False => this is the actual thrust used)
-        'thrust_max': 1.0,              # MAX SPEED: full power ceiling
-        'thrust_dynamic': False,
-        'thrust_proportional_to_target_size' : False,
-
-        'target_lost_fade_per_frame': 0.99,
-        'target_estimator_clear_history_after_target_lost_frames' : 6, # was 3: tolerate brief detection dropouts (small far target) without wiping the takeoff progress
-
-        'estimation_3d': True,
-        'estimation_3d_method': 'cluster',
-        'estimation_3d_use_initial_velocity' : True,
-        'estimation_3d_max_distance_m': 25, # beyond this, depth (bbox-size) is too noisy -> NED is garbage; fall back to 2D image-plane estimator. None = always 3D.
-
-        'estimation_lookahead_frames': 2,
-        'estimation_lookahead_dynamic': True,
-        'estimation_lookahead_dynamic_sqrt': True,
-        'estimation_lookahead_dynamic_factor': 0, # 0 disables: factor default 1 made horizon = int(distance_m) (~61 frames @60m), throwing the target off-frame. Let sqrt mode govern.
-        'estimation_lookahead_dynamic_frames_near':   1,
-        'estimation_lookahead_dynamic_frames_medium': 1,
-        'estimation_lookahead_dynamic_frames_far':    1, # can't be too big -- estimation will be too FAAR away.
-
-        'pd_coeff_p': 3,                # P=10 caused attitude-rate commands to blow up (>140000 deg/s); reverted to proven value
-        'pd_coeff_d': 30, # damping to brake on approach (was 0 -> 90 m/s overshoot). Regulator divides Dk by dt_ms(~30), so effective gain ~= Dk/30 ~= 1. Tune from logs.
-        'pd_coeff_p_safe_min': 0.6,
-        'pd_coeff_p_min' : 0.5,
-        'pd_coeff_p_max' : 10,
-
-        # Dynamically adjust P coeff based on target size.
-        # Old mode: linear interpolation between min and max.
-        # New mode: piecewise profile controlled by stage thresholds and ratios.
-        'pd_coeff_p_dynamic': False,
-        'pd_coeff_p_dynamic_use_piecewise': False,
-        'pd_coeff_p_dynamic_min_target_size' : 0.0005, # normalized target size w * h, where both w and are in range (0..1)
-
-        'pd_coeff_p_dynamic_min' : 0.6,
-        'pd_coeff_p_dynamic_max_target_size' : 0.0120,  # normalized target size
-        'pd_coeff_p_dynamic_max' : 6,
-
-        'pd_coeff_p_dynamic_stage_1_threshold': 0.01,
-        'pd_coeff_p_dynamic_stage_2_threshold': 0.05,
-        'pd_coeff_p_dynamic_stage_1_ratio': 1,
-        'pd_coeff_p_dynamic_stage_2_ratio': 1,
-        'pd_coeff_p_dynamic_stage_3_ratio': 1,
-
-        'frame_angular_size_deg' : XY(107, 85),
-
-        # 'target_size_m' : XY(0.2, 0.2),             # baloon
-        # 'target_size_m' : XY(1.0, 1.0),           # shahed small
-        'target_size_m' : XY(3.0, 3.0),             # red_sphere 3 m (Shahed-sized)
-        'distance_scale' : 1.0,                  # empirical monocular range calibration
-        # 'target_size_m' : XY(3.5, 2.5),             # shahed large
-        # 'target_size_m' : XY(1_000_000, 1_000_000), # SUN
-
-        'inertia_correction_gain' : 0, #-0.02, # 0.01 #, 1.0, etc
-        'inertia_correction_limits': XY(1, 1),
-        'inertia_correction_min_speed_ms': 5,
-
-        'safe_takeoff_period_ns': 300_000_000,
-        'delay_takeof_until_n_detection_frames' : 12, # was 30: 30 consecutive detections of a tiny far target was unreachable (run peaked at 29 and never launched)
-
-        'aim_point': XY(0.5, 0.5),
-        'aim_point_max_offset': XY(0.5, 0.6),
-
-        'follow_target_position_ned' : False,
-        'guidance_pronav' : False,
-        'pronav_closing_speed' : 15.0,
-        'pronav_n' : 1.0,
-        'pronav_v_max' : 25.0,
-        'pronav_vz_max' : 10.0,
-        'guidance_visual' : False,
-        'visual_v_far' : 12.0,
-        'visual_v_close' : 14.0,
-        'visual_n_gain' : 8.0,
-        'visual_term_gain' : 16.0,
-        'visual_mid_thresh' : 0.06,
-        'visual_near_thresh' : 0.20,
-        'visual_v_max' : 30.0,
-        'visual_climb_min' : 3.0,
-        'pronav_use_kalman' : False,
-        'pronav_kalman_q' : 1.0,
-        'pronav_kalman_r' : 2.0,
-        'guidance_lead' : False,
-        'lead_speed' : 12.0,
-        'lead_t_max' : 4.0,
-        'lead_alt_offset' : 0.0,
-        'lead_max_lat' : 60.0,
-        'lead_max_alt_m' : 70.0,
-        'lead_visual_terminal' : False,
-        'lead_visual_dist' : 12.0,
-        'lead_far_visual' : False,
-        'lead_far_dist' : 30.0,
-
-        # params to go to the drone config ("drone_" prefix is stripped then)
-        'drone_use_set_attitude': False,
-        'drone_min_lift_fraction': 0.1,
-        'drone_lift_velocity_headroom_ms': 3.0, # upward velocity when tilt angle restirctions are relaxed significantly
-        'drone_lift_accel_headroom_mss': 5.0, # upward acceleration when tilt angle restirctions are relaxed significantly
-        'drone_max_attitude_rate_deg_s': 120, # saturate commanded angular rate; guards against estimator/regulator spikes (set 0/None to disable)
-
-        'DEBUG': DEBUG,
-
-        'bytetrack_track_thresh':   0.3,
-        'bytetrack_det_thresh':     0.35,
-        'bytetrack_match_thresh':   0.3,
-        'bytetrack_track_buffer':   30,
-        'bytetrack_frame_rate':     30,
-        'bytetrack_match_max_dist':    0.2,
-        'bytetrack_recovery_max_dist': None,
-        'bytetrack_nms_thresh':        0.3,
-        'bytetrack_nms_dist_thresh':   0.06,
-    }
+    from intercept_config import InterceptConfig
+    control_config = InterceptConfig.load_defaults().to_dict()
+    # 5 keys are XY-typed in the controller (helpers.XY: .x/.y + operator overloads).
+    # YAML/InterceptConfig stores them as [x, y] lists (no native XY in YAML), so
+    # restore them to XY here - the dict handed downstream must carry XY objects, or
+    # drone_controller's .x/.y / (AIM_POINT - center) breaks.
+    for _k in ('frame_angular_size_deg', 'target_size_m', 'inertia_correction_limits',
+               'aim_point', 'aim_point_max_offset'):
+        control_config[_k] = XY(*control_config[_k])
+    # DEBUG is a runtime value, not a YAML default - override it here.
+    control_config['DEBUG'] = DEBUG
 
     bytetracker = BYTETracker(
         track_thresh=control_config['bytetrack_track_thresh'],

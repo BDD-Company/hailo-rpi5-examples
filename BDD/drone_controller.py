@@ -176,35 +176,37 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     START_TIME_MS = time.monotonic_ns() / 1000_000
 
     global DEBUG
-    DEBUG           = control_config.pop('DEBUG', False)
-    DEBUG_TELEMETRY_DICT = control_config.pop('debug_telemetry_dict', None)
+    DEBUG_TELEMETRY_DICT = control_config.pop('debug_telemetry_dict', None)   # runtime obj, not config
+    from intercept_config import InterceptConfig
+    cfg = InterceptConfig.from_overrides(dict(control_config))
 
+    DEBUG           = cfg.DEBUG
     logger.debug("!!!!! DEBUG state: %s", DEBUG)
-    CONFIDENCE_MIN  = control_config.pop('confidence_min', 0.1)
+    CONFIDENCE_MIN  = cfg.confidence_min
     # MOVE_CONFIDENCE = control_config.get('confidence_move', 0.4)
 
-    THRUST_MAX      = control_config.pop('thrust_max', 0.5)
-    THRUST_MIN      = control_config.pop('thrust_min', 0.5)
-    THRUST_TAKEOFF  = control_config.pop('thrust_takeoff', 0.5)
-    THRUST_DYNAMIC  = control_config.pop('thrust_dynamic', False)
-    THRUST_PROPORTIONAL_TO_TARGET_SIZE = control_config.pop('thrust_proportional_to_target_size', False)
+    THRUST_MAX      = cfg.thrust_max
+    THRUST_MIN      = cfg.thrust_min
+    THRUST_TAKEOFF  = cfg.thrust_takeoff
+    THRUST_DYNAMIC  = cfg.thrust_dynamic
+    THRUST_PROPORTIONAL_TO_TARGET_SIZE = cfg.thrust_proportional_to_target_size
 
-    FADE_COEFF      = control_config.pop('target_lost_fade_per_frame', 0.9)
-    TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = control_config.pop('target_estimator_clear_history_after_target_lost_frames', 3)
+    FADE_COEFF      = cfg.target_lost_fade_per_frame
+    TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES = cfg.target_estimator_clear_history_after_target_lost_frames
 
-    PD_COEFF_P      = control_config.pop('pd_coeff_p', 1)
-    PD_COEFF_D      = control_config.pop('pd_coeff_d', 0)
+    PD_COEFF_P      = cfg.pd_coeff_p
+    PD_COEFF_D      = cfg.pd_coeff_d
 
-    PD_COEFF_P_DYNAMIC = control_config.pop('pd_coeff_p_dynamic', False)
-    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = control_config.pop('pd_coeff_p_dynamic_use_piecewise', False)
-    PD_COEFF_P_MIN_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_min_target_size', 0.003)
-    PD_COEFF_P_MAX_TARGET_SIZE = control_config.pop('pd_coeff_p_dynamic_max_target_size', 0.005)
-    PD_COEFF_P_DYNAMIC_MIN  = control_config.pop('pd_coeff_p_dynamic_min', 0.5)
-    PD_COEFF_P_DYNAMIC_MAX  = control_config.pop('pd_coeff_p_dynamic_max', 2)
+    PD_COEFF_P_DYNAMIC = cfg.pd_coeff_p_dynamic
+    PD_COEFF_P_DYNAMIC_USE_PIECEWISE = cfg.pd_coeff_p_dynamic_use_piecewise
+    PD_COEFF_P_MIN_TARGET_SIZE = cfg.pd_coeff_p_dynamic_min_target_size
+    PD_COEFF_P_MAX_TARGET_SIZE = cfg.pd_coeff_p_dynamic_max_target_size
+    PD_COEFF_P_DYNAMIC_MIN  = cfg.pd_coeff_p_dynamic_min
+    PD_COEFF_P_DYNAMIC_MAX  = cfg.pd_coeff_p_dynamic_max
 
-    PD_COEFF_P_SAFE_MIN  = control_config.pop('pd_coeff_p_safe_min', 0.5)
-    PD_COEFF_P_MIN  = control_config.pop('pd_coeff_p_min', 0.5)
-    PD_COEFF_P_MAX  = control_config.pop('pd_coeff_p_max', 5)
+    PD_COEFF_P_SAFE_MIN  = cfg.pd_coeff_p_safe_min
+    PD_COEFF_P_MIN  = cfg.pd_coeff_p_min
+    PD_COEFF_P_MAX  = cfg.pd_coeff_p_max
 
 
     # Normalized target size thresholds for dynamic P profile:
@@ -213,14 +215,14 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     #
     # Below STAGE_1_THRESHOLD:
     #   target is considered small / far, P grows quickly from minimum.
-    PD_COEFF_P_STAGE_1_THRESHOLD = control_config.pop('pd_coeff_p_dynamic_stage_1_threshold', 0.2)
+    PD_COEFF_P_STAGE_1_THRESHOLD = cfg.pd_coeff_p_dynamic_stage_1_threshold
 
     # Between STAGE_1_THRESHOLD and STAGE_2_THRESHOLD:
     #   target is in the working mid-range, P continues growing up to maximum.
     # Above STAGE_2_THRESHOLD:
     #   target is considered large / near, P starts decreasing to avoid overshoot
     #   and overly aggressive control close to the target.
-    PD_COEFF_P_STAGE_2_THRESHOLD = control_config.pop('pd_coeff_p_dynamic_stage_2_threshold', 0.6)
+    PD_COEFF_P_STAGE_2_THRESHOLD = cfg.pd_coeff_p_dynamic_stage_2_threshold
 
 
     # Relative P ratios inside [PD_COEFF_P_MIN, PD_COEFF_P_MAX]:
@@ -228,111 +230,110 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     # Ratio reached at STAGE_1_THRESHOLD.
     # Example: 0.60 means that by s = 0.2, P reaches 60% of the full range
     # between PD_COEFF_P_MIN and PD_COEFF_P_MAX.
-    PD_COEFF_P_STAGE_1_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_1_ratio', 0.60)
+    PD_COEFF_P_STAGE_1_RATIO = cfg.pd_coeff_p_dynamic_stage_1_ratio
 
     # Ratio reached at STAGE_2_THRESHOLD.
     # Usually 1.00, meaning the maximum P is reached in the mid-range.
-    PD_COEFF_P_STAGE_2_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_2_ratio', 1.00)
+    PD_COEFF_P_STAGE_2_RATIO = cfg.pd_coeff_p_dynamic_stage_2_ratio
 
     # Ratio used when target is very large / very near (s -> 1.0).
     # This reduces P near the target to make control softer and reduce oscillation.
-    PD_COEFF_P_STAGE_3_RATIO = control_config.pop('pd_coeff_p_dynamic_stage_3_ratio', 0.35)
+    PD_COEFF_P_STAGE_3_RATIO = cfg.pd_coeff_p_dynamic_stage_3_ratio
 
-    TARGET_SIZE_M = control_config.pop('target_size_m', XY(1, 0.5))
-    DISTANCE_SCALE = control_config.pop('distance_scale', 1.0)   # empirical range calibration (monocular range undershoots)
-    FRAME_ANGLUAR_SIZE_DEG = control_config.pop('frame_angular_size_deg', XY(120, 90))
+    TARGET_SIZE_M = cfg.target_size_m
+    DISTANCE_SCALE = cfg.distance_scale   # empirical range calibration (monocular range undershoots)
+    FRAME_ANGLUAR_SIZE_DEG = cfg.frame_angular_size_deg
 
     # INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
     # INERTIA_CORRECTION_LIMITS : XY = control_config.pop('inertia_correction_limits', XY(1, 1))
     # INERTIA_CORRECTION_MIN_SPEED_MS = control_config.pop('inertia_correction_min_speed_ms', 0.3)
 
-    ESTIMATION_3D = control_config.pop('estimation_3d', None)
+    ESTIMATION_3D = cfg.estimation_3d
     # if ESTIMATION_3D is None:
     #     ESTIMATION_3D = control_config.pop('estimation_use_3d', False)
     # else:
     #     control_config.pop('estimation_use_3d', None)
 
-    ESTIMATION_3D_METHOD = VelocityMethod(control_config.pop('estimation_3d_method', None))
-    ESTIMATION_3D_USE_INITIAL_VELOCITY         = control_config.pop('estimation_3d_use_initial_velocity', True)
+    ESTIMATION_3D_METHOD = VelocityMethod(cfg.estimation_3d_method)
+    ESTIMATION_3D_USE_INITIAL_VELOCITY         = cfg.estimation_3d_use_initial_velocity
     # Above this distance (m) the camera->NED reprojection is too noisy (a few px /
     # 1 px bbox-size jitter swings the NED position by tens of metres), so the 3D
     # velocity/position estimate is meaningless. Fall back to the 2D image-plane
     # estimator, which doesn't depend on the (noisy) depth. None disables the fallback.
-    ESTIMATION_3D_MAX_DISTANCE_M               = control_config.pop('estimation_3d_max_distance_m', None)
+    ESTIMATION_3D_MAX_DISTANCE_M               = cfg.estimation_3d_max_distance_m
 
-    ESTIMATION_LOOKAHEAD_FRAMES                = control_config.pop('estimation_lookahead_frames', 2)
-    ESTIMATION_LOOKAHEAD_DYNAMIC               = control_config.pop('estimation_lookahead_dynamic', False)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT          = control_config.pop('estimation_lookahead_dynamic_sqrt', True)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR          = control_config.pop('estimation_lookahead_dynamic_factor', 1)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = control_config.pop('estimation_lookahead_dynamic_frames_near', 2)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = control_config.pop('estimation_lookahead_dynamic_frames_medium', 4)
-    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = control_config.pop('estimation_lookahead_dynamic_frames_far', 8)
+    ESTIMATION_LOOKAHEAD_FRAMES                = cfg.estimation_lookahead_frames
+    ESTIMATION_LOOKAHEAD_DYNAMIC               = cfg.estimation_lookahead_dynamic
+    ESTIMATION_LOOKAHEAD_DYNAMIC_SQRT          = cfg.estimation_lookahead_dynamic_sqrt
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FACTOR          = cfg.estimation_lookahead_dynamic_factor
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_NEAR   = cfg.estimation_lookahead_dynamic_frames_near
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_MEDIUM = cfg.estimation_lookahead_dynamic_frames_medium
+    ESTIMATION_LOOKAHEAD_DYNAMIC_FRAMES_FAR    = cfg.estimation_lookahead_dynamic_frames_far
 
-    FOLLOW_TARGET_POSITION_NED                 = control_config.pop('follow_target_position_ned', False)
+    FOLLOW_TARGET_POSITION_NED                 = cfg.follow_target_position_ned
 
-    # Proportional-navigation (collision-course) velocity guidance — see
+    # Proportional-navigation (collision-course) velocity guidance - see
     # pronav_guidance.py / drone.move_to_target_pronav.
-    GUIDANCE_PRONAV       = control_config.pop('guidance_pronav', False)
-    PRONAV_CLOSING_SPEED  = control_config.pop('pronav_closing_speed', 15.0)  # m/s along LOS
-    PRONAV_N              = control_config.pop('pronav_n', 1.0)               # perpendicular-match gain
-    PRONAV_V_MAX          = control_config.pop('pronav_v_max', 25.0)          # m/s command cap
-    PRONAV_VZ_MAX         = control_config.pop('pronav_vz_max', 10.0)         # m/s vertical command cap
-    GUIDANCE_VISUAL       = control_config.pop('guidance_visual', False)      # range-free 3-phase image guidance
-    VISUAL_V_FAR          = control_config.pop('visual_v_far', 12.0)
-    VISUAL_V_CLOSE        = control_config.pop('visual_v_close', 14.0)
-    VISUAL_N_GAIN         = control_config.pop('visual_n_gain', 8.0)
-    VISUAL_TERM_GAIN      = control_config.pop('visual_term_gain', 16.0)
-    VISUAL_MID_THRESH     = control_config.pop('visual_mid_thresh', 0.06)
-    VISUAL_NEAR_THRESH    = control_config.pop('visual_near_thresh', 0.20)
-    VISUAL_V_MAX          = control_config.pop('visual_v_max', 30.0)
-    VISUAL_CLIMB_MIN      = control_config.pop('visual_climb_min', 3.0)
+    GUIDANCE_PRONAV       = cfg.guidance_pronav
+    PRONAV_CLOSING_SPEED  = cfg.pronav_closing_speed  # m/s along LOS
+    PRONAV_N              = cfg.pronav_n               # perpendicular-match gain
+    PRONAV_V_MAX          = cfg.pronav_v_max          # m/s command cap
+    PRONAV_VZ_MAX         = cfg.pronav_vz_max         # m/s vertical command cap
+    GUIDANCE_VISUAL       = cfg.guidance_visual      # range-free 3-phase image guidance
+    VISUAL_V_FAR          = cfg.visual_v_far
+    VISUAL_V_CLOSE        = cfg.visual_v_close
+    VISUAL_N_GAIN         = cfg.visual_n_gain
+    VISUAL_TERM_GAIN      = cfg.visual_term_gain
+    VISUAL_MID_THRESH     = cfg.visual_mid_thresh
+    VISUAL_NEAR_THRESH    = cfg.visual_near_thresh
+    VISUAL_V_MAX          = cfg.visual_v_max
+    VISUAL_CLIMB_MIN      = cfg.visual_climb_min
     # Constant-velocity Kalman filter on the 3D target state (smooth pos+vel ->
     # stable ProNav lead on a fast crossing target). See target_kalman.py.
-    PRONAV_USE_KALMAN     = control_config.pop('pronav_use_kalman', False)
-    PRONAV_KALMAN_Q       = control_config.pop('pronav_kalman_q', 1.0)        # process noise scale
-    PRONAV_KALMAN_R       = control_config.pop('pronav_kalman_r', 2.0)        # measurement noise scale
+    PRONAV_USE_KALMAN     = cfg.pronav_use_kalman
+    PRONAV_KALMAN_Q       = cfg.pronav_kalman_q        # process noise scale
+    PRONAV_KALMAN_R       = cfg.pronav_kalman_r        # measurement noise scale
     # Anticipatory lead-intercept via POSITION setpoints (pre-position to the
     # predicted crossing point; works within a slow envelope, no blast-through).
-    GUIDANCE_LEAD         = control_config.pop('guidance_lead', False)
-    LEAD_SPEED            = control_config.pop('lead_speed', 12.0)            # drone speed used for time-to-go
-    LEAD_T_MAX            = control_config.pop('lead_t_max', 4.0)             # max lead lookahead (s)
-    LEAD_ALT_OFFSET       = control_config.pop('lead_alt_offset', 0.0)       # +down correction to the held altitude (counters camera altitude bias)
-    LEAD_MAX_LAT          = control_config.pop('lead_max_lat', 60.0)         # max lateral offset of the intercept point from takeoff spot (m)
-    LEAD_MAX_ALT_M        = control_config.pop('lead_max_alt_m', 70.0)        # hard altitude cap on the LEAD setpoint (anti-runaway)
+    GUIDANCE_LEAD         = cfg.guidance_lead
+    LEAD_SPEED            = cfg.lead_speed            # drone speed used for time-to-go
+    LEAD_T_MAX            = cfg.lead_t_max             # max lead lookahead (s)
+    LEAD_ALT_OFFSET       = cfg.lead_alt_offset       # +down correction to the held altitude (counters camera altitude bias)
+    LEAD_MAX_LAT          = cfg.lead_max_lat         # max lateral offset of the intercept point from takeoff spot (m)
+    LEAD_MAX_ALT_M        = cfg.lead_max_alt_m        # hard altitude cap on the LEAD setpoint (anti-runaway)
     # HYBRID terminal: hand LEAD off to range-free visual servo for the last metres,
     # where monocular range is worst (huge unstable bbox) but the angle (bbox centre)
     # is precise. Drives the terminal miss down without trusting noisy close-range depth.
-    LEAD_VISUAL_TERMINAL  = control_config.pop('lead_visual_terminal', False)  # enable hybrid LEAD->visual terminal
-    LEAD_VISUAL_DIST      = control_config.pop('lead_visual_dist', 12.0)       # switch to visual servo when est. range < this (m)
+    LEAD_VISUAL_TERMINAL  = cfg.lead_visual_terminal  # enable hybrid LEAD->visual terminal
+    LEAD_VISUAL_DIST      = cfg.lead_visual_dist       # switch to visual servo when est. range < this (m)
     # INVERTED hybrid: monocular range is WORST far (huge error) and BEST close (big bbox +
     # known 3 m size). So far away DON'T trust range -> range-free visual centring (keep the
     # ball centred + climb) until within LEAD_FAR_DIST, where LEAD can lead precisely.
-    LEAD_FAR_VISUAL       = control_config.pop('lead_far_visual', False)       # range-free centring while far
-    LEAD_FAR_DIST         = control_config.pop('lead_far_dist', 30.0)          # use visual centring when est. range > this (m)
+    LEAD_FAR_VISUAL       = cfg.lead_far_visual       # range-free centring while far
+    LEAD_FAR_DIST         = cfg.lead_far_dist          # use visual centring when est. range > this (m)
     if GUIDANCE_LEAD:
         PRONAV_USE_KALMAN = True    # lead needs a clean target velocity
 
 
-    DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = control_config.pop('delay_takeof_until_n_detection_frames', 3)
+    DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = cfg.delay_takeof_until_n_detection_frames
 
-    BYTETRACK_TARGET_LOCK = control_config.pop('bytetrack_target_lock', True)
+    BYTETRACK_TARGET_LOCK = cfg.bytetrack_target_lock
 
-    AIM_POINT = control_config.pop('aim_point', XY(0.5, 0.5))
+    AIM_POINT = cfg.aim_point
     aim_point = AIM_POINT
     # AIM_POINT = XY(0.5, 0.5)
 
-    SAFE_TAKEOFF_PERIOD_NS = control_config.pop('safe_takeoff_period_ns', 300_000_000)
+    SAFE_TAKEOFF_PERIOD_NS = cfg.safe_takeoff_period_ns
     if (FOLLOW_TARGET_POSITION_NED or GUIDANCE_PRONAV or GUIDANCE_LEAD) and not ESTIMATION_3D:
         logger.warning("NED/pronav/lead guidance requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True
 
     DRONE_CONFIG_PREFIX = 'drone_'
-    for drone_config_key in [k for k in control_config.keys() if k.startswith(DRONE_CONFIG_PREFIX)]:
-        drone_config_key_stripped = drone_config_key.removeprefix(DRONE_CONFIG_PREFIX)
-        drone_config[drone_config_key_stripped]=control_config.pop(drone_config_key)
+    from dataclasses import fields as _dc_fields
+    for _f in _dc_fields(cfg):
+        if _f.name.startswith(DRONE_CONFIG_PREFIX):
+            drone_config[_f.name.removeprefix(DRONE_CONFIG_PREFIX)] = getattr(cfg, _f.name)
 
-    if len(control_config) > 0:
-        logger.warning("Unknonw/unused config parameters: %s", control_config)
 
 
     distance_r = 0.1
