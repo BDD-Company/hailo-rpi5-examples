@@ -1050,6 +1050,17 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     telemetry_dict)
                 moving = True
                 debug_info["mode"] = "LEAD-hold"
+            elif GUIDANCE_PHASED and drone_pose is not None and takeoff_time_ns is not None:
+                # Target out of view under phased: HOLD (zero horizontal, alt-capped)
+                # instead of the fading zenith drift below, which flew the drone
+                # hundreds of metres away when the ball left the up-camera FOV (the
+                # dominant 100 m failure: ~70% of frames had no detection). Resume
+                # FAR/MID/CLOSE when the target reappears.
+                _altn = -drone_pose.position.down_m
+                _vdn = 1.5 if _altn > LEAD_MAX_ALT_M else 0.0
+                await drone.move_to_target_visual(NedVelCmd(0.0, 0.0, _vdn, 0.0, "HOLD"))
+                moving = True
+                debug_info["mode"] = "PHASED-HOLD-nodet"
             else:
                 # IF no detection or NONE of the detections has big confidence
                 if abs(frame_id - last_seen_target_at_frame) > TARGET_ESTIMATOR_CLEAR_HISTORY_AFTER_TARGET_LOST_FRAMES and target_estimator_2d.history_size() > 0:
