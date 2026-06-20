@@ -14,6 +14,7 @@ from telemetry_position import PositionNED, VelocityNED
 from estimate_distance import estimate_distance_class, DistanceClass, measure_object_size
 from target_kalman import TargetKalman
 from pronav_guidance import lead_intercept_point, closest_approach_point
+from guidance.lead import lead_setpoint_ned
 from visual_guidance import los_unit_ned, visual_velocity_ned
 from telemetry_position import (
     # get_position_ned,
@@ -932,28 +933,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                         # it away.
                         if lead_home_ned is None:
                             lead_home_ned = drone_pose.position
-                        # Intercept the crossing point (perpendicular foot onto the
-                        # target's path), blended with a bounded lead by LEAD_T_MAX.
-                        # When the velocity estimate isn't trustworthy yet, HOLD the
-                        # current horizontal and just keep climbing (don't chase).
                         _dv = lead_dir_vel if lead_dir_vel is not None else _pronav_vel
-                        _ftn, _fte, _ftd = closest_approach_point(
+                        _fn, _fe, _down = lead_setpoint_ned(
                             drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
                             _pronav_pos.north_m, _pronav_pos.east_m, _pronav_pos.down_m,
-                            _dv.north_m_s, _dv.east_m_s, _dv.down_m_s)
-                        _vmag = math.sqrt(_dv.north_m_s ** 2 + _dv.east_m_s ** 2 + _dv.down_m_s ** 2)
-                        logger.warning("LEADDBG vmag=%.1f dv=(%.1f,%.1f) tgtNE=(%.1f,%.1f) drNE=(%.1f,%.1f) tgt_down=%.1f",
-                                       _vmag, _dv.north_m_s, _dv.east_m_s, _pronav_pos.north_m, _pronav_pos.east_m,
-                                       drone_pose.position.north_m, drone_pose.position.east_m, _pronav_pos.down_m)
-                        if 5.0 <= _vmag <= 40.0:
-                            _fn, _fe = _ftn, _fte
-                        else:
-                            _fn, _fe = drone_pose.position.north_m, drone_pose.position.east_m
-                        _hn, _he = lead_home_ned.north_m, lead_home_ned.east_m
-                        _fn = max(_hn - LEAD_MAX_LAT, min(_hn + LEAD_MAX_LAT, _fn))
-                        _fe = max(_he - LEAD_MAX_LAT, min(_he + LEAD_MAX_LAT, _fe))
-                        _down = _pronav_pos.down_m + LEAD_ALT_OFFSET
-                        _down = max(_down, -LEAD_MAX_ALT_M)   # never target above the altitude cap (kills the runaway climb)
+                            _dv.north_m_s, _dv.east_m_s, _dv.down_m_s,
+                            lead_home_ned.north_m, lead_home_ned.east_m,
+                            lead_max_lat=LEAD_MAX_LAT, lead_max_alt_m=LEAD_MAX_ALT_M, lead_alt_offset=LEAD_ALT_OFFSET)
                         lead_last_down = _down
                         lead_last_setpoint = (_fn, _fe, _down)
                         mode += " LEAD "
