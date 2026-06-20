@@ -13,9 +13,7 @@ from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
 from telemetry_position import PositionNED, VelocityNED
 from estimate_distance import estimate_distance_class, DistanceClass, measure_object_size
 from target_kalman import TargetKalman
-from pronav_guidance import lead_intercept_point, closest_approach_point
-from guidance.lead import lead_setpoint_ned
-from visual_guidance import los_unit_ned, visual_velocity_ned
+from guidance import lead_intercept_point, closest_approach_point, los_unit_ned, visual_velocity_ned, lead_setpoint_ned
 from telemetry_position import (
     # get_position_ned,
     # get_orientation_quaternion,

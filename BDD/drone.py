@@ -337,8 +337,8 @@ class DroneMover():
         Commands an NED velocity that LEADS a crossing target (matches its motion
         perpendicular to the line of sight + closes along it) instead of chasing its
         current bearing like move_to_target_zenith/move_to_target_ned. See
-        pronav_guidance.pronav_velocity_ned."""
-        from pronav_guidance import pronav_velocity_ned
+        guidance.pronav.pronav_velocity_ned."""
+        from guidance.pronav import pronav_velocity_ned
         cmd = pronav_velocity_ned(
             drone_position_ned.north_m, drone_position_ned.east_m, drone_position_ned.down_m,
             target_position_ned.north_m, target_position_ned.east_m, target_position_ned.down_m,

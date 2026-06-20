@@ -167,3 +167,4 @@ coverage/
 benchmark/
 .idea/
 .claude/
+*.bak_*
