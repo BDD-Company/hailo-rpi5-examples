@@ -918,7 +918,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     _far_vis = (GUIDANCE_LEAD and LEAD_FAR_VISUAL and visual_los is not None
                                 and estimated_distance_m is not None
                                 and estimated_distance_m > LEAD_FAR_DIST)
-                    if GUIDANCE_PHASED and _pronav_pos is not None and _pronav_vel is not None and drone_pose is not None:
+                    _reliable_phased = (_pronav_pos is not None and _pronav_vel is not None
+                                        and estimated_distance_m is not None
+                                        and (not ESTIMATION_3D_MAX_DISTANCE_M
+                                             or estimated_distance_m <= ESTIMATION_3D_MAX_DISTANCE_M))
+                    if GUIDANCE_PHASED and drone_pose is not None and _reliable_phased:
                         _phase = select_phase(estimated_distance_m if estimated_distance_m else 1e9,
                                               PHASED_MID_DIST, LEAD_VISUAL_DIST)
                         # terminal handoff on apparent SIZE (reliable up close) OR range:
@@ -952,13 +956,26 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                             _pcmd = NedVelCmd(_fv.north_m_s, _fv.east_m_s, _fv.down_m_s, _fv.yaw_deg, "FAR")
                             _ptag = "PHASED-FAR"
                         # GLOBAL altitude cap on EVERY phased phase. The FAR-only guard let the
-                        # uncapped MID (pronav) / terminal climbs carry the drone to ~138m / OOB.
+                        # uncapped MID (pronav) / terminal climbs carry the drone past the cap.
                         # Proactively bleed climb within 5 m of the cap so momentum can't overshoot.
                         _alt = -drone_pose.position.down_m
                         if _pcmd.down_m_s < 0 and _alt > LEAD_MAX_ALT_M - 5.0:
                             _vd = 0.0 if _alt >= LEAD_MAX_ALT_M else _pcmd.down_m_s * (LEAD_MAX_ALT_M - _alt) / 5.0
                             _pcmd = NedVelCmd(_pcmd.north_m_s, _pcmd.east_m_s, _vd, _pcmd.yaw_deg, _pcmd.phase)
                         mode += " " + _ptag + " "
+                        debug_info["mode"] = mode
+                        await drone.move_to_target_visual(_pcmd)
+                        moving = True
+                    elif GUIDANCE_PHASED and drone_pose is not None and takeoff_time_ns is not None:
+                        # Airborne but the target NED estimate is UNRELIABLE (beyond 3D range / lost).
+                        # HOLD position rather than (a) chasing a phantom lead point -> horizontal
+                        # fly-off, or (b) falling through to the uncapped zenith thrust -> altitude
+                        # runaway to 250 m+. Cap altitude (descend only if above the cap); wait for
+                        # the target to re-enter reliable range, then FAR/MID/CLOSE resume next frame.
+                        _alt = -drone_pose.position.down_m
+                        _vd = 1.5 if _alt > LEAD_MAX_ALT_M else 0.0
+                        _pcmd = NedVelCmd(0.0, 0.0, _vd, 0.0, "HOLD")
+                        mode += " PHASED-HOLD "
                         debug_info["mode"] = mode
                         await drone.move_to_target_visual(_pcmd)
                         moving = True
