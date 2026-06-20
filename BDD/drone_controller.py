@@ -13,7 +13,7 @@ from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
 from telemetry_position import PositionNED, VelocityNED
 from estimate_distance import estimate_distance_class, DistanceClass, measure_object_size
 from target_kalman import TargetKalman
-from guidance import lead_intercept_point, closest_approach_point, los_unit_ned, visual_velocity_ned, lead_setpoint_ned
+from guidance import lead_intercept_point, closest_approach_point, los_unit_ned, visual_velocity_ned, lead_setpoint_ned, select_phase, lead_pursuit_velocity_ned, NedVelCmd
 from telemetry_position import (
     # get_position_ned,
     # get_orientation_quaternion,
@@ -314,6 +314,13 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     if GUIDANCE_LEAD:
         PRONAV_USE_KALMAN = True    # lead needs a clean target velocity
 
+    GUIDANCE_PHASED   = cfg.guidance_phased
+    PHASED_MID_DIST   = cfg.phased_mid_dist
+    PHASED_FAR_VMAX   = cfg.phased_far_vmax
+    PHASED_FAR_SPEED  = cfg.phased_far_speed
+    PHASED_FAR_VZ_MAX = cfg.phased_far_vz_max
+    if GUIDANCE_PHASED:
+        PRONAV_USE_KALMAN = True    # phased needs a clean NED target pos/vel
 
     DELAY_TAKEOF_UNTIL_N_DETECTION_FRAMES = cfg.delay_takeof_until_n_detection_frames
 
@@ -324,8 +331,8 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     # AIM_POINT = XY(0.5, 0.5)
 
     SAFE_TAKEOFF_PERIOD_NS = cfg.safe_takeoff_period_ns
-    if (FOLLOW_TARGET_POSITION_NED or GUIDANCE_PRONAV or GUIDANCE_LEAD) and not ESTIMATION_3D:
-        logger.warning("NED/pronav/lead guidance requires 3D estimation, enabling it automatically")
+    if (FOLLOW_TARGET_POSITION_NED or GUIDANCE_PRONAV or GUIDANCE_LEAD or GUIDANCE_PHASED) and not ESTIMATION_3D:
+        logger.warning("NED/pronav/lead/phased guidance requires 3D estimation, enabling it automatically")
         ESTIMATION_3D = True
 
     DRONE_CONFIG_PREFIX = 'drone_'
@@ -911,7 +918,40 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                     _far_vis = (GUIDANCE_LEAD and LEAD_FAR_VISUAL and visual_los is not None
                                 and estimated_distance_m is not None
                                 and estimated_distance_m > LEAD_FAR_DIST)
-                    if (GUIDANCE_VISUAL or _lead_term or _far_vis) and visual_los is not None and drone_pose is not None:
+                    if GUIDANCE_PHASED and _pronav_pos is not None and _pronav_vel is not None and drone_pose is not None:
+                        _phase = select_phase(estimated_distance_m if estimated_distance_m else 1e9,
+                                              PHASED_MID_DIST, LEAD_VISUAL_DIST)
+                        if _phase == "CLOSE" and visual_los is not None:
+                            _vdt = ((visual_los_ts - visual_los_ts_prev) / 1e9) if visual_los_ts_prev else 0.0
+                            _vc = visual_velocity_ned(visual_los, visual_los_prev, _vdt, visual_box_frac,
+                                v_far=VISUAL_V_FAR, v_close=VISUAL_V_CLOSE, n_gain=VISUAL_N_GAIN,
+                                term_gain=VISUAL_TERM_GAIN, mid_thresh=VISUAL_MID_THRESH,
+                                near_thresh=VISUAL_NEAR_THRESH, v_max=VISUAL_V_MAX, climb_min=VISUAL_CLIMB_MIN)
+                            mode += " PHASED-TERM-" + _vc.phase + " "
+                            debug_info["mode"] = mode
+                            await drone.move_to_target_visual(_vc)
+                            moving = True
+                        elif _phase == "MID":
+                            mode += " PHASED-MID "
+                            debug_info["mode"] = mode
+                            await drone.move_to_target_pronav(
+                                _pronav_pos, _pronav_vel, drone_pose.position,
+                                v_close=PRONAV_CLOSING_SPEED, n=PRONAV_N, v_max=PRONAV_V_MAX,
+                                vz_max=PRONAV_VZ_MAX)
+                            moving = True
+                        else:  # FAR (or CLOSE without a visual LOS yet)
+                            _fv = lead_pursuit_velocity_ned(
+                                drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m,
+                                _pronav_pos.north_m, _pronav_pos.east_m, _pronav_pos.down_m,
+                                _pronav_vel.north_m_s, _pronav_vel.east_m_s, _pronav_vel.down_m_s,
+                                v_max=PHASED_FAR_VMAX, v_drone=PHASED_FAR_SPEED, t_max=LEAD_T_MAX,
+                                vz_max=PHASED_FAR_VZ_MAX, lead_max_alt_m=LEAD_MAX_ALT_M)
+                            mode += " PHASED-FAR "
+                            debug_info["mode"] = mode
+                            await drone.move_to_target_visual(NedVelCmd(
+                                _fv.north_m_s, _fv.east_m_s, _fv.down_m_s, _fv.yaw_deg, "FAR"))
+                            moving = True
+                    elif (GUIDANCE_VISUAL or _lead_term or _far_vis) and visual_los is not None and drone_pose is not None:
                         _vdt = ((visual_los_ts - visual_los_ts_prev) / 1e9) if visual_los_ts_prev else 0.0
                         _vc = visual_velocity_ned(visual_los, visual_los_prev, _vdt, visual_box_frac,
                             v_far=VISUAL_V_FAR, v_close=VISUAL_V_CLOSE, n_gain=VISUAL_N_GAIN,
