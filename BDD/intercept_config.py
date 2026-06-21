@@ -157,6 +157,14 @@ class InterceptConfig:
     phased_far_vz_max: float = 10.0
     phased_adaptive: bool = False
 
+    # estimation: parallax range
+    parallax_range: bool = False
+    parallax_buffer: int = 15
+    parallax_min_baseline_m: float = 1.0
+    parallax_min_sin2: float = 0.02
+    parallax_max_miss_m: float = 8.0
+    parallax_max_w: float = 0.7
+
     def __post_init__(self):
         # Replace None sentinel defaults with actual list defaults from YAML
         if self.frame_angular_size_deg is None:

@@ -45,3 +45,13 @@ def test_phased_keys_present():
     assert cfg.phased_far_vmax == 25.0
     assert cfg.phased_far_speed == 25.0
     assert cfg.phased_far_vz_max == 10.0
+
+
+def test_parallax_keys_present():
+    cfg = InterceptConfig.load_defaults()
+    assert cfg.parallax_range is False
+    assert cfg.parallax_buffer == 15
+    assert cfg.parallax_min_baseline_m == 1.0
+    assert cfg.parallax_min_sin2 == 0.02
+    assert cfg.parallax_max_miss_m == 8.0
+    assert cfg.parallax_max_w == 0.7

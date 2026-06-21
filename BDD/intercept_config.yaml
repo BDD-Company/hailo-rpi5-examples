@@ -136,3 +136,11 @@ phased_far_vmax: 25.0       # FAR velocity command magnitude (m/s) — the speed
 phased_far_speed: 25.0      # drone speed used in the FAR lead-point time-to-go solve
 phased_far_vz_max: 10.0     # FAR vertical command cap (m/s)
 phased_adaptive: false      # scale mid_dist/pronav_n/lead_t_max/closing by est target speed
+
+# --- estimation: parallax range (size-independent, ego-motion two-ray) ---
+parallax_range: false        # enable parallax range fused into the kalman
+parallax_buffer: 15          # ring-buffer frames of (drone_pos, los, t)
+parallax_min_baseline_m: 1.0 # min perpendicular baseline for usable parallax (m)
+parallax_min_sin2: 0.02      # min sin^2(ray angle) (reject near-parallel rays)
+parallax_max_miss_m: 8.0     # max ray-ray miss distance (reject inconsistent)
+parallax_max_w: 0.7          # max blend weight toward the parallax point (vs size-range)
