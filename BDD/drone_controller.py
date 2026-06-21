@@ -1,7 +1,6 @@
 #! /usr/bin/env python3
 
 import asyncio
-import collections
 import math
 import time
 from queue import Empty, Queue
@@ -14,7 +13,7 @@ from TargetEstimator import TargetEstimator, TargetEstimator3D, VelocityMethod
 from telemetry_position import PositionNED, VelocityNED
 from estimate_distance import estimate_distance_class, DistanceClass, measure_object_size
 from target_kalman import TargetKalman
-from guidance import los_unit_ned, visual_velocity_ned, lead_setpoint_ned, select_phase, lead_pursuit_velocity_ned, pronav_velocity_ned, NedVelCmd, triangulate_parallax
+from guidance import los_unit_ned, visual_velocity_ned, lead_setpoint_ned, select_phase, lead_pursuit_velocity_ned, pronav_velocity_ned, NedVelCmd
 from telemetry_position import (
     # get_position_ned,
     # get_orientation_quaternion,
@@ -262,12 +261,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     # velocity/position estimate is meaningless. Fall back to the 2D image-plane
     # estimator, which doesn't depend on the (noisy) depth. None disables the fallback.
     ESTIMATION_3D_MAX_DISTANCE_M               = cfg.estimation_3d_max_distance_m
-    PARALLAX_RANGE          = cfg.parallax_range
-    PARALLAX_BUFFER         = cfg.parallax_buffer
-    PARALLAX_MIN_BASELINE_M = cfg.parallax_min_baseline_m
-    PARALLAX_MIN_SIN2       = cfg.parallax_min_sin2
-    PARALLAX_MAX_MISS_M     = cfg.parallax_max_miss_m
-    PARALLAX_MAX_W          = cfg.parallax_max_w
 
     ESTIMATION_LOOKAHEAD_FRAMES                = cfg.estimation_lookahead_frames
     ESTIMATION_LOOKAHEAD_DYNAMIC               = cfg.estimation_lookahead_dynamic
@@ -414,7 +407,6 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     target_kalman = TargetKalman(PRONAV_KALMAN_Q, PRONAV_KALMAN_R)
     kalman_target_pos_ned = None
     kalman_target_vel_ned = None
-    parallax_ring = collections.deque(maxlen=PARALLAX_BUFFER)   # (pos(n,e,d), los(n,e,d), t_s)
     visual_los = None
     visual_los_prev = None
     visual_los_ts = None
@@ -731,41 +723,10 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                             drone_pose.position,
                         )
                         target_estimator_3d.add(target_pos_ned, current_frame_timestamp_ns)
-                        # --- parallax range fuse (size-independent, opt-in) ---
-                        _meas_n, _meas_e, _meas_d = target_pos_ned.north_m, target_pos_ned.east_m, target_pos_ned.down_m
-                        _meas_range = estimated_distance_m
-                        if PARALLAX_RANGE:
-                            _t_s = current_frame_timestamp_ns / 1e9
-                            _raw_los_px = los_unit_ned(
-                                detection.bbox.center.x, detection.bbox.center.y,
-                                AIM_POINT.x, AIM_POINT.y,
-                                FRAME_ANGLUAR_SIZE_DEG.x, FRAME_ANGLUAR_SIZE_DEG.y,
-                                drone_pose.quaternion)
-                            _dp = (drone_pose.position.north_m, drone_pose.position.east_m, drone_pose.position.down_m)
-                            _vt = (kalman_target_vel_ned.north_m_s, kalman_target_vel_ned.east_m_s,
-                                   kalman_target_vel_ned.down_m_s) if kalman_target_vel_ned is not None else (0.0, 0.0, 0.0)
-                            if len(parallax_ring) > 0:
-                                _po, _lo, _to = parallax_ring[0]   # oldest = largest baseline (O(1))
-                                _pr = triangulate_parallax(_dp, _raw_los_px, _t_s, _po, _lo, _to, _vt,
-                                                           min_sin2=PARALLAX_MIN_SIN2,
-                                                           min_baseline_m=PARALLAX_MIN_BASELINE_M,
-                                                           max_miss_m=PARALLAX_MAX_MISS_M)
-                                if _pr is not None:
-                                    _ppt, _prange = _pr
-                                    # confidence blend by perpendicular baseline (cap at max_w)
-                                    _bn = _dp[0]-_po[0]; _be = _dp[1]-_po[1]; _bd = _dp[2]-_po[2]
-                                    _al = _bn*_raw_los_px[0]+_be*_raw_los_px[1]+_bd*_raw_los_px[2]
-                                    _perp = math.sqrt(max(0.0, _bn*_bn+_be*_be+_bd*_bd - _al*_al))
-                                    _w = min(PARALLAX_MAX_W, _perp / 10.0)   # full weight ~10 m perp baseline
-                                    _meas_n = _w*_ppt[0] + (1-_w)*_meas_n
-                                    _meas_e = _w*_ppt[1] + (1-_w)*_meas_e
-                                    _meas_d = _w*_ppt[2] + (1-_w)*_meas_d
-                                    _meas_range = _w*_prange + (1-_w)*_meas_range
-                                    mode += ' PLX '
-                            parallax_ring.append((_dp, _raw_los_px, _t_s))
                         if PRONAV_USE_KALMAN:
                             _kp, _kv = target_kalman.update(
-                                _meas_n, _meas_e, _meas_d, current_frame_timestamp_ns / 1e9, _meas_range)
+                                target_pos_ned.north_m, target_pos_ned.east_m,
+                                target_pos_ned.down_m, current_frame_timestamp_ns / 1e9, estimated_distance_m)
                             kalman_target_pos_ned = PositionNED(_kp[0], _kp[1], _kp[2])
                             kalman_target_vel_ned = VelocityNED(_kv[0], _kv[1], _kv[2])
                         if GUIDANCE_LEAD:
