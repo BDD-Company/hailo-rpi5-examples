@@ -761,7 +761,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                                     _meas_e = _w*_ppt[1] + (1-_w)*_meas_e
                                     _meas_d = _w*_ppt[2] + (1-_w)*_meas_d
                                     _meas_range = _w*_prange + (1-_w)*_meas_range
-                                    mode +=  PLX 
+                                    mode += ' PLX '
                             parallax_ring.append((_dp, _raw_los_px, _t_s))
                         if PRONAV_USE_KALMAN:
                             _kp, _kv = target_kalman.update(
