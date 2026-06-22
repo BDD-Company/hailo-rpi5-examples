@@ -242,6 +242,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
 
     TARGET_SIZE_M = cfg.target_size_m
     DISTANCE_SCALE = cfg.distance_scale   # empirical range calibration (monocular range undershoots)
+    SIZE_MEASURE_CONTOUR = cfg.size_measure_contour
     FRAME_ANGLUAR_SIZE_DEG = cfg.frame_angular_size_deg
 
     # INERTIA_CORRECTION_GAIN = control_config.pop('inertia_correction_gain', 0.0)
@@ -615,7 +616,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 delay_between_detections_ns = update_timestamps_on_detection()
 
                 # on very small sizes box margin added by detector is greater than real object size.
-                if detection.bbox.area() < 0.002:
+                if SIZE_MEASURE_CONTOUR or detection.bbox.area() < 0.002:
                     object_corrected_size = measure_object_size(detections_obj.frame, detection.bbox) or detection.bbox.size
                 else:
                     object_corrected_size = detection.bbox.size

@@ -57,6 +57,7 @@ pd_coeff_p_dynamic_stage_3_ratio: 1
 frame_angular_size_deg: [107, 85]   # XY — converted to XY in app.py
 target_size_m: [3.0, 3.0]          # XY — red_sphere 3 m (Shahed-sized)
 distance_scale: 1.0                 # empirical monocular range calibration
+size_measure_contour: false         # measure target size via Otsu contour (not raw bbox) for ALL detections
 
 # --- inertia correction ---
 inertia_correction_gain: 0

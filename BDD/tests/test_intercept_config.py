@@ -55,3 +55,8 @@ def test_parallax_keys_present():
     assert cfg.parallax_min_sin2 == 0.02
     assert cfg.parallax_max_miss_m == 8.0
     assert cfg.parallax_max_w == 0.7
+
+
+def test_size_measure_contour_key():
+    cfg = InterceptConfig.load_defaults()
+    assert cfg.size_measure_contour is False
