@@ -686,6 +686,14 @@ def picamera_thread(
         capture_target_fps = target_fps
         capture_video_format = video_format
 
+    # Map the configured video_format onto the Picamera2 main-stream format.
+    # Non-RGB (NV12/YUV420) is captured as raw semi-/planar YUV and pushed to appsrc
+    # UNCONVERTED — the system-memory, no-RGB-conversion, no-dmabuf-copy path an NV12
+    # inference model wants (see BDD/experiments/nv12_tiling_bench/RESULTS.md). NV12's
+    # make_array is unsupported in picamera2, so raw YUV uses make_buffer (flat bytes).
+    picam_main_format = {'NV12': 'NV12', 'YUV420': 'YUV420'}.get(capture_video_format, 'RGB888')
+    is_raw_yuv = picam_main_format != 'RGB888'
+
     camera_id = camera_config.camera_id
     log_prefix = f"[cam{camera_id}:{camera_config.name or '?'}]"
 
@@ -728,7 +736,7 @@ def picamera_thread(
             # `main` only. buffer_count trimmed from the preview default (4) to 3 to
             # shorten the camera pipeline depth (fewer frames in flight => lower capture
             # latency); each request is released immediately after copying, so 3 suffices.
-            main = {'size': (capture_width, capture_height), 'format': 'RGB888'}
+            main = {'size': (capture_width, capture_height), 'format': picam_main_format}
             controls = {'FrameRate': capture_target_fps}
             config = picam2.create_preview_configuration(main=main, controls=controls, buffer_count=3)
         else:
@@ -885,7 +893,10 @@ def picamera_thread(
                     frame_count += 1
                     processing_time_accum += time.monotonic() - proc_start_monotonic
                     continue
-                frame_data = request.make_array("main")
+                # NV12/YUV420: make_array is unsupported for these formats; make_buffer
+                # returns the flat, tightly-packed YUV bytes we push to appsrc as-is.
+                frame_data = (request.make_buffer("main") if is_raw_yuv
+                              else request.make_array("main"))
                 frame_meta = request.get_metadata()
             finally:
                 request.release()
@@ -896,9 +907,14 @@ def picamera_thread(
                     on_failure()
                 break
 
-            # Convert framontigue data if necessary
-            frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-            frame_bytes = frame.tobytes()
+            # Convert frame data if necessary. RGB888 from picamera2 is BGR-ordered, so
+            # the inference path needs a BGR->RGB swap. NV12/YUV420 is already the format
+            # the model consumes — push the raw YUV bytes with no color conversion.
+            if is_raw_yuv:
+                frame_bytes = frame_data.tobytes()
+            else:
+                frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+                frame_bytes = frame.tobytes()
 
             # Drop one of the two buffer copies. The old new_wrapped(frame.tobytes())
             # copied the bytes a SECOND time into GstMemory; new_wrapped_full instead

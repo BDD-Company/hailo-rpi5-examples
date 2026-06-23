@@ -106,6 +106,9 @@ camera:
   width: 1280
   height: 720
   fps: 30
+  # MUST match the HEF input format order (RGB model -> RGB, NV12 model -> NV12).
+  # A mismatch segfaults once frames flow. NV12 is captured natively from picamera2
+  # (system-memory, no RGB conversion) — see BDD/experiments/nv12_tiling_bench/RESULTS.md.
   video_format: RGB
   active_id: 0
   # Relative target size (or bigger) that triggers switching to wide-angle camera.
