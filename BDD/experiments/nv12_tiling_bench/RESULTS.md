@@ -79,8 +79,15 @@ Camera recovered after a Pi reboot. Re-ran on the **real imx477** (NV12 via PiSP
 
 Camera Stage-A here ≈ **41 ms** for whole-frame (capP50 58 − pipe 17), rising to ~90 ms under tiling load (CPU contention from the RGB-roundtrip copy + deeper source queue). Much lower than the ~150 ms in the dual-camera picamera2/appsrc path — the single libcamerasrc + pinned-8ms-exposure path is leaner. Merging the "+1" into one net-group still applies and would bring 2×2+1 from 506 → ~360 ms e2e / 9.5 → ~13.5 fps.
 
-### ⚠️ DMABUF gotcha (live camera + tiling)
-`libcamerasrc` hands `hailotilecropper` **DMABUF** memory it can't map → **SIGSEGV** as soon as frames flow (even 1×1). A passthrough `videoconvert NV12→NV12` does *not* copy and still crashes; a real **RGB→NV12 roundtrip** (or any genuine resize) forces a tightly-packed system-memory copy and fixes it. Whole-frame `hailonet` (no cropper) is unaffected. Baked into the `--camera` path. Better long-term fix: feed tiling from the appsrc/picamera2 (system-memory) path, or a lighter forced-copy than the RGB roundtrip.
+### ⚠️ DMABUF gotcha (live camera + tiling) — and why the "conversion" is a red herring
+`libcamerasrc` hands `hailotilecropper` **DMABUF** memory it can't map → **SIGSEGV** as soon as frames flow (even 1×1). The root cause is **memory type, not pixel format**: `videotestsrc`'s system-memory NV12 fed the cropper with zero conversion. So no format change is *needed* — only a system-memory copy. A passthrough `videoconvert NV12→NV12` does *not* copy (still crashes); forcing a copy fixes it.
+
+Cost of the forced copy is **memory-bandwidth-bound**, ~90 ms under tiling CPU load. The format of the copy barely matters: `NV12→I420→NV12` (YUV-only) = 317 ms e2e vs `NV12→RGB→NV12` = 326 ms — only ~9 ms apart. The benchmark `--camera` path uses the YUV-only copy, but **this is a benchmark workaround, NOT a production pattern.**
+
+**Do NOT capture NV12 → convert → convert back in production.** Correct paths:
+- **Whole-frame:** no cropper, no extra copy. `camera → videoscale(640²) → hailonet` — the resize to the HEF input is necessary work and resolves the dmabuf in one pass. Measured pipeline latency **~24 ms** (scale+inference). `hailonet` maps dmabuf NV12 fine on its own.
+- **Tiling:** feed **system-memory NV12** so there's no dmabuf to copy. The app's existing **picamera2 → appsrc** path is already system-memory; switch it to deliver NV12 (instead of today's RGB888) and feed the cropper directly — zero copy, zero conversion.
+- **Upstream fix:** teach `hailotilecropper` to import/map dmabuf (it already does for whole-buffer `hailocropper` on the appsrc path).
 
 ### Reboot/tmpfs note
 The reboot that fixed the camera **wiped tmpfs `~/models/`** — had to re-rsync `yolov11n_nv12.hef` from the laptop (`/media/Pets/BDD/_MODELS/experimental/`). Missing HEF → `HAILO_OPEN_FILE_FAILURE(13)` then segfault once frames flow (per deploy-model memory).
