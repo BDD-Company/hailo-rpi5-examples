@@ -92,6 +92,22 @@ Cost of the forced copy is **memory-bandwidth-bound**, ~90 ms under tiling CPU l
 ### Reboot/tmpfs note
 The reboot that fixed the camera **wiped tmpfs `~/models/`** — had to re-rsync `yolov11n_nv12.hef` from the laptop (`/media/Pets/BDD/_MODELS/experimental/`). Missing HEF → `HAILO_OPEN_FILE_FAILURE(13)` then segfault once frames flow (per deploy-model memory).
 
+## picamera2 → appsrc zero-copy validation (the production-correct tiling source)
+Confirmed the recommended fix: **picamera2 delivers system-memory NV12** (1280×720, stride 1280 tightly-packed — `format="NV12"` configures natively), so feeding `appsrc → hailotilecropper` directly has **no dmabuf, no SIGSEGV, no format conversion**, and **no forced copy hop**. The producer does one system-memory copy (numpy → Gst buffer, identical to the app's existing `new_wrapped_full`).
+
+`--picam` mode, live, vs the libcamerasrc+copy hack:
+| mode | libcamerasrc + forced copy | **picamera2 → appsrc** |
+|------|----------------------------|------------------------|
+| 2×2 single | 16.5 fps, 107/111 (drops) | 16.2 fps, **128/128 (no drops)** |
+| 2×1+1 | 18.3 fps / 296 ms / drops | 17.2 fps / **253 ms** / no drops |
+| 2×2+1 | 9.5 fps / 506 ms / drops | 9.6 fps / **465 ms** / no drops |
+| 3×2+1 | 6.3 fps / 644 ms | 6.1 fps / **604 ms** |
+| 3×3+1 | 4.1 fps / 802 ms | 3.9 fps / **757 ms** |
+
+Same throughput, ~40 ms lower e2e, and no drops at low tile counts — **and it removes the NV12→…→NV12 waste entirely.** Caveat: the `--picam` `capP50` uses `appsrc do-timestamp` (PTS stamped at push), so it excludes picamera2's internal capture depth and is not directly comparable to the libcamerasrc `capP50` (which carried the sensor PTS); the inference-path `tP50` IS comparable and matches (~415 ms for 2×2). The real, durable win is correctness: production-consistent, conversion-free, drop-free.
+
+**Recommendation for the app:** when running tiling, switch the picamera2/appsrc producer from RGB888 to `format="NV12"` and feed the cropper directly. Whole-frame stays simplest of all (`hailonet`, no cropper).
+
 ## Repro
 ```
 # on Pi

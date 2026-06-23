@@ -31,7 +31,15 @@ def make_pipeline(args):
     )
     # is-live=true + framerate caps -> operating-point test (camera-like).
     # is-live=false, no framerate -> throughput-ceiling test (push as fast as NPU accepts).
-    if args.camera:
+    if args.picam:
+        # picamera2 -> appsrc: buffers are SYSTEM MEMORY NV12 (no dmabuf), so the cropper
+        # maps them directly with NO conversion and NO copy hop — the production-correct
+        # zero-(format)-copy path for tiling. A producer thread (start_picam) pushes frames.
+        src = ("appsrc name=app_source is-live=true do-timestamp=true format=time "
+               "max-buffers=4 leaky-type=downstream")
+        src_caps = (f"video/x-raw,format=NV12,width={args.width},height={args.height},"
+                    f"framerate={args.fps}/1")
+    elif args.camera:
         # real sensor, NV12 out via ISP — matches BDD app libcamerasrc caps (exposure pinned).
         # ROOT CAUSE of the tiling segfault is MEMORY TYPE, not format: libcamerasrc hands
         # DMABUF that hailotilecropper can't map. The format conversion below is ONLY a trick
@@ -138,6 +146,42 @@ def pct(xs, p):
     return xs[k]
 
 
+def start_picam(pipe, args):
+    """Push picamera2 NV12 frames into appsrc as SYSTEM-MEMORY buffers (no dmabuf).
+    Returns a stop() callable. The producer copies the sensor buffer into a Gst buffer
+    once (same as the BDD app's new_wrapped_full) — no format conversion, no dmabuf."""
+    import threading
+    from picamera2 import Picamera2
+
+    appsrc = pipe.get_by_name("app_source")
+    picam = Picamera2()
+    cfg = picam.create_preview_configuration(
+        main={"size": (args.width, args.height), "format": "NV12"},
+        buffer_count=4,
+        controls={"FrameRate": float(args.fps), "ExposureTime": 8000, "AeEnable": False},
+    )
+    picam.configure(cfg)
+    picam.start()
+    stop = threading.Event()
+
+    def run():
+        while not stop.is_set():
+            arr = picam.capture_buffer("main")          # flat NV12 bytes, system memory
+            gstbuf = Gst.Buffer.new_wrapped(arr.tobytes())
+            if appsrc.emit("push-buffer", gstbuf) != Gst.FlowReturn.OK:
+                break
+        try:
+            appsrc.emit("end-of-stream")
+            picam.stop()
+            picam.close()
+        except Exception:
+            pass
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    return lambda: (stop.set(), th.join(timeout=2))
+
+
 def read_temp():
     try:
         with open("/sys/class/thermal/thermal_zone0/temp") as f:
@@ -161,6 +205,8 @@ def main():
     ap.add_argument("--multiscale", type=int, default=0,
                     help="scale-level S: ONE cropper emits (1x1)+..+(SxS) crops via one net-group")
     ap.add_argument("--camera", action="store_true", help="use real libcamerasrc NV12 source")
+    ap.add_argument("--picam", action="store_true",
+                    help="picamera2 -> appsrc system-memory NV12 (zero-copy tiling, no dmabuf)")
     ap.add_argument("--num-buffers", type=int, default=100000)
     args = ap.parse_args()
 
@@ -192,11 +238,16 @@ def main():
     bus.connect("message", on_msg)
 
     temp0 = read_temp()
+    stop_producer = None
+    if args.picam:
+        stop_producer = start_picam(pipe, args)
     pipe.set_state(Gst.State.PLAYING)
     # warm up (first inference re-streams weights ~42 ms; let scheduler settle)
     GLib.timeout_add(int(args.duration * 1000) + 1500, lambda: (loop.quit(), False)[1])
     t_start = time.monotonic()
     loop.run()
+    if stop_producer:
+        stop_producer()
     wall = time.monotonic() - t_start
     temp1 = read_temp()
 
