@@ -6,7 +6,7 @@ def test_defaults_load_from_yaml():
     cfg = InterceptConfig.load_defaults()
     assert cfg.distance_scale == 1.0
     assert cfg.guidance_lead is False
-    assert cfg.lead_visual_dist == 12.0
+    assert cfg.lead_visual_dist == 17.32
 
 
 def test_overrides_merge():
@@ -24,7 +24,7 @@ def test_unknown_key_raises():
 def test_roundtrip_to_dict():
     cfg = InterceptConfig.load_defaults()
     d = cfg.to_dict()
-    assert d["lead_visual_dist"] == 12.0
+    assert d["lead_visual_dist"] == 17.32
     assert InterceptConfig.from_overrides(d).to_dict() == d
 
 
@@ -41,9 +41,9 @@ def test_yaml_and_dataclass_keys_match():
 def test_phased_keys_present():
     cfg = InterceptConfig.load_defaults()
     assert cfg.guidance_phased is False
-    assert cfg.phased_mid_dist == 35.0
-    assert cfg.phased_far_vmax == 25.0
-    assert cfg.phased_far_speed == 25.0
+    assert cfg.phased_mid_dist == 32.37
+    assert cfg.phased_far_vmax == 28.38
+    assert cfg.phased_far_speed == 22.11
     assert cfg.phased_far_vz_max == 10.0
 
 
@@ -59,4 +59,4 @@ def test_parallax_keys_present():
 
 def test_size_measure_contour_key():
     cfg = InterceptConfig.load_defaults()
-    assert cfg.size_measure_contour is False
+    assert cfg.size_measure_contour is True

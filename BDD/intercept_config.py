@@ -77,7 +77,7 @@ class InterceptConfig:
     frame_angular_size_deg: list = None
     target_size_m: list = None
     distance_scale: float = 1.0
-    size_measure_contour: bool = False
+    size_measure_contour: bool = True
 
     # --- inertia correction ---
     inertia_correction_gain: int = 0
