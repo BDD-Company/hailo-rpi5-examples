@@ -92,6 +92,7 @@ camera:
   switch_to_wide_size: 0.25
   switch_to_zoom_size: 0.015
   exposure_time_us: 8000   # Stage-A: pin a short manual shutter (AE off)
+  buffer_count: 2          # Stage-A: floor DMA pool depth
   cameras:
     - camera_id: 0
       name: imx477

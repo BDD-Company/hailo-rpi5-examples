@@ -579,7 +579,8 @@ class CameraSwitcher:
                  active_id : int | None = None,
                  switch_to_wide_size : float = 0.25,
                  switch_to_zoom_size : float = 0.015,
-                 exposure_time_us : int = 0):
+                 exposure_time_us : int = 0,
+                 buffer_count : int = 2):
         if not configs:
             raise ValueError("CameraSwitcher requires at least one CameraConfig")
         # All cameras share one appsrc → one set of caps. Hold them here so
@@ -593,6 +594,8 @@ class CameraSwitcher:
         # Manual exposure pin in microseconds, applied by the picamera producer
         # to every camera (0 = leave auto-exposure on). See Config.Camera.
         self.exposure_time_us = exposure_time_us
+        # picamera2 DMA pool depth (frames in flight); 2 = floor. See Config.Camera.
+        self.buffer_count = buffer_count
         # Switch policy thresholds, EMA-tested in the controller:
         #   zoom→wide fires when EMA(max(w,h)) >= switch_to_wide_size
         #   wide→zoom fires when EMA(max(w,h)) <= switch_to_zoom_size

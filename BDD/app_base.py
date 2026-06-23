@@ -681,12 +681,14 @@ def picamera_thread(
         capture_target_fps = camera_switcher.fps
         capture_video_format = camera_switcher.video_format
         exposure_time_us = getattr(camera_switcher, 'exposure_time_us', 0)
+        buffer_count = getattr(camera_switcher, 'buffer_count', 2)
     else:
         capture_width = video_width
         capture_height = video_height
         capture_target_fps = target_fps
         capture_video_format = video_format
         exposure_time_us = 0
+        buffer_count = 2
 
     # Stage-A latency: when a manual exposure is configured, pin it (disable AE)
     # so the shutter is short and deterministic. A short integration enables a
@@ -733,12 +735,14 @@ def picamera_thread(
             # Single ISP output stream. The inference path only ever consumed one
             # 1280x720 RGB frame; the old config also allocated an identical, UNUSED
             # `lores` stream which doubled ISP output bandwidth for nothing. Capture
-            # `main` only. buffer_count trimmed from the preview default (4) to 3 to
-            # shorten the camera pipeline depth (fewer frames in flight => lower capture
-            # latency); each request is released immediately after copying, so 3 suffices.
+            # `main` only. buffer_count (default 2, the floor) shortens the camera
+            # pipeline depth (fewer frames in flight => lower worst-case capture
+            # latency); each request is released immediately after copying. Configurable
+            # via Config.Camera.buffer_count; see camera-stage-a-latency.md.
             main = {'size': (capture_width, capture_height), 'format': 'RGB888'}
             controls = {'FrameRate': capture_target_fps}
-            config = picam2.create_preview_configuration(main=main, controls=controls, buffer_count=3)
+            logger.info("%s buffer_count=%d", log_prefix, buffer_count)
+            config = picam2.create_preview_configuration(main=main, controls=controls, buffer_count=buffer_count)
         else:
             config = picamera_config
         # Configure the camera with the created configuration

@@ -117,6 +117,10 @@ camera:
   # 30 fps in lower light and cuts/de-jitters Stage-A latency — but needs enough
   # light, so validate on-scene before enabling. See experiments/camera-stage-a-latency.md.
   exposure_time_us: 0
+  # Stage-A latency: picamera2 DMA pool depth. 2 = floor (keeps double-buffering;
+  # lower worst-case capture staleness). Raise only if the sensor can't stream
+  # cleanly at 2 (watch for libcamera "no buffers" warnings).
+  buffer_count: 2
   cameras:
     # NOTE: must be at least 1 camera
     - camera_id: 0

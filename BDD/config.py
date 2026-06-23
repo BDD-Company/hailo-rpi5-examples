@@ -270,6 +270,13 @@ class Config:
         # integration). Needs enough light; see experiments/camera-stage-a-latency.md.
         exposure_time_us:     Annotated[int, Range(min=0)] = 0
 
+        # Size of the picamera2/PiSP DMA buffer pool (frames in flight between the
+        # sensor/ISP and the app). It caps worst-case Stage-A staleness: fewer
+        # buffers => lower worst-case capture latency. 2 is the FLOOR — it keeps
+        # double-buffering (the sensor fills #2 while the app holds #1); 1 breaks
+        # that and stalls/drops, so the minimum is enforced.
+        buffer_count:         Annotated[int, Range(min=2)] = 2
+
         @dataclass(slots=True, kw_only=True, frozen=True)
         class CameraEntry:
             """One physical camera. Maps onto helpers.CameraConfig.
