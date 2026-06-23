@@ -33,13 +33,18 @@ def make_pipeline(args):
     # is-live=false, no framerate -> throughput-ceiling test (push as fast as NPU accepts).
     if args.camera:
         # real sensor, NV12 out via ISP — matches BDD app libcamerasrc caps (exposure pinned).
-        # libcamerasrc hands DMABUF memory that hailotilecropper can't map -> segfault; an
-        # RGB->NV12 roundtrip forces a tightly-packed system-memory copy (NV12->NV12 passthrough
-        # does NOT copy and still crashes). Constant cost across all tiling modes.
+        # ROOT CAUSE of the tiling segfault is MEMORY TYPE, not format: libcamerasrc hands
+        # DMABUF that hailotilecropper can't map. The format conversion below is ONLY a trick
+        # to force a system-memory copy (NV12->NV12 passthrough does not copy and still crashes).
+        # We stay in YUV (NV12->I420->NV12) to avoid the RGB color-matrix cost. This copy is a
+        # WORKAROUND for the benchmark, NOT a production pattern:
+        #   * whole-frame needs NO copy  -> feed hailonet directly (it maps dmabuf NV12 fine).
+        #   * tiling in production        -> feed system-memory NV12 from picamera2/appsrc,
+        #                                    which never produces dmabuf (zero-copy, no hop).
         src = ("libcamerasrc name=src exposure-time-mode=manual exposure-time=8000")
         src_caps = (
             f"video/x-raw,format=NV12,width={args.width},height={args.height},"
-            f"framerate={args.fps}/1 ! videoconvert ! video/x-raw,format=RGB ! "
+            f"framerate={args.fps}/1 ! videoconvert ! video/x-raw,format=I420 ! "
             f"videoconvert ! video/x-raw,format=NV12"
         )
     elif args.uncapped:
