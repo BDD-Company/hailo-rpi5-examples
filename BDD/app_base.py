@@ -680,11 +680,19 @@ def picamera_thread(
         capture_height = camera_switcher.height
         capture_target_fps = camera_switcher.fps
         capture_video_format = camera_switcher.video_format
+        exposure_time_us = getattr(camera_switcher, 'exposure_time_us', 0)
     else:
         capture_width = video_width
         capture_height = video_height
         capture_target_fps = target_fps
         capture_video_format = video_format
+        exposure_time_us = 0
+
+    # Stage-A latency: when a manual exposure is configured, pin it (disable AE)
+    # so the shutter is short and deterministic. A short integration enables a
+    # steady capture rate in lower light and de-jitters the capture timestamp.
+    # When pinned we must NOT re-enable AE on camera activation (below).
+    exposure_pinned = exposure_time_us > 0
 
     camera_id = camera_config.camera_id
     log_prefix = f"[cam{camera_id}:{camera_config.name or '?'}]"
@@ -752,10 +760,18 @@ def picamera_thread(
             'AeEnable': True,
             'AwbEnable': True,
         }
+        # Stage-A latency: pin a short manual exposure when configured. Disable
+        # AE and set ExposureTime; AWB stays on. Applied before any per-camera
+        # initial_controls so an explicit per-camera ExposureTime can still win.
+        if exposure_pinned:
+            merged_initial['AeEnable'] = False
+            merged_initial['ExposureTime'] = exposure_time_us
         if camera_config.initial_controls:
             merged_initial.update(camera_config.initial_controls)
         if picamera_controls_initial is not None:
             merged_initial.update(picamera_controls_initial)
+        logger.info("%s exposure: %s", log_prefix,
+                    f"MANUAL {exposure_time_us}us (AE off)" if exposure_pinned else "auto (AE on)")
         apply_controls(merged_initial)
 
         # GStreamer caps for the shared appsrc.
@@ -844,9 +860,12 @@ def picamera_thread(
                     # L3: on inactive -> active, also re-assert AE/AWB so the
                     # algorithms reconverge on the active scene under the new
                     # (higher) cadence instead of riding the inactive estimate.
-                    # Cheap; only triggered on the flag flip.
+                    # Cheap; only triggered on the flag flip. When exposure is
+                    # pinned we keep AE OFF (re-enabling it would unpin the
+                    # shutter and bring back the latency/jitter we removed).
                     if is_active and was_active is False:
-                        transition_controls['AeEnable'] = True
+                        if not exposure_pinned:
+                            transition_controls['AeEnable'] = True
                         transition_controls['AwbEnable'] = True
                     apply_controls(transition_controls)
                     logger.info("%s FrameRate -> %d fps (active=%s)", log_prefix, new_fps, is_active)
@@ -966,12 +985,16 @@ def picamera_thread(
                 avg_capture_ms = (capture_time_accum / window_frames * 1000.0) if window_frames else 0.0
                 avg_proc_ms = (processing_time_accum / window_frames * 1000.0) if window_frames else 0.0
                 avg_emit_ms = (emit_time_accum / window_frames * 1000.0) if window_frames else 0.0
+                exp_us = frame_meta.get("ExposureTime") if frame_meta else None
+                gain = frame_meta.get("AnalogueGain") if frame_meta else None
                 logger.info(
                     "%s picamera_thread alive: pushed %d frames so far, last %d frames in %.2fs (%.1f fps); "
-                    "per-frame avg: capture_wait=%.1fms loop_proc=%.1fms [convert=%.1fms emit=%.1fms] (interval=%.1fms)",
+                    "per-frame avg: capture_wait=%.1fms loop_proc=%.1fms [convert=%.1fms emit=%.1fms] (interval=%.1fms); "
+                    "exposure=%sus gain=%s",
                     log_prefix, frame_count, window_frames, window_s, window_fps,
                     avg_capture_ms, avg_proc_ms, avg_proc_ms - avg_emit_ms, avg_emit_ms,
                     (window_s / window_frames * 1000.0) if window_frames else 0.0,
+                    exp_us, (f"{gain:.2f}" if isinstance(gain, (int, float)) else gain),
                 )
                 last_alive_log_monotonic = now_monotonic
                 last_alive_log_frame_count = frame_count

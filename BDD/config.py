@@ -262,6 +262,14 @@ class Config:
         # EMA smoothing factor for camera-switch target size, 0..1.
         switch_size_ema_alpha: Annotated[float, Range(0.0, 1.0)] = 0.3
 
+        # Manual exposure pin (Stage-A latency). 0 = leave auto-exposure on (AE
+        # picks the integration time). >0 = disable AE and pin ExposureTime to
+        # this many microseconds. A short shutter (~8000 µs) both enables a
+        # steady 30 fps in lower light AND cuts/​de-jitters Stage-A latency
+        # (centres the captured "moment" instead of smearing it across a long
+        # integration). Needs enough light; see experiments/camera-stage-a-latency.md.
+        exposure_time_us:     Annotated[int, Range(min=0)] = 0
+
         @dataclass(slots=True, kw_only=True, frozen=True)
         class CameraEntry:
             """One physical camera. Maps onto helpers.CameraConfig.

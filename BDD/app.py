@@ -114,6 +114,50 @@ def _read_camera_id(buffer: Gst.Buffer) -> int:
         return DEFAULT_CAMERA_ID
     return int(meta.timestamp)
 
+
+# Stage-A/B latency observability (part of the capture→command latency campaign).
+# Accumulate per-frame deltas and emit p50/p95/p99 every N frames so on-device
+# benches can read Stage A (sensor→appsrc) and Stage B (appsrc→callback) straight
+# from the log, even in --vision-only mode (no control thread). Cheap: two list
+# appends per frame plus a sort every N. NOTE on clocks: SensorTimestamp is
+# libcamera's CLOCK_BOOTTIME and the appsrc-push stamp is time.monotonic_ns();
+# on a Pi that never suspends these share an origin, so the Stage-A delta is
+# accurate in practice (and the offset is constant, so cross-run deltas are valid).
+_LATENCY_LOG_EVERY_N = 100
+_stage_a_samples_ms: list[float] = []
+_stage_b_samples_ms: list[float] = []
+_latency_frame_counter = 0
+
+
+def _pct(sorted_xs: list[float], q: float) -> float:
+    if not sorted_xs:
+        return float('nan')
+    i = min(len(sorted_xs) - 1, int(q / 100.0 * len(sorted_xs)))
+    return sorted_xs[i]
+
+
+def _record_stage_latency(stage_a_ms, stage_b_ms):
+    global _latency_frame_counter
+    if stage_a_ms is not None:
+        _stage_a_samples_ms.append(stage_a_ms)
+    if stage_b_ms is not None:
+        _stage_b_samples_ms.append(stage_b_ms)
+    _latency_frame_counter += 1
+    if _latency_frame_counter % _LATENCY_LOG_EVERY_N != 0:
+        return
+    a = sorted(_stage_a_samples_ms)
+    b = sorted(_stage_b_samples_ms)
+    logger.info(
+        "!!! STAGE LATENCY (last %d frames): "
+        "StageA sensor->appsrc p50=%.1f p95=%.1f p99=%.1f max=%.1f ms (n=%d) | "
+        "StageB appsrc->callback p50=%.1f p95=%.1f p99=%.1f max=%.1f ms (n=%d)",
+        _LATENCY_LOG_EVERY_N,
+        _pct(a, 50), _pct(a, 95), _pct(a, 99), (a[-1] if a else float('nan')), len(a),
+        _pct(b, 50), _pct(b, 95), _pct(b, 99), (b[-1] if b else float('nan')), len(b),
+    )
+    _stage_a_samples_ms.clear()
+    _stage_b_samples_ms.clear()
+
 _MIN_MATCH_IOU = 0.1
 
 
@@ -156,6 +200,14 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     sensor_timestamp_ns  = normalized_timestamp(buffer.get_reference_timestamp_meta(sensor_timestamp_caps))
     detection_start_timestamp_ns  = normalized_timestamp(buffer.get_reference_timestamp_meta(unix_timestamp_caps))
     detection_end_timestamp_ns  = time.monotonic_ns()
+
+    # Stage-A/B latency: record before the fallbacks below zero the deltas out.
+    _sensor_present = sensor_timestamp_ns != 0
+    _push_present = detection_start_timestamp_ns != 0
+    _record_stage_latency(
+        (detection_start_timestamp_ns - sensor_timestamp_ns) / 1e6 if (_sensor_present and _push_present) else None,
+        (detection_end_timestamp_ns - detection_start_timestamp_ns) / 1e6 if _push_present else None,
+    )
 
     frame_id = normalized_frame_id(buffer, buffer.get_reference_timestamp_meta(frame_id_caps))
     camera_id = _read_camera_id(buffer)
@@ -351,6 +403,17 @@ def main():
         DEBUG=True
         sys.argv.remove('--DEBUG')
 
+    # --config: optional path to an alternate config YAML (defaults to config.yaml
+    # next to this file). Parsed from argv directly — like --DEBUG above — because
+    # the config is loaded before the main argparser runs. Lets a test/bench rig
+    # point at a single-camera (or otherwise tweaked) config without touching the
+    # production config.yaml.
+    config_path = Path(__file__).resolve().parent / "config.yaml"
+    if "--config" in sys.argv:
+        i = sys.argv.index("--config")
+        config_path = Path(sys.argv[i + 1])
+        del sys.argv[i:i + 2]
+
     if DEBUG:
         logger.error('')
         logger.error("!!! ============================================================== !!!")
@@ -373,6 +436,13 @@ def main():
     arg_parser = get_default_parser()
     arg_parser.add_argument('--action', type=str, choices=["platform", "drone"])
     arg_parser.add_argument('--connection_string', type=str, default=None)
+    # Run the vision pipeline ALONE: no drone/platform control thread, and the
+    # pipeline starts immediately instead of waiting for the controller to signal
+    # "ready". For camera/latency benching on a rig with no armable FMU. The Stage
+    # A/B latency lines (callback) still report; the controller-side GOT DETECTIONS
+    # / e2e LATENCY lines do not (there is no controller).
+    arg_parser.add_argument('--vision-only', action='store_true',
+                            help='Run the camera+inference pipeline without any control thread (bench/diagnostic).')
     # Verification harness for dual-camera switching. When set and 2+ cameras
     # are configured, a daemon thread calls CameraSwitcher.toggle() every N
     # seconds so we can confirm in the log that the switch propagates: each
@@ -383,8 +453,9 @@ def main():
     arg_parser.add_argument('--test-camera-switch-s', type=float, default=None,
                             help='Toggle active camera every N seconds (dual-camera verification only)')
 
-    config = Config.load(Path(__file__).resolve().parent / "config.yaml")
+    config = Config.load(config_path)
     config = replace(config, DEBUG=DEBUG)
+    logger.info("!!! Loaded config from %s", config_path)
 
     # bytetrack is an Optional section: present (non-None) enables tracking,
     # null / enabled=false disables it. Check the object, not a flag.
@@ -419,6 +490,7 @@ def main():
             active_id=camera_section.active_id,
             switch_to_wide_size=camera_section.switch_to_wide_size,
             switch_to_zoom_size=camera_section.switch_to_zoom_size,
+            exposure_time_us=camera_section.exposure_time_us,
         )
         logger.info("!!! Cameras configured: %s, active=%d, shared caps: %dx%d@%dfps %s, thresholds: wide>=%.3f zoom<=%.3f",
                     [(c.camera_id, c.name) for c in camera_configs],
@@ -469,8 +541,14 @@ def main():
         config = replace(config, drone=replace(config.drone,
                                                connection_string=app.options_menu.connection_string))
 
+    vision_only = getattr(app.options_menu, 'vision_only', False)
     action_thread = None
-    if app.options_menu.action == 'platform':
+    if vision_only:
+        logger.warning("!!! VISION-ONLY mode: no control thread; pipeline starts immediately (bench/diagnostic).")
+        # The pipeline normally waits for the controller to signal readiness on
+        # `event`; with no controller, set it now so app.run() starts capture.
+        event.set()
+    elif app.options_menu.action == 'platform':
         action_thread = threading.Thread(
             target = platform_controlling_thread,
             args = (
@@ -528,7 +606,8 @@ def main():
 
     threading.excepthook = _action_thread_excepthook
 
-    action_thread.start()
+    if action_thread is not None:
+        action_thread.start()
     app.add_shutdown_callback(lambda: detections_queue.put(STOP))
 
     sink = MultiSink([
@@ -576,7 +655,8 @@ def main():
     app.run(event)
     print("Done !!!")
     detections_queue.put(STOP)
-    action_thread.join()
+    if action_thread is not None:
+        action_thread.join()
 
     # Re-raise a control-thread crash captured by the excepthook so the
     # process exits non-zero (caller scripts / systemd / CI must be able

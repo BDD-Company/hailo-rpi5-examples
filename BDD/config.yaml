@@ -112,6 +112,11 @@ camera:
   switch_to_wide_size: 0.25
   # Relative target size (or smaller) that triggers switching to narrow-angle (zoomed) camera.
   switch_to_zoom_size: 0.015
+  # Stage-A latency: manual exposure pin in microseconds. 0 = auto-exposure (AE
+  # picks the integration time). A short pin (~8000) disables AE, which steadies
+  # 30 fps in lower light and cuts/de-jitters Stage-A latency — but needs enough
+  # light, so validate on-scene before enabling. See experiments/camera-stage-a-latency.md.
+  exposure_time_us: 0
   cameras:
     # NOTE: must be at least 1 camera
     - camera_id: 0
