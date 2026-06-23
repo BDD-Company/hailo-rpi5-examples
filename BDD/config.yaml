@@ -122,6 +122,18 @@ camera:
   # light; raise this (sensor min 1.0) instead of lengthening the shutter. Only
   # applies when exposure_time_us > 0. Higher gain = more noise.
   analogue_gain: 0.0
+  # Auto-estimate-then-pin: >0 = let AE converge for this many seconds (at startup
+  # and on each camera activation), then pin the measured exposure/gain clamped to
+  # the limits below. Scene-adaptive AND low-latency; supersedes exposure_time_us.
+  # Recommended over a hand-tuned fixed pin. 0 = disabled.
+  exposure_auto_pin_s: 0.0
+  # Limits for the auto-pinned (or fixed) exposure; 0 = no limit. exposure_max_us
+  # caps the shutter to protect fps/latency — when AE wants longer, the extra light
+  # is moved into gain (up to gain_max) so the frame stays bright. e.g. 10000 +
+  # gain_max 16 keeps the shutter <=10 ms and lets gain rise to 16x.
+  exposure_min_us: 0
+  exposure_max_us: 0
+  gain_max: 0.0
   # Stage-A latency: picamera2 DMA pool depth. 2 = floor (keeps double-buffering;
   # lower worst-case capture staleness). Raise only if the sensor can't stream
   # cleanly at 2 (watch for libcamera "no buffers" warnings).

@@ -492,6 +492,10 @@ def main():
             switch_to_zoom_size=camera_section.switch_to_zoom_size,
             exposure_time_us=camera_section.exposure_time_us,
             analogue_gain=camera_section.analogue_gain,
+            exposure_auto_pin_s=camera_section.exposure_auto_pin_s,
+            exposure_min_us=camera_section.exposure_min_us,
+            exposure_max_us=camera_section.exposure_max_us,
+            gain_max=camera_section.gain_max,
             buffer_count=camera_section.buffer_count,
         )
         logger.info("!!! Cameras configured: %s, active=%d, shared caps: %dx%d@%dfps %s, thresholds: wide>=%.3f zoom<=%.3f",

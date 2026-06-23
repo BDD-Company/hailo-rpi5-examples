@@ -581,6 +581,10 @@ class CameraSwitcher:
                  switch_to_zoom_size : float = 0.015,
                  exposure_time_us : int = 0,
                  analogue_gain : float = 0.0,
+                 exposure_auto_pin_s : float = 0.0,
+                 exposure_min_us : int = 0,
+                 exposure_max_us : int = 0,
+                 gain_max : float = 0.0,
                  buffer_count : int = 2):
         if not configs:
             raise ValueError("CameraSwitcher requires at least one CameraConfig")
@@ -597,6 +601,12 @@ class CameraSwitcher:
         self.exposure_time_us = exposure_time_us
         # Manual analogue gain, paired with the exposure pin (0 = AGC chooses).
         self.analogue_gain = analogue_gain
+        # Auto-estimate-then-pin: warmup seconds + limits clamping the measured
+        # exposure/gain. See Config.Camera. 0s = disabled.
+        self.exposure_auto_pin_s = exposure_auto_pin_s
+        self.exposure_min_us = exposure_min_us
+        self.exposure_max_us = exposure_max_us
+        self.gain_max = gain_max
         # picamera2 DMA pool depth (frames in flight); 2 = floor. See Config.Camera.
         self.buffer_count = buffer_count
         # Switch policy thresholds, EMA-tested in the controller:

@@ -682,6 +682,10 @@ def picamera_thread(
         capture_video_format = camera_switcher.video_format
         exposure_time_us = getattr(camera_switcher, 'exposure_time_us', 0)
         analogue_gain = getattr(camera_switcher, 'analogue_gain', 0.0)
+        exposure_auto_pin_s = getattr(camera_switcher, 'exposure_auto_pin_s', 0.0)
+        exposure_min_us = getattr(camera_switcher, 'exposure_min_us', 0)
+        exposure_max_us = getattr(camera_switcher, 'exposure_max_us', 0)
+        gain_max = getattr(camera_switcher, 'gain_max', 0.0)
         buffer_count = getattr(camera_switcher, 'buffer_count', 2)
     else:
         capture_width = video_width
@@ -690,19 +694,43 @@ def picamera_thread(
         capture_video_format = video_format
         exposure_time_us = 0
         analogue_gain = 0.0
+        exposure_auto_pin_s = 0.0
+        exposure_min_us = 0
+        exposure_max_us = 0
+        gain_max = 0.0
         buffer_count = 2
 
-    # Stage-A latency: when a manual exposure is configured, pin it (disable AE)
-    # so the shutter is short and deterministic. A short integration enables a
-    # steady capture rate in lower light and de-jitters the capture timestamp.
-    # When pinned we must NOT re-enable AE on camera activation (below).
-    exposure_pinned = exposure_time_us > 0
-    # Manual gain only takes effect with AE off (otherwise the AGC owns it).
+    # Stage-A latency: pin the shutter (disable AE) so it is short and
+    # deterministic. Three modes (priority order):
+    #   1. exposure_auto_pin_s > 0: let AE converge for that long, then read back
+    #      and pin the measured ExposureTime/AnalogueGain (clamped). Scene-adapted
+    #      AND low-latency. Done at runtime in the capture loop.
+    #   2. exposure_time_us > 0: pin this fixed value now (+ analogue_gain).
+    #   3. else: leave AE on (auto).
+    # When pinned (either way) we must NOT re-enable AE on camera activation.
+    auto_pin_enabled = exposure_auto_pin_s > 0
+    exposure_pinned = (not auto_pin_enabled) and exposure_time_us > 0
     gain_pinned = analogue_gain > 0
+
+    def _clamp_exposure(exp_us: float, gain: float):
+        """Apply the exposure limits, shifting clipped light into gain to keep
+        brightness. Returns (int exposure_us, float gain). gain<=0 -> treated 1.0."""
+        e = float(exp_us)
+        g = float(gain) if gain and gain > 0 else 1.0
+        if exposure_max_us > 0 and e > exposure_max_us:
+            g *= e / exposure_max_us          # preserve brightness (~exp*gain)
+            e = exposure_max_us
+        if exposure_min_us > 0 and e < exposure_min_us:
+            g *= e / exposure_min_us
+            e = exposure_min_us
+        g = max(g, 1.0)
+        if gain_max > 0:
+            g = min(g, gain_max)
+        return int(round(e)), round(g, 3)
 
     camera_id = camera_config.camera_id
     log_prefix = f"[cam{camera_id}:{camera_config.name or '?'}]"
-    if gain_pinned and not exposure_pinned:
+    if gain_pinned and not (exposure_pinned or auto_pin_enabled):
         logger.warning("%s analogue_gain=%.2f set but exposure is auto (AE on) — gain will be "
                        "ignored by the AGC; set exposure_time_us>0 to pin gain", log_prefix, analogue_gain)
 
@@ -771,24 +799,30 @@ def picamera_thread(
             'AeEnable': True,
             'AwbEnable': True,
         }
-        # Stage-A latency: pin a short manual exposure when configured. Disable
-        # AE and set ExposureTime; AWB stays on. Applied before any per-camera
-        # initial_controls so an explicit per-camera ExposureTime can still win.
+        # Stage-A latency: pin a short manual exposure when a FIXED value is set.
+        # Disable AE and set ExposureTime (clamped to the limits); AWB stays on.
+        # Applied before per-camera initial_controls so a per-camera value wins.
+        # (Auto-pin mode keeps AE on here and pins later in the capture loop.)
         if exposure_pinned:
+            fixed_exp, fixed_gain = _clamp_exposure(exposure_time_us, analogue_gain)
             merged_initial['AeEnable'] = False
-            merged_initial['ExposureTime'] = exposure_time_us
-            # Pin gain too when configured, so a short shutter stays bright enough
-            # in dimmer light without lengthening the exposure (which would undo
-            # the latency win). Skipped when 0 -> the AGC's last gain is held.
-            if gain_pinned:
-                merged_initial['AnalogueGain'] = analogue_gain
+            merged_initial['ExposureTime'] = fixed_exp
+            # Pin gain too when configured (or when the clamp pushed it above 1.0),
+            # so a short shutter stays bright enough without lengthening exposure.
+            if gain_pinned or fixed_gain > 1.0:
+                merged_initial['AnalogueGain'] = fixed_gain
         if camera_config.initial_controls:
             merged_initial.update(camera_config.initial_controls)
         if picamera_controls_initial is not None:
             merged_initial.update(picamera_controls_initial)
-        logger.info("%s exposure: %s; gain: %s", log_prefix,
-                    f"MANUAL {exposure_time_us}us (AE off)" if exposure_pinned else "auto (AE on)",
-                    f"MANUAL {analogue_gain:.2f}" if (exposure_pinned and gain_pinned) else "auto")
+        if auto_pin_enabled:
+            limits = (f"[{exposure_min_us or '-'}..{exposure_max_us or '-'}]us gain<={gain_max or '-'}")
+            logger.info("%s exposure: AUTO-PIN after %.2fs warmup, limits %s", log_prefix,
+                        exposure_auto_pin_s, limits)
+        else:
+            logger.info("%s exposure: %s; gain: %s", log_prefix,
+                        f"MANUAL {exposure_time_us}us (AE off)" if exposure_pinned else "auto (AE on)",
+                        f"MANUAL {analogue_gain:.2f}" if (exposure_pinned and gain_pinned) else "auto")
         apply_controls(merged_initial)
 
         # GStreamer caps for the shared appsrc.
@@ -819,6 +853,12 @@ def picamera_thread(
 
         picam2.start()
         frame_count = 0
+
+        # Auto-pin runtime state. The warmup is timed from when the camera became
+        # ACTIVE, and we re-pin on each (re)activation so a switched-to camera
+        # adapts to its own scene (see the activation transition below).
+        auto_pin_done = False
+        active_since_monotonic = time.monotonic()
 
         # Kept only to preserve the existing sensor-timestamp reference meta
         # (used downstream for sensor→detection latency math). buffer.pts is
@@ -881,9 +921,15 @@ def picamera_thread(
                     # pinned we keep AE OFF (re-enabling it would unpin the
                     # shutter and bring back the latency/jitter we removed).
                     if is_active and was_active is False:
+                        # Re-enable AE on activation UNLESS a fixed value is pinned.
+                        # For auto-pin we also want AE on (to warm up) and we
+                        # restart the warmup so the camera re-pins to THIS scene.
                         if not exposure_pinned:
                             transition_controls['AeEnable'] = True
                         transition_controls['AwbEnable'] = True
+                        if auto_pin_enabled:
+                            auto_pin_done = False
+                            active_since_monotonic = time.monotonic()
                     apply_controls(transition_controls)
                     logger.info("%s FrameRate -> %d fps (active=%s)", log_prefix, new_fps, is_active)
                     was_active = is_active
@@ -931,6 +977,25 @@ def picamera_thread(
                 if on_failure is not None:
                     on_failure()
                 break
+
+            # Auto-pin: once AE has had `exposure_auto_pin_s` to converge on the
+            # active scene, read back its ExposureTime/AnalogueGain, clamp to the
+            # configured limits (shifting clipped exposure into gain), and pin them
+            # — turning AE off for a deterministic, short, scene-adapted shutter.
+            if auto_pin_enabled and not auto_pin_done and frame_meta is not None:
+                if (time.monotonic() - active_since_monotonic) >= exposure_auto_pin_s:
+                    meas_exp = frame_meta.get("ExposureTime")
+                    meas_gain = frame_meta.get("AnalogueGain")
+                    if meas_exp:
+                        pin_exp, pin_gain = _clamp_exposure(meas_exp, meas_gain)
+                        apply_controls({'AeEnable': False,
+                                        'ExposureTime': pin_exp,
+                                        'AnalogueGain': pin_gain})
+                        auto_pin_done = True
+                        logger.info("%s auto-pin after %.2fs: measured exp=%sus gain=%.2f -> "
+                                    "pinned exp=%dus gain=%.2f (AE off)", log_prefix,
+                                    exposure_auto_pin_s, meas_exp, float(meas_gain or 0.0),
+                                    pin_exp, pin_gain)
 
             # Convert framontigue data if necessary
             frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
