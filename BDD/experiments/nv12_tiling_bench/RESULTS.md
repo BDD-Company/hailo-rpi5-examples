@@ -146,4 +146,4 @@ Run it: `--merge --nx N --ny M [--picam]`. To use in the **app**, point the exis
 # full matrix:
 bash BDD/experiments/nv12_tiling_bench/run_matrix.sh   # -> /tmp/nv12_matrix.txt
 ```
-Raw data: `results/nv12_matrix_2026-06-23.txt`.
+Raw data: `results/nv12_matrix_2026-06-23.md` and `results/nv12_camera_2026-06-23.md`.
