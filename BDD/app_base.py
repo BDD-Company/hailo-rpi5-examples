@@ -681,6 +681,7 @@ def picamera_thread(
         capture_target_fps = camera_switcher.fps
         capture_video_format = camera_switcher.video_format
         exposure_time_us = getattr(camera_switcher, 'exposure_time_us', 0)
+        analogue_gain = getattr(camera_switcher, 'analogue_gain', 0.0)
         buffer_count = getattr(camera_switcher, 'buffer_count', 2)
     else:
         capture_width = video_width
@@ -688,6 +689,7 @@ def picamera_thread(
         capture_target_fps = target_fps
         capture_video_format = video_format
         exposure_time_us = 0
+        analogue_gain = 0.0
         buffer_count = 2
 
     # Stage-A latency: when a manual exposure is configured, pin it (disable AE)
@@ -695,9 +697,14 @@ def picamera_thread(
     # steady capture rate in lower light and de-jitters the capture timestamp.
     # When pinned we must NOT re-enable AE on camera activation (below).
     exposure_pinned = exposure_time_us > 0
+    # Manual gain only takes effect with AE off (otherwise the AGC owns it).
+    gain_pinned = analogue_gain > 0
 
     camera_id = camera_config.camera_id
     log_prefix = f"[cam{camera_id}:{camera_config.name or '?'}]"
+    if gain_pinned and not exposure_pinned:
+        logger.warning("%s analogue_gain=%.2f set but exposure is auto (AE on) — gain will be "
+                       "ignored by the AGC; set exposure_time_us>0 to pin gain", log_prefix, analogue_gain)
 
     appsrc: GstApp.AppSrc = pipeline.get_by_name(appsrc_name)
     appsrc.set_property("is-live", True)
@@ -770,12 +777,18 @@ def picamera_thread(
         if exposure_pinned:
             merged_initial['AeEnable'] = False
             merged_initial['ExposureTime'] = exposure_time_us
+            # Pin gain too when configured, so a short shutter stays bright enough
+            # in dimmer light without lengthening the exposure (which would undo
+            # the latency win). Skipped when 0 -> the AGC's last gain is held.
+            if gain_pinned:
+                merged_initial['AnalogueGain'] = analogue_gain
         if camera_config.initial_controls:
             merged_initial.update(camera_config.initial_controls)
         if picamera_controls_initial is not None:
             merged_initial.update(picamera_controls_initial)
-        logger.info("%s exposure: %s", log_prefix,
-                    f"MANUAL {exposure_time_us}us (AE off)" if exposure_pinned else "auto (AE on)")
+        logger.info("%s exposure: %s; gain: %s", log_prefix,
+                    f"MANUAL {exposure_time_us}us (AE off)" if exposure_pinned else "auto (AE on)",
+                    f"MANUAL {analogue_gain:.2f}" if (exposure_pinned and gain_pinned) else "auto")
         apply_controls(merged_initial)
 
         # GStreamer caps for the shared appsrc.

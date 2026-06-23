@@ -270,6 +270,15 @@ class Config:
         # integration). Needs enough light; see experiments/camera-stage-a-latency.md.
         exposure_time_us:     Annotated[int, Range(min=0)] = 0
 
+        # Manual analogue (sensor) gain, paired with the exposure pin above.
+        # 0 = let the AGC choose the gain; >0 = pin AnalogueGain to this value
+        # (sensor minimum is 1.0). This is what rescues a SHORT pinned exposure in
+        # dimmer light: with AE off the gain would otherwise stay at 1.0 and the
+        # frame goes dark, so raise gain instead of lengthening the shutter (which
+        # would bring back the Stage-A latency/jitter). Only takes effect with AE
+        # off, i.e. when exposure_time_us > 0. Higher gain = more sensor noise.
+        analogue_gain:        Annotated[float, Range(min=0.0)] = 0.0
+
         # Size of the picamera2/PiSP DMA buffer pool (frames in flight between the
         # sensor/ISP and the app). It caps worst-case Stage-A staleness: fewer
         # buffers => lower worst-case capture latency. 2 is the FLOOR — it keeps

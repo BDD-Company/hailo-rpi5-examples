@@ -28,14 +28,21 @@ remaining queue-depth tail (24 → 22 ms); cumulatively the p99/max **~halved**.
 incl. inference) ≈ p50 14 ms throughout. No libcamera "no buffers"/dropped-frame warnings at `buffer_count=2`.
 Thermal: ~54 °C, ARM 2.4 GHz, no active throttle at 30 fps.
 
-**Light-gating tradeoff confirmed:** at 8000 µs with AE off the gain stays pinned at 1.0, so the dim indoor
-scene underexposes (recorded mean luma ~27/255). 8000 µs is a *daylight/sky* value; production `config.yaml`
-therefore defaults `exposure_time_us: 0` (auto) and the operator tunes per field light. (A future
-`AnalogueGain` knob could rescue dim scenes without unpinning exposure.)
+**Light-gating tradeoff + the gain rescue:** at 8000 µs with AE off the gain defaults to 1.0, so a dim indoor
+scene underexposes (recorded mean luma ~27/255). The fix is `analogue_gain` (paired with the exposure pin):
+raise sensor gain instead of lengthening the shutter. Pinning `analogue_gain: 8.0` lifted the same scene to
+mean luma **~109/255** (well exposed) with **Stage-A latency unchanged** (p50 ~21 ms, p99 ~22–23 ms, 30 fps) —
+gain is a pure amplifier, it doesn't touch integration time. So a short, low-latency shutter is now usable
+well into dim light by trading gain (more noise) for brightness. 8000 µs is still a *daylight/sky* exposure;
+production `config.yaml` defaults `exposure_time_us: 0` / `analogue_gain: 0.0` (auto) and the operator tunes
+both per field light. Gain only applies when AE is off (`exposure_time_us > 0`); set otherwise it's warned and
+ignored by the AGC.
 
 **What shipped (config-driven, all in `Config.Camera`):**
 - `exposure_time_us` (0 = auto; >0 = AE off + pinned shutter). Plumbed CameraSwitcher → picamera_thread; AE
   stays off across camera activation when pinned. (Fix 3)
+- `analogue_gain` (0 = AGC; >0 = pin sensor gain, only with AE off) — rescues a short pinned shutter in dim
+  light by raising gain instead of the shutter; brightness-only, no latency cost. (Fix 3b)
 - `buffer_count` (default 2, `Range(min=2)` enforces the floor — 1 is rejected). (Fix 2)
 - Harness: `app.py --vision-only`, `--config PATH`, callback Stage-A/B percentile log, picamera alive log now
   prints actual ExposureTime/AnalogueGain. `config.test-single-imx477.yaml` for the bench box.
