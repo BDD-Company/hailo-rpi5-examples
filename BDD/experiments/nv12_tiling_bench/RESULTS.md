@@ -59,6 +59,32 @@ Same picture; whole-frame branch capped at 29.5 fps, tiling slightly better than
 5. **Tiling ↔ latency tension.** The 50–120 ms sensor→command target is already exceeded by the camera Stage-A (~150 ms) alone; tiling adds 170–435 ms more. Treat tiling as a small-object-recall tool that costs reaction time. **2×2+1 merged (~285 ms pipe, 13 fps)** is the sweet spot; 3×3+1 (435–813 ms) is likely too slow to close a control loop.
 6. **Switch yolo11n → yolov8n** (per `runtime-tiling-branch-switch-arch` memory) for higher inf/s on both chips.
 
+## LIVE CAMERA retest (2026-06-23, after reboot — imx477 back online)
+Camera recovered after a Pi reboot. Re-ran on the **real imx477** (NV12 via PiSP ISP, 1280×720@30, exposure pinned 8 ms). `capP50` = **capture→aggregator** latency (buffer PTS vs pipeline clock) = true sensor→detection e2e.
+
+- ✅ **Whole-frame NV12 capture + inference works**: **28 fps, 58 ms e2e**, zero drops (210/210). Comfortably inside the 50–120 ms target.
+- ✅ **Tiling works** on the real camera — but needed a fix (see DMABUF gotcha below).
+
+| config | inf/frame | FPS | pipe p50 | **e2e p50 (capture→det)** | e2e p90 | drops |
+|--------|-----------|-----|----------|---------------------------|---------|-------|
+| whole-frame (1×1) | 1 | **28.0** | 17 | **58** | 53→58 | 0 |
+| 2×1+1 round-robin | 3 | 18.3 | 204 | **296** | 310 | ~3% |
+| 2×2+1 round-robin | 5 | 9.5 | 413 | **506** | 520 | ~5% |
+| 3×2+1 round-robin | 7 | 6.3 | 548 | **644** | 660 | ~7% |
+| 3×3+1 round-robin | 10 | 4.1 | 705 | **802** | 815 | 10% |
+| *single tiling 2×1 (2 crops)* | 2 | 29.7 | 32 | 75 | 76 | 0 |
+| *single tiling 2×2 (4 crops)* | 4 | 16.5 | 234 | 326 | 339 | ~4% |
+| *single tiling 3×2 (6 crops)* | 6 | 10.9 | 315 | 406 | 421 | ~5% |
+| *single tiling 3×3 (9 crops)* | 9 | 7.2 | 405 | 494 | 509 | ~6% |
+
+Camera Stage-A here ≈ **41 ms** for whole-frame (capP50 58 − pipe 17), rising to ~90 ms under tiling load (CPU contention from the RGB-roundtrip copy + deeper source queue). Much lower than the ~150 ms in the dual-camera picamera2/appsrc path — the single libcamerasrc + pinned-8ms-exposure path is leaner. Merging the "+1" into one net-group still applies and would bring 2×2+1 from 506 → ~360 ms e2e / 9.5 → ~13.5 fps.
+
+### ⚠️ DMABUF gotcha (live camera + tiling)
+`libcamerasrc` hands `hailotilecropper` **DMABUF** memory it can't map → **SIGSEGV** as soon as frames flow (even 1×1). A passthrough `videoconvert NV12→NV12` does *not* copy and still crashes; a real **RGB→NV12 roundtrip** (or any genuine resize) forces a tightly-packed system-memory copy and fixes it. Whole-frame `hailonet` (no cropper) is unaffected. Baked into the `--camera` path. Better long-term fix: feed tiling from the appsrc/picamera2 (system-memory) path, or a lighter forced-copy than the RGB roundtrip.
+
+### Reboot/tmpfs note
+The reboot that fixed the camera **wiped tmpfs `~/models/`** — had to re-rsync `yolov11n_nv12.hef` from the laptop (`/media/Pets/BDD/_MODELS/experimental/`). Missing HEF → `HAILO_OPEN_FILE_FAILURE(13)` then segfault once frames flow (per deploy-model memory).
+
 ## Repro
 ```
 # on Pi

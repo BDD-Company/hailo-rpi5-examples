@@ -31,7 +31,18 @@ def make_pipeline(args):
     )
     # is-live=true + framerate caps -> operating-point test (camera-like).
     # is-live=false, no framerate -> throughput-ceiling test (push as fast as NPU accepts).
-    if args.uncapped:
+    if args.camera:
+        # real sensor, NV12 out via ISP — matches BDD app libcamerasrc caps (exposure pinned).
+        # libcamerasrc hands DMABUF memory that hailotilecropper can't map -> segfault; an
+        # RGB->NV12 roundtrip forces a tightly-packed system-memory copy (NV12->NV12 passthrough
+        # does NOT copy and still crashes). Constant cost across all tiling modes.
+        src = ("libcamerasrc name=src exposure-time-mode=manual exposure-time=8000")
+        src_caps = (
+            f"video/x-raw,format=NV12,width={args.width},height={args.height},"
+            f"framerate={args.fps}/1 ! videoconvert ! video/x-raw,format=RGB ! "
+            f"videoconvert ! video/x-raw,format=NV12"
+        )
+    elif args.uncapped:
         src_caps = f"video/x-raw,format=NV12,width={args.width},height={args.height}"
         src = f"videotestsrc name=src is-live=false num-buffers={args.num_buffers} pattern=ball"
     else:
@@ -75,7 +86,8 @@ def make_pipeline(args):
 class BranchStat:
     def __init__(self):
         self.t_in = collections.deque()
-        self.latencies = []   # ms
+        self.latencies = []   # ms, cropper-sink -> aggregator-src (inference path)
+        self.cap_lat = []     # ms, buffer-PTS(capture) -> aggregator-src (incl. camera Stage-A)
         self.out_count = 0
         self.tile_count = 0
         self.in_count = 0
@@ -98,6 +110,13 @@ def attach_probes(pipe, name, stat):
     def on_agg_out(pad, info):
         if stat.t_in:
             stat.latencies.append((time.monotonic() - stat.t_in.popleft()) * 1000.0)
+        # full capture->here latency via running-time vs buffer PTS (real-camera e2e)
+        buf = info.get_buffer()
+        clk = pipe.get_pipeline_clock()
+        if buf is not None and clk is not None and buf.pts != Gst.CLOCK_TIME_NONE:
+            now_rt = clk.get_time() - pipe.get_base_time()
+            if now_rt >= buf.pts:
+                stat.cap_lat.append((now_rt - buf.pts) / 1e6)
         stat.out_count += 1
         return Gst.PadProbeReturn.OK
 
@@ -136,6 +155,7 @@ def main():
     ap.add_argument("--maxq", type=int, default=4, help="bypass/post queue depth (latency knob)")
     ap.add_argument("--multiscale", type=int, default=0,
                     help="scale-level S: ONE cropper emits (1x1)+..+(SxS) crops via one net-group")
+    ap.add_argument("--camera", action="store_true", help="use real libcamerasrc NV12 source")
     ap.add_argument("--num-buffers", type=int, default=100000)
     args = ap.parse_args()
 
@@ -217,6 +237,7 @@ def main():
         round(tr["fps"], 1), round(tr["lat_p50"], 1), round(tr["lat_p90"], 1), round(tr["lat_p99"], 1),
         round(fr["fps"], 1), round(fr["lat_p50"], 1), round(fr["lat_p90"], 1),
         round(e2e_pipe_p50, 1), round(e2e_pipe_p90, 1),
+        round(pct(tile.cap_lat, 50), 1), round(pct(tile.cap_lat, 90), 1),  # capture->agg (real e2e)
         round(temp0, 1), round(temp1, 1),
         f"{tr['out']}/{tr['in']}",
     ]))
