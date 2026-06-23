@@ -108,6 +108,35 @@ Same throughput, ~40 ms lower e2e, and no drops at low tile counts — **and it 
 
 **Recommendation for the app:** when running tiling, switch the picamera2/appsrc producer from RGB888 to `format="NV12"` and feed the cropper directly. Whole-frame stays simplest of all (`hailonet`, no cropper).
 
+## Single-net-group MERGE (implemented + measured) — the throughput fix
+The round-robin "+1" runs tiles and the whole frame on **two** hailonets; the scheduler is
+frame-fair not cost-fair, so the cheap whole-frame branch hogs ~half the NPU and starves
+tiling. The fix is to run all `N×M + 1` crops through **one** hailonet.
+
+Stock elements can't do this cleanly: `hailotilecropper` single-scale gives exactly `N×M`
+(no whole frame); multi-scale gives `main grid + Σi²` pyramid (e.g. scale-2 = 9 crops, not 5
+— measured), never a clean `N×M+1`; and `hailotileaggregator` has no `filter-streams`, so you
+can't demux one hailonet's output back to two aggregators via `hailoroundrobin`.
+
+So the merge is a **custom hailocropper crop `.so`** (`cropper/tiles_and_whole_cropper.cpp`,
+~40 LOC) that emits the `N×M` grid **plus** one whole-frame ROI. Topology is the app's
+existing one — `hailocropper(custom .so) → hailonet → hailoaggregator` — just with `N×M+1`
+crops in **one net-group**. Grid via env `TILES_X`/`TILES_Y`. Build: `cropper/build.sh`.
+
+Measured (synthetic, uncapped ceiling) — crops/frame verified `== N×M+1`:
+| mode | round-robin (2 nets) | **merge (1 net-group)** | gain |
+|------|----------------------|-------------------------|------|
+| 2×1+1 | 16.6 fps / 348 ms | **22.1 fps / 159 ms** | +33% fps, −54% lat |
+| 2×2+1 | 8.3 fps / 472 ms  | **13.3 fps / 284 ms** | +60% fps, −40% lat |
+| 3×2+1 | 5.5 fps / 614 ms  | **9.4 fps / 344 ms**  | +71% fps, −44% lat |
+| 3×3+1 | 3.7 fps / 813 ms  | **6.5 fps / 435 ms**  | +76% fps, −47% lat |
+
+Validated live (picamera2 NV12, production source): 2×2+1 = 12.1 fps, 84/84 no drops;
+3×3+1 = 6.5 fps. NPU stays pinned at ~68 inf/s — the merge reclaims the time round-robin wasted.
+
+Run it: `--merge --nx N --ny M [--picam]`. To use in the **app**, point the existing
+`hailocropper so-path=` (BDD/pipelines.py ~289) at `libtiles_and_whole.so` with `TILES_X/Y` set.
+
 ## Repro
 ```
 # on Pi

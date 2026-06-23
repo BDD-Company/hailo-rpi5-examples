@@ -68,21 +68,32 @@ def make_pipeline(args):
     # Cropper is a two-pad fork: src_0 = bypass (original full frame) -> agg.sink_0,
     # src_1 = crops -> hailonet -> agg.sink_1. agg stitches them back to one frame.
     def branch(name, nx, ny):
-        # multi-scale scale-level S emits a pyramid (1x1)+(2x2)+...+(SxS) of crops
-        # through ONE hailonet (single net-group) -> models "+1 whole frame" with no
-        # round-robin scheduler tax. preq must hold all crops of one frame.
-        if args.multiscale:
-            geom = (f"tiling-mode=multi-scale scale-level={args.multiscale} "
-                    f"tiles-along-x-axis={args.multiscale} tiles-along-y-axis={args.multiscale}")
-            ncrops = sum(i * i for i in range(1, args.multiscale + 1))
+        if args.merge:
+            # SINGLE-NET-GROUP MERGE: one hailocropper with a custom .so that emits the
+            # N x M grid PLUS one whole-frame crop -> ONE hailonet -> ONE hailoaggregator.
+            # All N*M+1 crops are one inference stream, so there is no round-robin
+            # two-net scheduler tax. Grid passed via env TILES_X/TILES_Y (read by the .so).
+            cropper = (f"hailocropper name={name}_crop so-path={args.merge_so} "
+                       f"function-name=create_crops use-letterbox=true "
+                       f"resize-method=inter-area internal-offset=true")
+            aggregator = f"hailoaggregator name={name}_agg"
+            ncrops = nx * ny + 1
+        elif args.multiscale:
+            # multi-scale scale-level S emits main grid (tiles-along) + pyramid Sum(i^2);
+            # NOT a clean N x M + 1 (see RESULTS.md). Kept for reference/probing.
+            cropper = (f"hailotilecropper name={name}_crop tiling-mode=multi-scale "
+                       f"scale-level={args.multiscale} tiles-along-x-axis={nx} "
+                       f"tiles-along-y-axis={ny} internal-offset=true")
+            aggregator = f"hailotileaggregator name={name}_agg"
+            ncrops = nx * ny + sum(i * i for i in range(1, args.multiscale + 1))
         else:
-            geom = (f"tiling-mode=single-scale tiles-along-x-axis={nx} "
-                    f"tiles-along-y-axis={ny}")
+            cropper = (f"hailotilecropper name={name}_crop tiling-mode=single-scale "
+                       f"tiles-along-x-axis={nx} tiles-along-y-axis={ny} internal-offset=true")
+            aggregator = f"hailotileaggregator name={name}_agg"
             ncrops = nx * ny
         return (
             f"t. ! queue name={name}_q leaky=downstream max-size-buffers=2 ! "
-            f"hailotilecropper name={name}_crop {geom} internal-offset=true "
-            f"hailotileaggregator name={name}_agg "
+            f"{cropper} {aggregator} "
             f"{name}_crop.src_0 ! queue name={name}_bypass leaky=no max-size-buffers={args.maxq} ! {name}_agg.sink_0 "
             f"{name}_crop.src_1 ! queue name={name}_preq leaky=no max-size-buffers={ncrops + 1} ! "
             f"hailonet name={name}_net {common_net} ! "
@@ -204,11 +215,25 @@ def main():
     ap.add_argument("--maxq", type=int, default=4, help="bypass/post queue depth (latency knob)")
     ap.add_argument("--multiscale", type=int, default=0,
                     help="scale-level S: ONE cropper emits (1x1)+..+(SxS) crops via one net-group")
+    ap.add_argument("--merge", action="store_true",
+                    help="single-net-group merge: custom .so cropper emits NxM grid + 1 whole frame")
+    ap.add_argument("--merge-so",
+                    default="/home/bdd/hailo-rpi5-examples/BDD/experiments/nv12_tiling_bench/"
+                            "cropper/libtiles_and_whole.so",
+                    help="path to the grid+whole-frame hailocropper .so")
     ap.add_argument("--camera", action="store_true", help="use real libcamerasrc NV12 source")
     ap.add_argument("--picam", action="store_true",
                     help="picamera2 -> appsrc system-memory NV12 (zero-copy tiling, no dmabuf)")
     ap.add_argument("--num-buffers", type=int, default=100000)
     args = ap.parse_args()
+
+    if args.merge:
+        # the .so reads the grid from the environment, and the +1 whole frame is built
+        # into the cropper, so a merge run is inherently a single branch.
+        import os
+        os.environ["TILES_X"] = str(args.nx)
+        os.environ["TILES_Y"] = str(args.ny)
+        args.single = True
 
     Gst.init(None)
     desc = make_pipeline(args)
