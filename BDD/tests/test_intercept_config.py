@@ -60,3 +60,8 @@ def test_parallax_keys_present():
 def test_size_measure_contour_key():
     cfg = InterceptConfig.load_defaults()
     assert cfg.size_measure_contour is True
+
+
+def test_visual_term_perp_cap_key():
+    cfg = InterceptConfig.load_defaults()
+    assert cfg.visual_term_perp_cap == 1.0

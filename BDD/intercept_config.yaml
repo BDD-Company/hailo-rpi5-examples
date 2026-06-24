@@ -95,6 +95,7 @@ visual_mid_thresh: 0.06
 visual_near_thresh: 0.20
 visual_v_max: 30.0
 visual_climb_min: 3.0
+visual_term_perp_cap: 1.0   # cap lateral LOS-rate term to N*v_close in terminal (commit-to-close); 99=off
 
 # --- guidance: lead ---
 guidance_lead: false

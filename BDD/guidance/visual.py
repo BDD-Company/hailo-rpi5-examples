@@ -63,7 +63,7 @@ def phase_from_size(box_frac, mid_thresh, near_thresh):
 
 def visual_velocity_ned(los, los_prev, dt, box_frac, *,
                         v_far, v_close, n_gain, term_gain,
-                        mid_thresh, near_thresh, v_max, climb_min):
+                        mid_thresh, near_thresh, v_max, climb_min, perp_cap=99.0):
     """3-phase image-based velocity command (NED).
 
     los, los_prev : unit LOS vectors (NED) this frame and the previous one
@@ -90,9 +90,18 @@ def visual_velocity_ned(los, los_prev, dt, box_frac, *,
         # MID image-ProNav / NEAR terminal: close along LOS + null the LOS rotation;
         # the terminal gain is higher to drive the final in-frame miss to zero.
         g = term_gain if phase == NEAR else n_gain
-        vn = v_close * lx + g * perp_n
-        ve = v_close * ly + g * perp_e
-        vd = v_close * lz + g * perp_d
+        pcn, pce, pcd = g * perp_n, g * perp_e, g * perp_d
+        # commit-to-close: cap the lateral LOS-rate term to perp_cap*v_close so it
+        # can't overwhelm the along-LOS closing (a fast crosser otherwise makes the
+        # servo swing sideways instead of driving in -> 5-6 m near-miss).
+        _pm = math.sqrt(pcn * pcn + pce * pce + pcd * pcd)
+        _cap = perp_cap * v_close
+        if _pm > _cap and _pm > 1e-9:
+            _sc = _cap / _pm
+            pcn, pce, pcd = pcn * _sc, pce * _sc, pcd * _sc
+        vn = v_close * lx + pcn
+        ve = v_close * ly + pce
+        vd = v_close * lz + pcd
 
     # while the target is clearly above (lz<0 = up), keep at least a minimum climb so
     # the drone never stalls/sinks under it (bounded: stops once LOS is level).

@@ -115,6 +115,7 @@ class InterceptConfig:
     visual_near_thresh: float = 0.20
     visual_v_max: float = 30.0
     visual_climb_min: float = 3.0
+    visual_term_perp_cap: float = 1.0
 
     # --- guidance: lead ---
     guidance_lead: bool = False
