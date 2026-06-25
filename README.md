@@ -8,6 +8,85 @@ Welcome to the Hailo Raspberry Pi 5 Examples repository. This project showcases 
 The examples in this repository are designed to work with the Raspberry Pi AI Kit and AI HAT, and x86_64 Ubuntu machine supporting both the Hailo8 (26 TOPS) and Hailo8L (13 TOPS) AI processors.
 Visit the [Hailo Official Website](https://hailo.ai/) and [Hailo Community Forum](https://community.hailo.ai/) for more information.
 
+# BDD Interception Controller (this fork)
+
+This fork runs an autonomous **air-intercept controller** on the Raspberry Pi 5 + Hailo
+NPU. It receives video (RTP) and telemetry (MAVSDK/MAVLink) from a PX4 + Gazebo SITL host
+(or a real drone), detects the target with a Hailo YOLO model, and sends offboard
+velocity setpoints back to the flight controller.
+
+## Running
+
+```bash
+cd ~/Developer/bdd-python
+source venv_hailo_rpi_examples/bin/activate
+python BDD/app.py --action drone \
+    --mavsdk-connection udp://0.0.0.0:14540 \   # telemetry in / setpoints out
+    --rtp-port 5600 \                            # incoming video stream
+    --hef-path <model>.hef \                     # Hailo detector model
+    --control-config <params>.json               # per-run config overrides (optional)
+```
+
+The host SITL must stream to this Pi (`PX4_VIDEO_HOST_IP` / `PX4_MAVLINK_TARGET_IP` set
+to the Pi's IP). For the orchestrated SITL harness see the PX4-Autopilot fork's README.
+
+## Configuration
+
+- **`BDD/intercept_config.yaml`** — single source of truth for all defaults (grouped +
+  commented). Loaded and validated by `BDD/intercept_config.py` (`InterceptConfig`).
+- **`--control-config <json>`** — per-run overrides merged over the YAML defaults; only
+  keys that already exist are accepted (a typo fails loudly). The tuned flight configs
+  (e.g. `phased_adaptive.json`, `best_*.json`) are such override files. They enable the
+  operational mode (e.g. `guidance_phased: 1`) and the tuned gains on top of the defaults.
+
+## Key parameters
+
+**Target & optics (geometry of the size→range estimate)**
+- `target_size_m: [x, y]` — real target size (m); the red sphere is 3 m (Shahed-sized).
+- `frame_angular_size_deg: [x, y]` — camera FOV (horizontal, vertical) in degrees.
+- `distance_scale` — empirical multiplier on the monocular range estimate.
+- `size_measure_contour` — measure apparent size via Otsu contour (true, deployed) vs the
+  raw detector bbox; the bbox is vertically elongated and undershoots range.
+
+**Estimation**
+- `estimation_3d` / `estimation_3d_method` — enable 3-D world-frame target estimation.
+- `estimation_3d_max_distance_m` — beyond this range fall back to 2-D (range unreliable).
+- `pronav_use_kalman`, `pronav_kalman_q/r` — Kalman process/measurement noise for the
+  target pos/vel estimate fed to guidance.
+
+**Guidance mode (pick one; flight configs set the mode)**
+- `guidance_phased` — 3-stage range-banded FAR→MID→CLOSE (the deployed mode).
+- `guidance_lead`, `guidance_pronav`, `guidance_visual` — alternative modes.
+
+**Phased mode**
+- `phased_mid_dist` — FAR→MID handoff range (m).
+- `phased_far_vmax` — FAR velocity-command magnitude (m/s); the closing-speed lever.
+- `phased_far_speed` — drone speed used in the FAR lead-point time-to-go solve.
+- `phased_far_vz_max` — FAR vertical (climb) command cap (m/s).
+- `phased_adaptive` — scale mid_dist/pronav_n/lead_t_max/closing by estimated target speed.
+- `pronav_n`, `pronav_closing_speed`, `pronav_v_max`, `pronav_vz_max` — MID pro-nav gains/caps.
+
+**Terminal (visual servo, last metres)**
+- `visual_near_thresh` / `visual_mid_thresh` — apparent-size thresholds selecting the
+  NEAR/MID terminal phase.
+- `visual_v_close`, `visual_term_gain`, `visual_n_gain` — closing speed + LOS-rate gains.
+- `visual_term_perp_cap` — cap the lateral LOS-rate term to N·v_close so a fast crosser
+  can't make the servo swing sideways instead of driving in (commit-to-close; 99 = off).
+- `visual_climb_min`, `visual_v_max` — min climb while the target is above / overall cap.
+
+**Lead / handoff**
+- `lead_visual_dist` — range at which the phased mode hands off to the visual terminal.
+- `lead_max_alt_m` — altitude cap (per cell the harness sets it to target_alt + margin).
+- `lead_t_max` — lead time-to-go horizon.
+
+**Takeoff & detection**
+- `delay_takeof_until_n_detection_frames` — wait for N detections before takeoff.
+- `safe_takeoff_period_ns` — gentle-thrust window after takeoff.
+- `confidence_min` — minimum detection confidence to act on.
+- `bytetrack_*` — ByteTrack tracker thresholds (track/det/match/NMS, target lock).
+
+(See the inline comments in `BDD/intercept_config.yaml` for the full list.)
+
 ## Hailo Apps Infra Repository
 Hailo's official examples and pipelines are available in the [Hailo Apps Infra repo](https://github.com/hailo-ai/hailo-apps-infra) repository.
 See the Hailo Apps Infra repo for more information and documentation on how to use the pipelines and development guide.
