@@ -91,6 +91,7 @@ pd_coeff:
 
 takeoff:
   delay_until_n_detection_frames: 10
+  #TODO: change from nanoseconds to miliseconds
   duration_ns: 1000000000           # initial "safe" takeoff window
   # starting from platform with guides, make sure that initial takeoff is almost perpendicular
   # and we don't hit the guides with props.
@@ -112,6 +113,29 @@ camera:
   switch_to_wide_size: 0.25
   # Relative target size (or smaller) that triggers switching to narrow-angle (zoomed) camera.
   switch_to_zoom_size: 0.015
+
+  # --- NORMAL / well-lit profile (default) ---
+  autoexposure:
+    exposure_auto_pin_ms: 500
+    exposure_min_ms: 0
+    exposure_max_ms: 10      # shutter <=10ms: ~5ms exposure-centering, big 30fps headroom
+    gain_max: 16.0           # noise ceiling; only binds in dim light (ov5647 clamps to ~8x)
+    exposure_time_ms: 0
+    analogue_gain: 0.0
+
+  # --- DIM / low-light profile --
+  # autoexposure: #
+  #   exposure_auto_pin_ms: 500
+  #   exposure_min_ms: 0
+  #   exposure_max_ms: 10
+  #   gain_max: 22.0
+  #   exposure_time_ms: 0
+  #   analogue_gain: 0.0
+
+  # Stage-A latency: picamera2 DMA pool depth. 2 = floor (keeps double-buffering;
+  # lower worst-case capture staleness). Raise only if the sensor can't stream
+  # cleanly at 2 (watch for libcamera "no buffers" warnings).
+  buffer_count: 2
   cameras:
     # NOTE: must be at least 1 camera
     - camera_id: 0
