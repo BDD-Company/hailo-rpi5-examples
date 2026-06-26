@@ -52,7 +52,8 @@ abundant light). With `exposure_auto_pin_s: 1.0, exposure_max_us: 10000, gain_ma
 luma **~149/255**, **fps steady 30**, Stage-A **p99 ~22 ms** after warmup, clean. So the operator sets a
 shutter ceiling (latency/fps guard) + gain ceiling (noise guard) once, and the camera self-exposes within them.
 
-**What shipped (config-driven, all in `Config.Camera`):**
+**What shipped (config-driven; exposure/gain knobs live in the optional `Config.Camera.autoexposure`
+section — set it to `null` to disable; `buffer_count` stays directly on `Config.Camera`):**
 - `exposure_time_us` (0 = auto; >0 = AE off + pinned shutter). Plumbed CameraSwitcher → picamera_thread; AE
   stays off across camera activation when pinned. (Fix 3)
 - `analogue_gain` (0 = AGC; >0 = pin sensor gain, only with AE off) — rescues a short pinned shutter in dim

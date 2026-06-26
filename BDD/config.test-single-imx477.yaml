@@ -91,14 +91,15 @@ camera:
   active_id: 0
   switch_to_wide_size: 0.25
   switch_to_zoom_size: 0.015
-  # Stage-A: auto-estimate exposure over 1s, then pin it (clamped). Shutter
+  # Stage-A: auto-estimate exposure over ~1s, then pin it (clamped). Shutter
   # capped at 10ms (protects 30fps/latency); gain may rise to 16x to stay bright.
-  exposure_auto_pin_s: 1.0
-  exposure_time_us: 0
-  analogue_gain: 0.0
-  exposure_min_us: 0
-  exposure_max_us: 10000
-  gain_max: 16.0
+  autoexposure:
+    exposure_auto_pin_s: 0.5
+    exposure_min_us: 0
+    exposure_max_us: 10000
+    gain_max: 16.0
+    exposure_time_us: 0
+    analogue_gain: 0.0
   buffer_count: 2          # Stage-A: floor DMA pool depth
   cameras:
     - camera_id: 0

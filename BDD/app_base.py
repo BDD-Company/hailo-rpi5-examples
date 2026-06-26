@@ -680,12 +680,16 @@ def picamera_thread(
         capture_height = camera_switcher.height
         capture_target_fps = camera_switcher.fps
         capture_video_format = camera_switcher.video_format
-        exposure_time_us = getattr(camera_switcher, 'exposure_time_us', 0)
-        analogue_gain = getattr(camera_switcher, 'analogue_gain', 0.0)
-        exposure_auto_pin_s = getattr(camera_switcher, 'exposure_auto_pin_s', 0.0)
-        exposure_min_us = getattr(camera_switcher, 'exposure_min_us', 0)
-        exposure_max_us = getattr(camera_switcher, 'exposure_max_us', 0)
-        gain_max = getattr(camera_switcher, 'gain_max', 0.0)
+        # Exposure/gain knobs live in an optional values object (Config.Camera.
+        # AutoExposure) or None when disabled. Duck-typed: getattr(None, x, d)->d,
+        # so a missing section degrades to plain auto-exposure.
+        ae = getattr(camera_switcher, 'autoexposure', None)
+        exposure_time_us = getattr(ae, 'exposure_time_us', 0)
+        analogue_gain = getattr(ae, 'analogue_gain', 0.0)
+        exposure_auto_pin_s = getattr(ae, 'exposure_auto_pin_s', 0.0)
+        exposure_min_us = getattr(ae, 'exposure_min_us', 0)
+        exposure_max_us = getattr(ae, 'exposure_max_us', 0)
+        gain_max = getattr(ae, 'gain_max', 0.0)
         buffer_count = getattr(camera_switcher, 'buffer_count', 2)
     else:
         capture_width = video_width
