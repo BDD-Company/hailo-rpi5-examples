@@ -114,7 +114,7 @@ camera:
   # Relative target size (or smaller) that triggers switching to narrow-angle (zoomed) camera.
   switch_to_zoom_size: 0.015
 
-  # All durations are in MILLISECONDS (float). --- NORMAL / well-lit profile (default) ---
+  # --- NORMAL / well-lit profile (default) ---
   autoexposure:
     exposure_auto_pin_ms: 500
     exposure_min_ms: 0
