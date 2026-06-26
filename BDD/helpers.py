@@ -578,9 +578,7 @@ class CameraSwitcher:
                  video_format : str = 'RGB',
                  active_id : int | None = None,
                  switch_to_wide_size : float = 0.25,
-                 switch_to_zoom_size : float = 0.015,
-                 autoexposure = None,
-                 buffer_count : int = 2):
+                 switch_to_zoom_size : float = 0.015):
         if not configs:
             raise ValueError("CameraSwitcher requires at least one CameraConfig")
         # All cameras share one appsrc → one set of caps. Hold them here so
@@ -591,14 +589,10 @@ class CameraSwitcher:
         self.height = height
         self.fps = fps
         self.video_format = video_format
-        # Exposure/gain control for the picamera producer: a values-only object
-        # with the Config.Camera.AutoExposure fields (exposure_time_ms,
-        # analogue_gain, exposure_auto_pin_ms, exposure_min_ms, exposure_max_ms,
-        # gain_max), or None to leave plain auto-exposure on. Read field-by-field
-        # by picamera_thread (duck-typed, no config import here).
-        self.autoexposure = autoexposure
-        # picamera2 DMA pool depth (frames in flight); 2 = floor. See Config.Camera.
-        self.buffer_count = buffer_count
+        # NOTE: exposure/gain (autoexposure) and buffer_count are NOT held here —
+        # the producer reads them straight off the validated Config.Camera object
+        # (app.camera_settings). CameraSwitcher carries only the shared caps above
+        # plus the runtime active-camera state / per-camera configs below.
         # Switch policy thresholds, EMA-tested in the controller:
         #   zoom→wide fires when EMA(max(w,h)) >= switch_to_wide_size
         #   wide→zoom fires when EMA(max(w,h)) <= switch_to_zoom_size

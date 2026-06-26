@@ -70,6 +70,7 @@ try:
 except ImportError:
     pass # Available only on Pi OS
 
+from config import Config
 
 import logging
 
@@ -553,6 +554,7 @@ class GStreamerApp:
                         kwargs={
                             'camera_config': cam_cfg,
                             'camera_switcher': camera_switcher,
+                            'camera_settings': getattr(self, 'camera_settings', None),
                             'on_failure': on_picam_failure,
                         },
                         name=f"picam-{cam_cfg.camera_id}-{cam_cfg.name or 'cam'}",
@@ -563,7 +565,10 @@ class GStreamerApp:
                 picam_thread = threading.Thread(
                     target=picamera_thread,
                     args=(self.pipeline, self.video_width, self.video_height, self.video_format),
-                    kwargs={'on_failure': on_picam_failure},
+                    kwargs={
+                        'camera_settings': getattr(self, 'camera_settings', None),
+                        'on_failure': on_picam_failure,
+                    },
                     name="picam",
                 )
                 self.threads.append(picam_thread)
@@ -638,6 +643,7 @@ def picamera_thread(
         video_format,
         camera_config=None,
         camera_switcher=None,
+        camera_settings : Config.Camera = None,
         picamera_config=None,
         target_fps = 30,  # aligns appsrc caps with the pipeline's 30/1 -> no videorate duplication
         picamera_controls_initial = None,
@@ -675,36 +681,35 @@ def picamera_thread(
     # when a CameraSwitcher is provided, everyone reads from there so all
     # producers and the shared appsrc agree on caps. Without a switcher we
     # fall back to the args passed into the function (legacy single-cam).
+    # Shared caps (resolution/fps/format) come from the CameraSwitcher — it is the
+    # single source of truth for the one appsrc all producers share (L4).
     if camera_switcher is not None:
         capture_width = camera_switcher.width
         capture_height = camera_switcher.height
         capture_target_fps = camera_switcher.fps
         capture_video_format = camera_switcher.video_format
-        # Exposure/gain knobs live in an optional values object (Config.Camera.
-        # AutoExposure) or None when disabled. Duck-typed: getattr(None, x, d)->d,
-        # so a missing section degrades to plain auto-exposure. Config durations are
-        # in MILLISECONDS; convert here to picamera2's native microseconds (and to
-        # seconds for the warmup timer) so the logic below stays in those units.
-        ae = getattr(camera_switcher, 'autoexposure', None)
-        exposure_time_us = getattr(ae, 'exposure_time_ms', 0) * 1000
-        analogue_gain = getattr(ae, 'analogue_gain', 0.0)
-        exposure_auto_pin_s = getattr(ae, 'exposure_auto_pin_ms', 0) / 1000.0
-        exposure_min_us = getattr(ae, 'exposure_min_ms', 0) * 1000
-        exposure_max_us = getattr(ae, 'exposure_max_ms', 0) * 1000
-        gain_max = getattr(ae, 'gain_max', 0.0)
-        buffer_count = getattr(camera_switcher, 'buffer_count', 2)
     else:
         capture_width = video_width
         capture_height = video_height
         capture_target_fps = target_fps
         capture_video_format = video_format
-        exposure_time_us = 0
-        analogue_gain = 0.0
-        exposure_auto_pin_s = 0.0
-        exposure_min_us = 0
-        exposure_max_us = 0
-        gain_max = 0.0
-        buffer_count = 2
+
+    # Exposure/gain + DMA pool depth come from the validated Config.Camera object
+    # (`camera_settings`) — NOT the CameraSwitcher, which holds only runtime
+    # active-camera state + the shared caps above. Duck-typed + None-safe
+    # (getattr(None, x, d) -> d), so an absent section/object degrades to plain
+    # auto-exposure with the default pool depth. `autoexposure` is itself optional
+    # (Config.Camera.AutoExposure or None). Config durations are in MILLISECONDS;
+    # convert here to picamera2's native microseconds (and to seconds for the
+    # warmup timer) so the logic below stays in those units.
+    ae = getattr(camera_settings, 'autoexposure', None)
+    exposure_time_us = getattr(ae, 'exposure_time_ms', 0) * 1000
+    analogue_gain = getattr(ae, 'analogue_gain', 0.0)
+    exposure_auto_pin_s = getattr(ae, 'exposure_auto_pin_ms', 0) / 1000.0
+    exposure_min_us = getattr(ae, 'exposure_min_ms', 0) * 1000
+    exposure_max_us = getattr(ae, 'exposure_max_ms', 0) * 1000
+    gain_max = getattr(ae, 'gain_max', 0.0)
+    buffer_count = getattr(camera_settings, 'buffer_count', 2)
 
     # Stage-A latency: pin the shutter (disable AE) so it is short and
     # deterministic. Three modes (priority order):

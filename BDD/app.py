@@ -490,8 +490,6 @@ def main():
             active_id=camera_section.active_id,
             switch_to_wide_size=camera_section.switch_to_wide_size,
             switch_to_zoom_size=camera_section.switch_to_zoom_size,
-            autoexposure=camera_section.autoexposure,
-            buffer_count=camera_section.buffer_count,
         )
         logger.info("!!! Cameras configured: %s, active=%d, shared caps: %dx%d@%dfps %s, thresholds: wide>=%.3f zoom<=%.3f",
                     [(c.camera_id, c.name) for c in camera_configs],
@@ -512,6 +510,10 @@ def main():
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
+    # The validated camera config section is the source of truth for exposure/gain
+    # (autoexposure) and buffer_count; the producer reads them straight off this
+    # Config.Camera object rather than via the CameraSwitcher.
+    app.camera_settings = camera_section
 
     # Optional dual-camera switching verification harness. The thread drives
     # the same CameraSwitcher.toggle() that production policy will use, so a
