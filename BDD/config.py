@@ -264,10 +264,6 @@ class Config:
 
         @dataclass(slots=True, kw_only=True, frozen=True)
         class AutoExposure:
-            # All durations here are in MILLISECONDS (float, `_ms` suffix) — one
-            # time base for the whole section. The producer converts to picamera2's
-            # native microseconds / to seconds for the warmup timer at the boundary.
-
             # Manual exposure pin (Stage-A latency). 0 = leave auto-exposure on (AE
             # picks the integration time). >0 = disable AE and pin the shutter to this
             # many milliseconds. A short shutter (~8 ms) both enables a steady 30 fps
@@ -275,7 +271,6 @@ class Config:
             # "moment" instead of smearing it across a long integration). Needs enough
             # light; see experiments/camera-stage-a-latency.md.
             exposure_time_ms:     Annotated[int, Range(min=0)] = 0
-
             # Auto-estimate-then-pin exposure. >0 = run auto-exposure for this many
             # milliseconds at startup (and again whenever a camera becomes active),
             # then READ BACK the AE-converged ExposureTime/AnalogueGain and pin them —
@@ -290,10 +285,10 @@ class Config:
             # to gain_max) so brightness is preserved instead of the frame going dark.
             exposure_min_ms:      Annotated[int, Range(min=0)] = 0
             exposure_max_ms:      Annotated[int, Range(min=0)] = 0
+
             # Upper limit on the (auto-pinned/compensated) gain; 0 = no cap. Bounds the
             # noise the brightness-compensation above is allowed to add.
             gain_max:             Annotated[float, Range(min=0.0)] = 0.0
-
             # Manual analogue (sensor) gain, paired with the exposure pin above.
             # 0 = let the AGC choose the gain; >0 = pin AnalogueGain to this value
             # (sensor minimum is 1.0). This is what rescues a SHORT pinned exposure in
