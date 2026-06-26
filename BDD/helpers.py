@@ -592,8 +592,8 @@ class CameraSwitcher:
         self.fps = fps
         self.video_format = video_format
         # Exposure/gain control for the picamera producer: a values-only object
-        # with the Config.Camera.AutoExposure fields (exposure_time_us,
-        # analogue_gain, exposure_auto_pin_s, exposure_min_us, exposure_max_us,
+        # with the Config.Camera.AutoExposure fields (exposure_time_ms,
+        # analogue_gain, exposure_auto_pin_ms, exposure_min_ms, exposure_max_ms,
         # gain_max), or None to leave plain auto-exposure on. Read field-by-field
         # by picamera_thread (duck-typed, no config import here).
         self.autoexposure = autoexposure

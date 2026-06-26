@@ -34,31 +34,31 @@ raise sensor gain instead of lengthening the shutter. Pinning `analogue_gain: 8.
 mean luma **~109/255** (well exposed) with **Stage-A latency unchanged** (p50 ~21 ms, p99 ~22–23 ms, 30 fps) —
 gain is a pure amplifier, it doesn't touch integration time. So a short, low-latency shutter is now usable
 well into dim light by trading gain (more noise) for brightness. 8000 µs is still a *daylight/sky* exposure;
-production `config.yaml` defaults `exposure_time_us: 0` / `analogue_gain: 0.0` (auto) and the operator tunes
-both per field light. Gain only applies when AE is off (`exposure_time_us > 0`); set otherwise it's warned and
+production `config.yaml` defaults `exposure_time_ms: 0` / `analogue_gain: 0.0` (auto) and the operator tunes
+both per field light. Gain only applies when AE is off (`exposure_time_ms > 0`); set otherwise it's warned and
 ignored by the AGC.
 
-**Auto-estimate-then-pin (`exposure_auto_pin_s`, recommended over a hand-tuned fixed pin).** Run AE for a
+**Auto-estimate-then-pin (`exposure_auto_pin_ms`, recommended over a hand-tuned fixed pin).** Run AE for a
 short warmup, then read back its converged ExposureTime/AnalogueGain and pin them — scene-adapted *and*
-deterministic/short. The AE estimate is a guide, clamped by `exposure_min_us` / `exposure_max_us` / `gain_max`;
-when AE wants a longer exposure than `exposure_max_us`, the clipped light is shifted into gain (up to
+deterministic/short. The AE estimate is a guide, clamped by `exposure_min_ms` / `exposure_max_ms` / `gain_max`;
+when AE wants a longer exposure than `exposure_max_ms`, the clipped light is shifted into gain (up to
 `gain_max`) so brightness is preserved. Re-runs on each camera (re)activation so a switched-to camera adapts
 to its own scene.
 
 This also corrected a wrong assumption: the bench room is actually **dim**. Given 1 s, AE converged to
 **33 ms @ gain 6.74** (i.e. baseline "30 fps" was AE pushing the shutter to the frame-duration limit, not
-abundant light). With `exposure_auto_pin_s: 1.0, exposure_max_us: 10000, gain_max: 16`:
+abundant light). With `exposure_auto_pin_ms: 1000, exposure_max_ms: 10, gain_max: 16`:
 `measured 33013 µs / 6.74 → pinned 10000 µs / 16.0` (shutter 3.3× shorter, light moved to gain). Result: mean
 luma **~149/255**, **fps steady 30**, Stage-A **p99 ~22 ms** after warmup, clean. So the operator sets a
 shutter ceiling (latency/fps guard) + gain ceiling (noise guard) once, and the camera self-exposes within them.
 
 **What shipped (config-driven; exposure/gain knobs live in the optional `Config.Camera.autoexposure`
 section — set it to `null` to disable; `buffer_count` stays directly on `Config.Camera`):**
-- `exposure_time_us` (0 = auto; >0 = AE off + pinned shutter). Plumbed CameraSwitcher → picamera_thread; AE
+- `exposure_time_ms` (0 = auto; >0 = AE off + pinned shutter). Plumbed CameraSwitcher → picamera_thread; AE
   stays off across camera activation when pinned. (Fix 3)
 - `analogue_gain` (0 = AGC; >0 = pin sensor gain, only with AE off) — rescues a short pinned shutter in dim
   light by raising gain instead of the shutter; brightness-only, no latency cost. (Fix 3b)
-- `exposure_auto_pin_s` + `exposure_min_us` / `exposure_max_us` / `gain_max` — auto-estimate exposure over a
+- `exposure_auto_pin_ms` + `exposure_min_ms` / `exposure_max_ms` / `gain_max` — auto-estimate exposure over a
   warmup then pin it clamped to the limits (shutter ceiling preserves fps/latency, gain absorbs the rest).
   Re-pins on camera (re)activation. Supersedes the fixed pin. (Fix 3c)
 - `buffer_count` (default 2, `Range(min=2)` enforces the floor — 1 is rejected). (Fix 2)
