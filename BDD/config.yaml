@@ -116,20 +116,20 @@ camera:
 
   # All durations are in MILLISECONDS (float). --- NORMAL / well-lit profile (default) ---
   autoexposure:
-    exposure_auto_pin_ms: 500.0
-    exposure_min_ms: 0.0
-    exposure_max_ms: 10.0    # shutter <=10ms: ~5ms exposure-centering, big 30fps headroom
+    exposure_auto_pin_ms: 500
+    exposure_min_ms: 0
+    exposure_max_ms: 10      # shutter <=10ms: ~5ms exposure-centering, big 30fps headroom
     gain_max: 16.0           # noise ceiling; only binds in dim light (ov5647 clamps to ~8x)
-    exposure_time_ms: 0.0
+    exposure_time_ms: 0
     analogue_gain: 0.0
 
   # --- DIM / low-light profile --
   # autoexposure: #
-  #   exposure_auto_pin_ms: 500.0
-  #   exposure_min_ms: 0.0
-  #   exposure_max_ms: 10.0
+  #   exposure_auto_pin_ms: 500
+  #   exposure_min_ms: 0
+  #   exposure_max_ms: 10
   #   gain_max: 22.0
-  #   exposure_time_ms: 0.0
+  #   exposure_time_ms: 0
   #   analogue_gain: 0.0
 
   # Stage-A latency: picamera2 DMA pool depth. 2 = floor (keeps double-buffering;

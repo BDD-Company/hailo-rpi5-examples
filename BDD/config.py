@@ -274,7 +274,25 @@ class Config:
             # in lower light AND cuts/​de-jitters Stage-A latency (centres the captured
             # "moment" instead of smearing it across a long integration). Needs enough
             # light; see experiments/camera-stage-a-latency.md.
-            exposure_time_ms:     Annotated[float, Range(min=0.0)] = 0.0
+            exposure_time_ms:     Annotated[int, Range(min=0)] = 0
+
+            # Auto-estimate-then-pin exposure. >0 = run auto-exposure for this many
+            # milliseconds at startup (and again whenever a camera becomes active),
+            # then READ BACK the AE-converged ExposureTime/AnalogueGain and pin them —
+            # so the shutter is scene-adapted AND then deterministic/short (no ongoing
+            # AE jitter). The AE estimate is a GUIDE, clamped by the limits below. This
+            # supersedes the fixed exposure_time_ms pin when set. 0 = disabled.
+            exposure_auto_pin_ms: Annotated[int, Range(min=0)] = 0
+            # Limits applied to the auto-pinned (or fixed) exposure, in ms. 0 = no
+            # limit. exposure_max_ms is the important one: it caps the shutter to
+            # protect the frame rate and Stage-A latency. When AE wants a LONGER
+            # exposure than the cap, the excess light is shifted into AnalogueGain (up
+            # to gain_max) so brightness is preserved instead of the frame going dark.
+            exposure_min_ms:      Annotated[int, Range(min=0)] = 0
+            exposure_max_ms:      Annotated[int, Range(min=0)] = 0
+            # Upper limit on the (auto-pinned/compensated) gain; 0 = no cap. Bounds the
+            # noise the brightness-compensation above is allowed to add.
+            gain_max:             Annotated[float, Range(min=0.0)] = 0.0
 
             # Manual analogue (sensor) gain, paired with the exposure pin above.
             # 0 = let the AGC choose the gain; >0 = pin AnalogueGain to this value
@@ -284,25 +302,7 @@ class Config:
             # would bring back the Stage-A latency/jitter). Only takes effect with AE
             # off, i.e. when exposure_time_ms > 0. Higher gain = more sensor noise.
             analogue_gain:        Annotated[float, Range(min=0.0)] = 0.0
-
-            # Auto-estimate-then-pin exposure. >0 = run auto-exposure for this many
-            # milliseconds at startup (and again whenever a camera becomes active),
-            # then READ BACK the AE-converged ExposureTime/AnalogueGain and pin them —
-            # so the shutter is scene-adapted AND then deterministic/short (no ongoing
-            # AE jitter). The AE estimate is a GUIDE, clamped by the limits below. This
-            # supersedes the fixed exposure_time_ms pin when set. 0 = disabled.
-            exposure_auto_pin_ms: Annotated[float, Range(min=0.0)] = 0.0
-            # Limits applied to the auto-pinned (or fixed) exposure, in ms. 0 = no
-            # limit. exposure_max_ms is the important one: it caps the shutter to
-            # protect the frame rate and Stage-A latency. When AE wants a LONGER
-            # exposure than the cap, the excess light is shifted into AnalogueGain (up
-            # to gain_max) so brightness is preserved instead of the frame going dark.
-            exposure_min_ms:      Annotated[float, Range(min=0.0)] = 0.0
-            exposure_max_ms:      Annotated[float, Range(min=0.0)] = 0.0
-            # Upper limit on the (auto-pinned/compensated) gain; 0 = no cap. Bounds the
-            # noise the brightness-compensation above is allowed to add.
-            gain_max:             Annotated[float, Range(min=0.0)] = 0.0
-        autoexposure:         Optional[AutoExposure]
+        autoexposure:         AutoExposure
 
         # Size of the picamera2/PiSP DMA buffer pool (frames in flight between the
         # sensor/ISP and the app). It caps worst-case Stage-A staleness: fewer

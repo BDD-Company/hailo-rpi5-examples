@@ -94,11 +94,11 @@ camera:
   # Stage-A: auto-estimate exposure over ~1s, then pin it (clamped). Shutter
   # capped at 10ms (protects 30fps/latency); gain may rise to 16x to stay bright.
   autoexposure:
-    exposure_auto_pin_ms: 500.0
-    exposure_min_ms: 0.0
-    exposure_max_ms: 10.0
+    exposure_auto_pin_ms: 500
+    exposure_min_ms: 0
+    exposure_max_ms: 10
     gain_max: 16.0
-    exposure_time_ms: 0.0
+    exposure_time_ms: 0
     analogue_gain: 0.0
   buffer_count: 2          # Stage-A: floor DMA pool depth
   cameras:

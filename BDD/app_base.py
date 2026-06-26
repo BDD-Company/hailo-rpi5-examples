@@ -686,11 +686,11 @@ def picamera_thread(
         # in MILLISECONDS; convert here to picamera2's native microseconds (and to
         # seconds for the warmup timer) so the logic below stays in those units.
         ae = getattr(camera_switcher, 'autoexposure', None)
-        exposure_time_us = int(round(getattr(ae, 'exposure_time_ms', 0.0) * 1000))
+        exposure_time_us = getattr(ae, 'exposure_time_ms', 0) * 1000
         analogue_gain = getattr(ae, 'analogue_gain', 0.0)
-        exposure_auto_pin_s = getattr(ae, 'exposure_auto_pin_ms', 0.0) / 1000.0
-        exposure_min_us = int(round(getattr(ae, 'exposure_min_ms', 0.0) * 1000))
-        exposure_max_us = int(round(getattr(ae, 'exposure_max_ms', 0.0) * 1000))
+        exposure_auto_pin_s = getattr(ae, 'exposure_auto_pin_ms', 0) / 1000.0
+        exposure_min_us = getattr(ae, 'exposure_min_ms', 0) * 1000
+        exposure_max_us = getattr(ae, 'exposure_max_ms', 0) * 1000
         gain_max = getattr(ae, 'gain_max', 0.0)
         buffer_count = getattr(camera_switcher, 'buffer_count', 2)
     else:
