@@ -115,6 +115,12 @@ camera:
   switch_to_zoom_size: 0.015
   # Stage-A latency: exposure/gain control (Optional section). Set to `null` to
   # disable entirely (plain auto-exposure). See experiments/camera-stage-a-latency.md.
+  #
+  # Two tuned profiles below — keep exactly ONE `autoexposure:` block uncommented.
+  # They differ only in gain_max: the shutter ceiling (latency) stays 10 ms in both;
+  # dim light just needs more gain headroom (at the cost of more sensor noise).
+  #
+  # --- NORMAL / well-lit profile (default) ---
   autoexposure:
     # Auto-estimate-then-pin: >0 = let AE converge for this many seconds (at startup
     # and on each camera activation), then pin the measured exposure/gain clamped to
@@ -133,6 +139,20 @@ camera:
     # it to keep a short shutter bright in dim light. 0/0 = leave auto-exposure on.
     exposure_time_us: 0
     analogue_gain: 0.0
+  #
+  # --- DIM / low-light profile (swap in by uncommenting this block AND commenting
+  #     the one above). Same 10 ms shutter, but gain may climb to the imx477 analogue
+  #     ceiling (~22) for brightness in dim scenes — noisier. Measured on the bench:
+  #     AE wanted 33 ms @ g~10; this pins 10 ms @ g~22 -> brighter than the g16 cap.
+  #     If even g22 is too dark, raise exposure_max_us toward 16000 (costs ~3 ms
+  #     latency) as a last resort. ov5647 (wide) tops out ~8x and will look darker.
+  # autoexposure:
+  #   exposure_auto_pin_s: 0.5
+  #   exposure_min_us: 0
+  #   exposure_max_us: 10000
+  #   gain_max: 22.0
+  #   exposure_time_us: 0
+  #   analogue_gain: 0.0
   # Stage-A latency: picamera2 DMA pool depth. 2 = floor (keeps double-buffering;
   # lower worst-case capture staleness). Raise only if the sensor can't stream
   # cleanly at 2 (watch for libcamera "no buffers" warnings).
