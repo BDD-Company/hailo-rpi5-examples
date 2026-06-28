@@ -414,6 +414,14 @@ def main():
         config_path = Path(sys.argv[i + 1])
         del sys.argv[i:i + 2]
 
+    # --no-record: force the RAW video recording off regardless of config
+    # (frees ~1 CPU core for inference/tiling). Parsed from argv directly, like
+    # --DEBUG / --config above, because it gates the App() construction below.
+    no_record_flag = False
+    if "--no-record" in sys.argv:
+        no_record_flag = True
+        sys.argv.remove("--no-record")
+
     if DEBUG:
         logger.error('')
         logger.error("!!! ============================================================== !!!")
@@ -462,6 +470,10 @@ def main():
     global USE_TRACKER
     USE_TRACKER = config.bytetrack is not None
 
+    # RAW recording: on by config unless --no-record forces it off.
+    record_videos = config.record_videos and not no_record_flag
+    logger.info("!!! RAW video recording: %s", "ENABLED" if record_videos else "DISABLED")
+
     bytetracker = BYTETracker(**config.bytetrack.tracker_kwargs()) if config.bytetrack is not None else None
 
     user_data = user_app_callback_class(detections_queue, bytetracker)
@@ -507,7 +519,7 @@ def main():
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True,
+        record_videos=record_videos,
         inference=config.inference)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.

@@ -140,6 +140,12 @@ class Config:
 
     follow_target_position_ned: bool = False
 
+    # Record the camera feed to ./_DEBUG/RAW_*.mkv (x264enc, software). Costs ~1
+    # CPU core; disable to free CPU for inference/tiling (the recorded video is a
+    # debug/analysis aid, not required for control). The --no-record CLI flag
+    # forces this off regardless of the config value.
+    record_videos: bool = True
+
     @dataclass(slots=True, kw_only=True, frozen=True)
     class Inference:
         hef_model_path:      ExistingFile

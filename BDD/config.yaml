@@ -16,6 +16,10 @@ target_size_m: [2, 2]          # large balloon
 
 follow_target_position_ned: false
 
+# Record the camera feed to ./_DEBUG/RAW_*.mkv (software x264enc, ~1 CPU core).
+# Set false (or pass --no-record) to free CPU for inference/tiling.
+record_videos: true
+
 # Hailo inference: detection model + NMS post-processing. hef_model_path must
 # point to an EXISTING .hef on the machine running the app (deployed under
 # /home/bdd/models on the Pi; absent on dev hosts). labels_json is optional.
