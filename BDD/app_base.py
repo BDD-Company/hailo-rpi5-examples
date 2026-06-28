@@ -169,7 +169,11 @@ class GStreamerApp:
         self.loop = None
         # Validated Config.Camera section; a subclass sets the real one from the
         # loaded config. Defaulted here so self.camera_settings always exists.
-        self.camera_settings = None
+        self.camera_settings : Config.Camera = None
+        # Optional CameraSwitcher (multi-camera runtime active-camera state); set by
+        # the application. Defaulted so self.camera_switcher always exists; run()
+        # treats None as the legacy single-camera path.
+        self.camera_switcher = None
         self.threads = []
         self.shutdown_callbacks = []
         self.error_occurred = False
@@ -534,12 +538,12 @@ class GStreamerApp:
                 raise RuntimeError(
                     f"camera_settings must be a Config.Camera on the rpi source path, "
                     f"got {type(self.camera_settings).__name__}; pass camera_settings=config.camera to the app")
+
             # Multi-camera support: if the application supplied a CameraSwitcher,
             # spawn one capture thread per configured camera; otherwise fall back
             # to the legacy single-camera launch (the producer synthesizes a
             # default CameraConfig internally).
-            camera_switcher = getattr(self, 'camera_switcher', None)
-            if camera_switcher is not None:
+            if self.camera_switcher is not None:
                 # L4: set the shared appsrc caps ONCE, from the switcher's
                 # single source of truth, before any producer thread starts.
                 # Previously each picamera_thread set caps independently — fine
@@ -552,20 +556,20 @@ class GStreamerApp:
                     appsrc.set_property(
                         "caps",
                         Gst.Caps.from_string(
-                            f"video/x-raw, format={camera_switcher.video_format}, "
-                            f"width={camera_switcher.width}, height={camera_switcher.height}, "
-                            f"framerate={camera_switcher.fps}/1, pixel-aspect-ratio=1/1"
+                            f"video/x-raw, format={self.camera_settings.video_format}, "
+                            f"width={self.camera_settings.width}, height={self.camera_settings.height}, "
+                            f"framerate={self.camera_settings.fps}/1, pixel-aspect-ratio=1/1"
                         ),
                     )
                 else:
                     logger.warning("camera_switcher provided but 'app_source' appsrc not found; producer will fall back")
-                for cam_cfg in camera_switcher.configs():
+                for cam_cfg in self.camera_switcher.configs():
                     t = threading.Thread(
                         target=picamera_thread,
                         args=(self.pipeline, self.video_width, self.video_height, self.video_format),
                         kwargs={
                             'camera_config': cam_cfg,
-                            'camera_switcher': camera_switcher,
+                            'camera_switcher': self.camera_switcher,
                             'camera_settings': self.camera_settings,
                             'on_failure': on_picam_failure,
                         },
@@ -1144,7 +1148,7 @@ def display_user_data_frame(user_data: app_callback_class):
     cv2.destroyAllWindows()
 
 class GStreamerDetectionApp(GStreamerApp):
-    def __init__(self, app_callback, user_data, parser=None, inference=None, camera_settings=None):
+    def __init__(self, app_callback, user_data, inference : Config.Inference, camera_settings : Config.Camera, parser=None):
         if parser == None:
             parser = get_default_parser()
 
