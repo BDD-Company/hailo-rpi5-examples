@@ -780,7 +780,14 @@ def picamera_thread(
             # pipeline depth (fewer frames in flight => lower worst-case capture
             # latency); each request is released immediately after copying. Configurable
             # via Config.Camera.buffer_count; see camera-stage-a-latency.md.
-            main = {'size': (capture_width, capture_height), 'format': 'RGB888'}
+            # NV12 capture (config video_format: NV12): picamera2 delivers the
+            # planar YUV buffer directly — half the bytes of RGB888 and NO per-frame
+            # cv2 BGR->RGB on the capture thread (see the conversion below). Any
+            # colour-space conversion the model needs is done downstream by the
+            # pipeline's videoconvert (off the capture thread). Otherwise capture
+            # RGB888 as before.
+            pic_format = 'NV12' if capture_video_format == 'NV12' else 'RGB888'
+            main = {'size': (capture_width, capture_height), 'format': pic_format}
             controls = {'FrameRate': capture_target_fps}
             logger.info("%s buffer_count=%d", log_prefix, buffer_count)
             config = picam2.create_preview_configuration(main=main, controls=controls, buffer_count=buffer_count)
@@ -973,7 +980,14 @@ def picamera_thread(
                     frame_count += 1
                     processing_time_accum += time.monotonic() - proc_start_monotonic
                     continue
-                frame_data = request.make_array("main")
+                # NV12: picamera2's make_array cannot reshape planar YUV
+                # ("Format NV12 not supported"), so grab the raw packed buffer
+                # (1-D uint8, tightly packed at 1280-wide) and push it straight to
+                # the NV12 appsrc — no colour conversion. RGB888 keeps make_array.
+                if capture_video_format == 'NV12':
+                    frame_data = request.make_buffer("main")
+                else:
+                    frame_data = request.make_array("main")
                 frame_meta = request.get_metadata()
             finally:
                 request.release()
@@ -1003,9 +1017,16 @@ def picamera_thread(
                                     exposure_auto_pin_s, meas_exp, float(meas_gain or 0.0),
                                     pin_exp, pin_gain)
 
-            # Convert framontigue data if necessary
-            frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-            frame_bytes = frame.tobytes()
+            # Convert frame data if necessary. picamera2 'RGB888' actually delivers
+            # BGR byte order, so RGB needs a cv2 swap (~2.5 ms/frame on this thread).
+            # NV12 is pushed as-is: make_array("main") already returns the packed
+            # (H*3/2, W) NV12 planes that GStreamer expects for format=NV12 — no
+            # colour conversion here (the model/pipeline handles it downstream).
+            if capture_video_format == 'NV12':
+                frame_bytes = frame_data.tobytes()
+            else:
+                frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+                frame_bytes = frame.tobytes()
 
             # Drop one of the two buffer copies. The old new_wrapped(frame.tobytes())
             # copied the bytes a SECOND time into GstMemory; new_wrapped_full instead
@@ -1127,7 +1148,7 @@ def display_user_data_frame(user_data: app_callback_class):
     cv2.destroyAllWindows()
 
 class GStreamerDetectionApp(GStreamerApp):
-    def __init__(self, app_callback, user_data, parser=None, inference=None):
+    def __init__(self, app_callback, user_data, parser=None, inference=None, video_format=None):
         if parser == None:
             parser = get_default_parser()
 
@@ -1140,6 +1161,11 @@ class GStreamerDetectionApp(GStreamerApp):
         # Call the parent class constructor
         super().__init__(parser, user_data)
         # Additional initialization code can be added here
+        # Pipeline pixel format (camera capture + appsrc caps). Defaults to RGB;
+        # config.camera.video_format (e.g. NV12) flows in here so SOURCE_PIPELINE's
+        # capsfilter matches what the picamera2 producer actually pushes.
+        if video_format is not None:
+            self.video_format = video_format
         # Set Hailo parameters these parameters should be set based on the model used
         self.batch_size = 1
         # Model + NMS come from config.inference (config.yaml); CLI --hef-path /
@@ -1203,6 +1229,7 @@ class GStreamerDetectionApp(GStreamerApp):
                 video_height=self.video_height,
                 frame_rate=self.frame_rate,
                 sync=self.sync,
+                video_format=self.video_format,
                 # do_timestamp=True
         )
         detection_pipeline = INFERENCE_PIPELINE(
