@@ -15,6 +15,14 @@ It supports two transports, chosen by the connection string:
       16×11-bit channels in a 0x16 frame, like _TMP/crsf_bridge_msp_watch.py);
       telemetry over **MSP/serial** on a separate UART (default /dev/ttyAMA3 @
       115200). Needs `pyserial`, imported lazily so the sim path has no dependency.
+      Optional **pilot pass-through** (the bridge's 3rd UART, default /dev/ttyAMA0):
+      with `pilot_passthrough: true` the Pi also reads the pilot's CRSF receiver
+      and the pilot keeps ultimate authority — their sticks pass straight through
+      to the FC unless they flip the control-switch (`pilot_control_channel`,
+      default ch6/AUX3) at/above `pilot_control_threshold_us` (1500) to hand
+      control to this code. A stale/absent pilot link falls back to companion
+      control. This is the human-override path; without it a Pi crash = the FC's
+      only RC link is gone (failsafe), with no way for a pilot to take over.
 
 Either way the internal channel state is kept in **microseconds** (1000–2000,
 AETR+AUX: ch0=Roll ch1=Pitch ch2=Throttle ch3=Yaw ch4=AUX1/ARM); each transport
@@ -67,7 +75,8 @@ DEFAULT_MSP_PORT = 5761
 # CRSF (real hardware) wire format — must match _TMP/crsf_bridge_msp_watch.py
 CRSF_SYNC = 0xC8
 CRSF_FRAMETYPE_RC = 0x16
-DEFAULT_CRSF_UART = "/dev/ttyAMA2"
+DEFAULT_CRSF_UART = "/dev/ttyAMA2"      # CRSF OUT -> FC RX (we drive the FC)
+DEFAULT_CRSF_IN_UART = "/dev/ttyAMA0"   # CRSF IN  <- pilot radio receiver (override)
 DEFAULT_CRSF_BAUD = 420000
 DEFAULT_MSP_UART = "/dev/ttyAMA3"
 DEFAULT_MSP_BAUD = 115200
@@ -100,6 +109,29 @@ def _us_to_crsf(us: int) -> int:
 
     Inverse of Betaflight's `us = (crsf - 992) * 5/8 + 1500`."""
     return _clamp(int(round((us - US_MID) * 8 / 5)) + 992, 0, 0x7FF)
+
+
+def _crsf_to_us(tick: int) -> int:
+    """CRSF 11-bit tick -> RC µs (inverse of _us_to_crsf), clamped to [1000, 2000]."""
+    return _clamp(int(round((tick - 992) * 5 / 8)) + US_MID, US_MIN, US_MAX)
+
+
+def _parse_crsf_rc_channels(payload: bytes) -> list[int]:
+    """Decode a CRSF RC payload (16×11-bit LE) into 16 channel µs. Full bit
+    accumulator (reads every byte) — the lossy 2-byte unpack in the example
+    drops the high bits of channels whose 11 bits straddle a third byte."""
+    bits = 0
+    nbits = 0
+    out = []
+    it = iter(payload)
+    for _ in range(RC_NUM_CHANNELS):
+        while nbits < 11:
+            bits |= next(it) << nbits
+            nbits += 8
+        out.append(_crsf_to_us(bits & 0x7FF))
+        bits >>= 11
+        nbits -= 11
+    return out
 
 
 def _crsf_crc8(data: bytes) -> int:
@@ -199,6 +231,56 @@ class _CRSFSerialRCLink:
         return f"crsf://{self.device}@{self.baud}"
 
 
+class _CRSFSerialRCReader:
+    """Reads CRSF RC frames from a serial UART fed by the pilot's radio receiver
+    (the example's /dev/ttyAMA0). `poll()` drains whatever bytes are available,
+    parses any complete RC (0x16) frames, and returns the most recent channels as
+    16 µs values (or None if no full frame arrived). CRC-checked; bad frames skipped.
+    """
+    def __init__(self, device: str, baud: int):
+        self.device, self.baud = device, baud
+        self.ser = None
+        self._buf = bytearray()
+
+    def open(self) -> None:
+        import serial  # lazy
+        self.ser = serial.Serial(self.device, self.baud, timeout=0.005)
+
+    def poll(self) -> list[int] | None:
+        data = self.ser.read(512)
+        if data:
+            self._buf += data
+        latest = None
+        buf = self._buf
+        while len(buf) >= 3:
+            if buf[0] != CRSF_SYNC:
+                del buf[0]
+                continue
+            length = buf[1]
+            if length < 2 or length > 62:      # implausible -> resync
+                del buf[0]
+                continue
+            if len(buf) < length + 2:
+                break                          # frame not fully arrived yet
+            frame = bytes(buf[:length + 2])
+            del buf[:length + 2]
+            if _crsf_crc8(frame[2:-1]) != frame[-1]:
+                continue                       # bad CRC -> drop
+            if frame[2] == CRSF_FRAMETYPE_RC and len(frame) - 4 >= 22:
+                latest = _parse_crsf_rc_channels(frame[3:3 + 22])
+        return latest
+
+    def close(self) -> None:
+        if self.ser:
+            try:
+                self.ser.close()
+            finally:
+                self.ser = None
+
+    def __repr__(self):
+        return f"crsf-in://{self.device}@{self.baud}"
+
+
 class _TCPMSPLink:
     """MSP byte stream over TCP (BetaFlightSim UART1 bridge, :5761)."""
     def __init__(self, host: str, port: int):
@@ -282,8 +364,18 @@ class BetaflightDroneMover:
         # Telemetry (MSP) is opt-in — see module docstring on the arming guard.
         self.msp_telemetry = bool(self.config.get("msp_telemetry", False))
 
+        # Pilot pass-through (uart only): read the pilot's CRSF receiver on a 3rd
+        # UART and let the pilot keep ultimate authority. The pilot's control-switch
+        # channel decides who drives the FC — below threshold the pilot's sticks
+        # pass straight through; at/above it the companion (this code) commands.
+        # Opt-in so the 2-UART path (and the sim) are unaffected.
+        self.pilot_passthrough = bool(self.config.get("pilot_passthrough", False))
+        self.pilot_control_channel = int(self.config.get("pilot_control_channel", 6))   # AUX3
+        self.pilot_control_threshold_us = float(self.config.get("pilot_control_threshold_us", 1500))
+        self.pilot_link_timeout_s = float(self.config.get("pilot_link_timeout_s", 0.5))
+
         # Pick transports from the connection string.
-        self.mode, self.rc_link, self.msp_link = self._build_links(drone_connection_string)
+        self.mode, self.rc_link, self.rc_in_link, self.msp_link = self._build_links(drone_connection_string)
         if self.rc_rate_hz is None:
             self.rc_rate_hz = (DEFAULT_RC_RATE_CRSF_HZ if self.mode == "uart"
                                else DEFAULT_RC_RATE_UDP_HZ)
@@ -298,6 +390,13 @@ class BetaflightDroneMover:
         self._armed = False
         self.aborted = False
         self.upside_down_state = False
+
+        # Pilot input state (populated by the CRSF-in reader thread).
+        self._pilot_channels: list[int] | None = None
+        self._pilot_ts = 0.0
+        self._pilot_in_command = False
+        self._pilot_lock = threading.Lock()
+        self._pilot_thread: threading.Thread | None = None
 
         self._telemetry: dict = {}
         self._tele_lock = threading.Lock()
@@ -326,16 +425,21 @@ class BetaflightDroneMover:
     def _build_links(self, s: str | None):
         mode, host, rc_port = self._parse_connection(s)
         c = self.config
+        rc_in = None
         if mode == "uart":
             rc = _CRSFSerialRCLink(c.get("crsf_uart", DEFAULT_CRSF_UART),
                                    int(c.get("crsf_baud", DEFAULT_CRSF_BAUD)))
             msp = _SerialMSPLink(c.get("msp_uart", DEFAULT_MSP_UART),
                                  int(c.get("msp_baud", DEFAULT_MSP_BAUD)))
+            if self.pilot_passthrough:   # 3rd UART: pilot radio receiver
+                rc_in = _CRSFSerialRCReader(c.get("crsf_in_uart", DEFAULT_CRSF_IN_UART),
+                                            int(c.get("crsf_in_baud", DEFAULT_CRSF_BAUD)))
         else:
             rc = _UDPRCLink(host, int(c.get("rc_port", rc_port)))
             msp = _TCPMSPLink(c.get("msp_host", host), int(c.get("msp_port", DEFAULT_MSP_PORT)))
-        logger.info("Betaflight transport: %s  (RC %r, MSP %r)", mode, rc, msp)
-        return mode, rc, msp
+        logger.info("Betaflight transport: %s  (RC %r, MSP %r%s)", mode, rc, msp,
+                    f", pilot-in {rc_in!r}" if rc_in else "")
+        return mode, rc, rc_in, msp
 
     # -- RC channel plumbing -----------------------------------------------
     def _set_channels(self, **named: int) -> None:
@@ -345,6 +449,27 @@ class BetaflightDroneMover:
             for name, value in named.items():
                 self._channels[idx[name]] = int(_clamp(value, US_MIN, US_MAX))
 
+    def _select_output_channels(self) -> list[int]:
+        """Decide which sticks reach the FC this tick: the pilot's (pass-through)
+        or this code's (companion). The pilot keeps authority — only when their
+        control-switch is at/above threshold (and their link is fresh) do we send
+        our own channels; otherwise their sticks pass straight through. A stale or
+        absent pilot link falls back to companion control."""
+        if self.rc_in_link is not None:
+            with self._pilot_lock:
+                pilot = self._pilot_channels
+                ts = self._pilot_ts
+            if pilot is not None and (time.monotonic() - ts) < self.pilot_link_timeout_s:
+                ch = self.pilot_control_channel
+                pi_command = ch >= len(pilot) or pilot[ch] >= self.pilot_control_threshold_us
+                self._pilot_in_command = not pi_command
+                if not pi_command:
+                    return list(pilot)              # pilot flies; pass sticks through
+            else:
+                self._pilot_in_command = False
+        with self._ch_lock:
+            return list(self._channels)
+
     def _tx_loop(self) -> None:
         try:
             self.rc_link.open()
@@ -353,14 +478,45 @@ class BetaflightDroneMover:
             return
         period = 1.0 / self.rc_rate_hz
         while not self._stop.is_set():
-            with self._ch_lock:
-                ch = tuple(self._channels)
             try:
-                self.rc_link.send(ch)
+                self.rc_link.send(self._select_output_channels())
             except OSError as e:
                 logger.warning("RC send failed: %s", e)
             time.sleep(period)
         self.rc_link.close()
+
+    def _pilot_loop(self) -> None:
+        """Read the pilot's CRSF receiver and cache the latest channels for
+        _select_output_channels()."""
+        link = self.rc_in_link
+        if link is None:
+            return
+        try:
+            link.open()
+        except Exception as e:
+            logger.error("pilot CRSF-in open failed (%r): %s; pass-through off, "
+                         "companion stays in command.", link, e)
+            return
+        logger.info("pilot CRSF pass-through active on %r (control switch ch%d @ %dus)",
+                    link, self.pilot_control_channel, int(self.pilot_control_threshold_us))
+        while not self._stop.is_set():
+            try:
+                ch = link.poll()
+            except OSError as e:
+                logger.warning("pilot CRSF read error: %s", e)
+                time.sleep(0.05)
+                continue
+            if ch:
+                with self._pilot_lock:
+                    self._pilot_channels = ch
+                    self._pilot_ts = time.monotonic()
+            time.sleep(0.002)
+        link.close()
+
+    def pilot_channels(self) -> list[int] | None:
+        """Latest pilot RC channels (µs) from the receiver, or None. For logging."""
+        with self._pilot_lock:
+            return None if self._pilot_channels is None else list(self._pilot_channels)
 
     # -- lifecycle ----------------------------------------------------------
     async def startup_sequence(self, arm_attempts: int = 100, force_arm: bool = False,
@@ -376,6 +532,10 @@ class BetaflightDroneMover:
             self._stop.clear()
             self._tx_thread = threading.Thread(target=self._tx_loop, name="bf-rc-tx", daemon=True)
             self._tx_thread.start()
+
+        if self.rc_in_link is not None and self._pilot_thread is None:
+            self._pilot_thread = threading.Thread(target=self._pilot_loop, name="bf-crsf-in", daemon=True)
+            self._pilot_thread.start()
 
         if self.msp_telemetry:
             self._start_msp()
@@ -567,10 +727,12 @@ class BetaflightDroneMover:
         self._stop.set()
         if self._msp is not None:
             self._msp.close()
-        try:
-            self.rc_link.close()        # idempotent; tx loop also closes on stop
-        except Exception:
-            pass
+        for link in (self.rc_link, self.rc_in_link):   # idempotent; loops also close on stop
+            try:
+                if link is not None:
+                    link.close()
+            except Exception:
+                pass
 
 
 class _MSPClient:

@@ -105,6 +105,11 @@ async def main() -> int:
                      att["roll_deg"], att["pitch_deg"], att["yaw_deg"])
         else:
             log.info("ATT  <no MSP telemetry yet>")
+        # When pilot pass-through is configured, show the pilot's sticks + who's in command.
+        if drone.rc_in_link is not None:
+            p = drone.pilot_channels()
+            log.info("PILOT %s  in_command=%s",
+                     p[:7] if p else "<no CRSF from receiver>", drone._pilot_in_command)
         await asyncio.sleep(1.0)
 
     # RC injection check: send a distinctive pattern and read it back via MSP_RC.
