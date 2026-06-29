@@ -208,7 +208,8 @@ async def drone_controlling_thread_async(
         control_config: Config,
         output_queue = None,
         signal_event_when_ready = None,
-        camera_switcher : CameraSwitcher | None = None
+        camera_switcher : CameraSwitcher | None = None,
+        drone_class = DroneMover,
     ):
     # from math import radians
 
@@ -383,7 +384,8 @@ async def drone_controlling_thread_async(
     cpu = CPUTemperature()
     logger.info("PRE START CPU Temperature: %s°C", cpu.temperature)
 
-    drone = DroneMover(drone_connection_string, drone_config)
+    drone = drone_class(drone_connection_string, drone_config)
+    logger.info("drone backend: %s", type(drone).__name__)
     logger.debug("starting up drone... with %s, config: %s", drone_connection_string, drone_config)
 
     logger.info("POST START CPU Temperature: %s°C", cpu.temperature)

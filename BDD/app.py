@@ -19,6 +19,8 @@ from hailo_apps.hailo_app_python.core.common.core import get_default_parser
 from app_base import GStreamerDetectionApp
 from drone_controller import drone_controlling_thread
 from platform_controller import platform_controlling_thread
+from drone import DroneMover
+from betaflight_drone import BetaflightDroneMover
 
 # from mavsdk.telemetry import EulerAngle
 
@@ -568,6 +570,15 @@ def main():
             )
         )
     else:
+        # Select the DroneMover backend from config.drone.api. PX4/Pixhawk uses
+        # MAVSDK (DroneMover); Betaflight uses RC-over-UDP/MSP (BetaflightDroneMover).
+        # Both share the same API surface, so the controller treats them identically.
+        DRONE_BACKENDS = {
+            Config.Drone.API.mavsdk:     DroneMover,
+            Config.Drone.API.betaflight: BetaflightDroneMover,
+        }
+        drone_class = DRONE_BACKENDS[config.drone.api]
+        logger.info("!!! Drone API: %s -> %s", config.drone.api.value, drone_class.__name__)
         action_thread = threading.Thread(
             target = drone_controlling_thread,
             args = (
@@ -576,6 +587,7 @@ def main():
                 detections_queue
             ),
             kwargs= dict(
+                drone_class= drone_class,
                 control_config= config,
                 output_queue= output_queue,
                 signal_event_when_ready= event,

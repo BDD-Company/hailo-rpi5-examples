@@ -154,6 +154,8 @@ drone:
   #   serial:///dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00
   #   usb -- auto-discover USB device to use
   connection_string: usb
+  api: betaflight
+
   config:
     upside_down_angle_deg: 130
     upside_down_hold_s: 0.2
