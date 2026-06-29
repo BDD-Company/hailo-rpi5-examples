@@ -23,6 +23,7 @@ from hailo_apps.hailo_app_python.core.common.defines import DETECTION_APP_TITLE,
 # from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import DISPLAY_PIPELINE
 
 from pipelines import (
+    QUEUE,
     SOURCE_PIPELINE,
     INFERENCE_PIPELINE,
     INFERENCE_PIPELINE_WRAPPER,
@@ -349,6 +350,43 @@ class GStreamerApp:
                 buf.add_reference_timestamp_meta(unix_ts_caps, time.monotonic_ns(), Gst.CLOCK_TIME_NONE)
             return Gst.PadProbeReturn.OK
         pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
+
+    def switch_tiling(self, to_tiling: bool, warmup_timeout_s: float = 1.0):
+        """Hot-switch the active inference branch between whole-frame and tiling
+        (only valid when built with switchable_tiling). 4-step handover with zero
+        command gap: open the incoming valve, wait for its first output buffer,
+        flip the input-selector's active-pad, then close the outgoing valve. Same
+        hef on both hailonets => no PCIe weight reload, only the steady latency
+        steps (whole ~100ms <-> tiled >200ms). Safe to call from any thread."""
+        sel = self.pipeline.get_by_name("branch_selector")
+        v_whole = self.pipeline.get_by_name("valve_whole")
+        v_tile = self.pipeline.get_by_name("valve_tile")
+        if sel is None or v_whole is None or v_tile is None:
+            logger.warning("switch_tiling: switchable-tiling pipeline not present; ignoring")
+            return
+        target_pad_name = "sink_1" if to_tiling else "sink_0"
+        cur = sel.get_property("active-pad")
+        if cur is not None and cur.get_name() == target_pad_name:
+            return  # already there
+        incoming_valve = v_tile if to_tiling else v_whole
+        outgoing_valve = v_whole if to_tiling else v_tile
+        target_pad = sel.get_static_pad(target_pad_name)
+
+        incoming_valve.set_property("drop", False)        # 1. open incoming branch
+        ready = threading.Event()                         # 2. wait its first buffer
+        def _first_buf(pad, info, _u):
+            ready.set()
+            return Gst.PadProbeReturn.REMOVE
+        probe_id = target_pad.add_probe(Gst.PadProbeType.BUFFER, _first_buf, None)
+        if not ready.wait(warmup_timeout_s):
+            logger.warning("switch_tiling: incoming branch gave no buffer in %.1fs; switching anyway",
+                           warmup_timeout_s)
+            try: target_pad.remove_probe(probe_id)
+            except Exception: pass
+        sel.set_property("active-pad", target_pad)         # 3. flip selector (atomic)
+        outgoing_valve.set_property("drop", True)           # 4. idle the outgoing branch
+        self._tiling_active = to_tiling
+        logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
 
     def _log_pipeline_health(self):
         """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)
@@ -1154,7 +1192,7 @@ def display_user_data_frame(user_data: app_callback_class):
 
 class GStreamerDetectionApp(GStreamerApp):
     def __init__(self, app_callback, user_data, parser=None, inference=None, video_format=None,
-                 tiles=None):
+                 tiles=None, switchable_tiling=False):
         if parser == None:
             parser = get_default_parser()
 
@@ -1175,6 +1213,9 @@ class GStreamerDetectionApp(GStreamerApp):
         # Tile grid (tiles_x, tiles_y); 1×1 = whole-frame. From config.tiling / CLI.
         if tiles is not None:
             self.tiles_x, self.tiles_y = int(tiles[0]), int(tiles[1])
+        # Switchable tiling: build whole-frame + tile branches behind valves +
+        # input-selector, hot-switchable at runtime (whole-frame active at start).
+        self.switchable_tiling = bool(switchable_tiling)
         # Set Hailo parameters these parameters should be set based on the model used
         self.batch_size = 1
         # Model + NMS come from config.inference (config.yaml); CLI --hef-path /
@@ -1241,15 +1282,23 @@ class GStreamerDetectionApp(GStreamerApp):
                 video_format=self.video_format,
                 # do_timestamp=True
         )
-        detection_pipeline = INFERENCE_PIPELINE(
-            hef_path=self.hef_path,
-            post_process_so=self.post_process_so,
-            post_function_name=self.post_function_name,
-            batch_size=self.batch_size,
-            config_json=self.labels_json,
-            additional_params=self.thresholds_str)
-        detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(
-            detection_pipeline, tiles_x=self.tiles_x, tiles_y=self.tiles_y)
+        def _inference_branch(branch_name, tx, ty, share_device):
+            # One cropper+hailonet+aggregator branch. share_device adds
+            # scheduling-algorithm=1 (round-robin) so two same-hef hailonets can
+            # share one vdevice (switchable mode); same hef => no weight reload on switch.
+            inner = INFERENCE_PIPELINE(
+                hef_path=self.hef_path,
+                post_process_so=self.post_process_so,
+                post_function_name=self.post_function_name,
+                batch_size=self.batch_size,
+                config_json=self.labels_json,
+                name=branch_name,
+                additional_params=self.thresholds_str + (' scheduling-algorithm=1 ' if share_device else ''))
+            return INFERENCE_PIPELINE_WRAPPER(inner, name=f'{branch_name}_wrapper', tiles_x=tx, tiles_y=ty)
+
+        # Single-branch path keeps the historic 'inference'/'inference_wrapper'
+        # element names (latency probes + health logs reference them).
+        detection_pipeline_wrapper = _inference_branch('inference', self.tiles_x, self.tiles_y, share_device=False)
 
         tracker_pipeline = ''
         if False:
@@ -1300,9 +1349,29 @@ class GStreamerDetectionApp(GStreamerApp):
             'max-size-buffers=120 max-size-bytes=0 max-size-time=0'
         )
 
+        if self.switchable_tiling:
+            # Two valve-gated branches share the source via a tee and merge at an
+            # input-selector. Whole-frame active at startup (valve_tile closed,
+            # selector defaults to the first-linked pad = sink_0 = whole). A runtime
+            # switch (switch_tiling) opens the other valve, waits for its first
+            # buffer, flips the selector, then closes the old valve — zero command
+            # gap. Same hef on both hailonets (shared vdevice) => no PCIe reload.
+            whole_branch = _inference_branch('whole', 1, 1, share_device=True)
+            tile_branch = _inference_branch('tile', self.tiles_x, self.tiles_y, share_device=True)
+            detection_section = (
+                f'tee name=branch_src_tee '
+                f'branch_src_tee. ! {QUEUE(name="whole_gate_q")} ! valve name=valve_whole drop=false ! '
+                f'{whole_branch} ! branch_selector.sink_0 '
+                f'branch_src_tee. ! {QUEUE(name="tile_gate_q")} ! valve name=valve_tile drop=true ! '
+                f'{tile_branch} ! branch_selector.sink_1 '
+                f'input-selector name=branch_selector sync-streams=false ! '
+            )
+        else:
+            detection_section = f'{detection_pipeline_wrapper} ! '
+
         pipeline_string = (
             f'{source_pipeline} ! '
-            f'{detection_pipeline_wrapper} ! '
+            f'{detection_section}'
             f'{tracker_pipeline} '
             f'tee name=output_tee '
             f'output_tee. ! {user_callback_pipeline} ! fakesink name=detection_sink sync=false async=false '

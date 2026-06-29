@@ -163,6 +163,12 @@ class Config:
         tiles_y: Annotated[int, Range(min=1)] = 1
         # Fractional tile overlap on both axes (0..1); 0 = abutting tiles.
         overlap: Annotated[float, Range(0.0, 1.0)] = 0.0
+        # Runtime-switchable tiling: build BOTH a whole-frame branch and a
+        # tiles_x×tiles_y branch behind valves + an input-selector, and hot-switch
+        # between them at runtime (whole-frame active at startup). Lets a policy
+        # (e.g. tile-to-reacquire when the target is lost) trade latency for recall
+        # on demand. When false, tiling is static (whole-frame if 1×1, else fixed).
+        switchable: bool = False
     tiling: Tiling = field(default_factory=Tiling)
 
     @dataclass(slots=True, kw_only=True, frozen=True)
