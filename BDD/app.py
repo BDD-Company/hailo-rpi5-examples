@@ -339,12 +339,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None, video_format=None, tiles=None):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None, video_format=None, tiles=None, switchable_tiling=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
-        super().__init__(app_callback, user_data, parser, inference=inference, video_format=video_format, tiles=tiles)
+        super().__init__(app_callback, user_data, parser, inference=inference, video_format=video_format, tiles=tiles, switchable_tiling=switchable_tiling)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -458,6 +458,24 @@ def main():
         tiles_override = (int(nx), int(ny))
         del sys.argv[i:i + 2]
 
+    # --switch-tiles NxM: enable runtime-switchable tiling with an NxM tile branch
+    # (whole-frame active at startup, hot-switchable). Forces switchable on and
+    # sets the tile-branch geometry. Parsed from argv (gates App construction).
+    switch_tiles_override = None
+    if "--switch-tiles" in sys.argv:
+        i = sys.argv.index("--switch-tiles")
+        nx, _, ny = sys.argv[i + 1].lower().partition("x")
+        switch_tiles_override = (int(nx), int(ny))
+        del sys.argv[i:i + 2]
+
+    # --switch-test-s N: manual handover validation — toggle whole-frame<->tiling
+    # every N seconds (only meaningful with switchable tiling enabled).
+    switch_test_s = None
+    if "--switch-test-s" in sys.argv:
+        i = sys.argv.index("--switch-test-s")
+        switch_test_s = float(sys.argv[i + 1])
+        del sys.argv[i:i + 2]
+
     if DEBUG:
         logger.error('')
         logger.error("!!! ============================================================== !!!")
@@ -510,11 +528,24 @@ def main():
     record_videos = config.record_videos and not no_record_flag
     logger.info("!!! RAW video recording: %s", "ENABLED" if record_videos else "DISABLED")
 
-    # Tile grid: CLI --tiles wins, else config.tiling.
-    tiles = tiles_override if tiles_override is not None else (config.tiling.tiles_x, config.tiling.tiles_y)
-    logger.info("!!! Inference tiling: %dx%d (%s)", tiles[0], tiles[1],
-                "whole-frame" if tiles == (1, 1) else f"{tiles[0]*tiles[1]} tiles/frame")
-    if tiles != (1, 1):
+    # Switchable tiling: CLI --switch-tiles wins, else config.tiling.switchable.
+    # When on, the tile-branch geometry is the --switch-tiles value (or config
+    # tiles_x/y), and the pipeline builds whole-frame + tile branches hot-switchable
+    # at runtime (whole-frame active at startup).
+    switchable = switch_tiles_override is not None or config.tiling.switchable
+    if switchable:
+        tiles = switch_tiles_override if switch_tiles_override is not None \
+            else (config.tiling.tiles_x, config.tiling.tiles_y)
+        if tiles == (1, 1):
+            tiles = (2, 1)  # a 1x1 "tile branch" == whole-frame; default to 2x1
+        logger.info("!!! SWITCHABLE tiling: whole-frame <-> %dx%d (whole active at startup)",
+                    tiles[0], tiles[1])
+    else:
+        # Static tile grid: CLI --tiles wins, else config.tiling.
+        tiles = tiles_override if tiles_override is not None else (config.tiling.tiles_x, config.tiling.tiles_y)
+        logger.info("!!! Inference tiling: %dx%d (%s)", tiles[0], tiles[1],
+                    "whole-frame" if tiles == (1, 1) else f"{tiles[0]*tiles[1]} tiles/frame")
+    if not switchable and tiles != (1, 1):
         logger.warning(
             "!!! TILING %dx%d enabled (%d inferences/frame): capture->command LATENCY and CPU "
             "will be SUB-PAR vs whole-frame. On this rig only ~2 tiles stay under the 200ms "
@@ -585,7 +616,8 @@ def main():
         record_videos=record_videos,
         inference=config.inference,
         video_format=video_format,
-        tiles=tiles)
+        tiles=tiles,
+        switchable_tiling=switchable)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
@@ -607,6 +639,20 @@ def main():
                     new_id, cfg.name, cfg.frame_angular_size_deg, cfg.zoom_factor,
                 )
         threading.Thread(target=_switch_test_thread, name="camera-switch-test", daemon=True).start()
+
+    # Manual hot-switch validation: toggle whole-frame <-> tiling every N seconds
+    # so the handover (valve + input-selector) can be confirmed glitch-free on the
+    # log (BRANCH SWITCH lines, DETS continuity, StageB stepping). Only meaningful
+    # with switchable tiling; the automatic policy will call the same switch_tiling().
+    if switch_test_s and switchable:
+        def _tiling_switch_test():
+            to_tiling = True
+            while True:
+                time.sleep(switch_test_s)
+                app.switch_tiling(to_tiling)
+                to_tiling = not to_tiling
+        threading.Thread(target=_tiling_switch_test, name="tiling-switch-test", daemon=True).start()
+        logger.info("!!! tiling-switch-test: toggling whole<->tiling every %.1fs", switch_test_s)
         logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
 
     logger.info("!!! Config: %s", config)
