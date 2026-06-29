@@ -962,6 +962,24 @@ def test_config_parse_and_load_forwarders():
     assert isinstance(Config.load(CONFIG_YAML), Config)
 
 
+def test_drone_api_enum_parses_from_yaml_literal():
+    # The API enum drives the DroneMover backend switch in app.py. Its values must
+    # be the YAML literals (the parser coerces enums by value, `API(value)`), so
+    # 'mavsdk'/'betaflight' parse and anything else is rejected. Parses the Drone
+    # subsection directly — no HEF model needed.
+    base = {"connection_string": "x", "config": {}}
+    for literal, member in (("mavsdk", Config.Drone.API.mavsdk),
+                            ("betaflight", Config.Drone.API.betaflight)):
+        drone = parse_config(Config.Drone, {**base, "api": literal})
+        assert drone.api is member
+    # omitted -> default
+    assert parse_config(Config.Drone, base).api is Config.Drone.API.mavsdk
+    # unknown backend rejected with a helpful message
+    with pytest.raises(ConfigError) as ei:
+        parse_config(Config.Drone, {**base, "api": "ardupilot"})
+    assert any(p.startswith("api:") for p in ei.value.problems), ei.value.problems
+
+
 # ===========================================================================
 # Consumer contract (real controllers): a feature backed by an Optional section
 # must be gated on `section is not None`, NEVER on `section.enabled`. The

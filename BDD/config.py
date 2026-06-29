@@ -325,6 +325,14 @@ class Config:
     class Drone:
         connection_string: str = 'usb'
 
+        class API(Enum):
+            # String values so the config parser (which coerces enums by VALUE,
+            # `API(value)`) accepts the YAML literals `mavsdk` / `betaflight`.
+            # Selects the DroneMover backend class in app.py.
+            mavsdk = "mavsdk"
+            betaflight = "betaflight"
+        api : API = API.mavsdk
+
         @dataclass(slots=True, kw_only=True, frozen=True)
         class DroneControlConfig:
             """consumed by DroneMover."""
