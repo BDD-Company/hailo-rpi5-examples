@@ -2,38 +2,44 @@
 """Betaflight backend for the BDD pipeline — a drop-in alternative to `DroneMover`.
 
 This mirrors the public surface of `drone.DroneMover` (the MAVSDK/PX4 backend) so
-`drone_controller.py` can drive a Betaflight flight controller instead of PX4. It
-talks to the **BetaFlightSim** stand (Betaflight SITL + Gazebo) exactly the way
-`/media/Pets/BDD/BetaFlightSim/scripts/fly.py` does:
+`drone_controller.py` can drive a Betaflight flight controller instead of PX4.
 
-  * Control  — RC stick channels injected over **UDP** (default 127.0.0.1:9004).
-               Packet = `<d16H` (double `time.time()` + 16×uint16 µs channels),
-               values 1000–2000, AETR order:  ch0=Roll ch1=Pitch ch2=Throttle
-               ch3=Yaw ch4=AUX1(ARM).  Must be sent continuously (~100 Hz) or the
-               FC trips failsafe — a background thread handles the keepalive.
-  * Telemetry — MSP over **TCP** (default 127.0.0.1:5761).  OPTIONAL and OFF by
-               default: while an MSP client is connected Betaflight may refuse to
-               arm (`ARMING_DISABLED_MSP`, the "configurator connected" guard) and
-               the SITL only offers one TCP slot.  Enable via config
-               `msp_telemetry: true` once you've confirmed arming still works.
-               NB: in the current SITL build `MSP_RAW_IMU` returns zeros, so the
-               IMU-dependent features (belly-down yaw, lift clamp) can't be
-               validated in sim — attitude/altitude are fine.
+It supports two transports, chosen by the connection string:
+
+  * `ip://HOST[:PORT]`  — the BetaFlightSim stand (Betaflight SITL + Gazebo).
+      RC over **UDP** (default :9004, packet `<d16H` = double `time.time()` + 16×
+      uint16 µs channels, exactly like BetaFlightSim/scripts/fly.py); telemetry
+      over **MSP/TCP** (default :5761).
+  * `uart`              — real hardware on a Raspberry Pi.
+      RC over **CRSF/serial** into the FC's RX UART (default /dev/ttyAMA2 @ 420000,
+      16×11-bit channels in a 0x16 frame, like _TMP/crsf_bridge_msp_watch.py);
+      telemetry over **MSP/serial** on a separate UART (default /dev/ttyAMA3 @
+      115200). Needs `pyserial`, imported lazily so the sim path has no dependency.
+
+Either way the internal channel state is kept in **microseconds** (1000–2000,
+AETR+AUX: ch0=Roll ch1=Pitch ch2=Throttle ch3=Yaw ch4=AUX1/ARM); each transport
+converts to its own wire format. RC must be sent continuously (~100 Hz UDP /
+~250 Hz CRSF) or the FC trips failsafe — a background thread handles the keepalive.
+
+Telemetry (MSP) is OPT-IN (`msp_telemetry: true`): on the SITL an active MSP
+client can latch `ARMING_DISABLED_MSP` (the "configurator connected" guard), and
+in that build `MSP_RAW_IMU` returns zeros (attitude/altitude are fine).
 
 What works vs PX4 (see the 2026-05-18 analysis):
   * move_to_target_zenith_async  — WORKS.  roll/pitch/thrust map straight to
     sticks; ACRO (rates) and ANGLE (use_set_attitude) both supported.
   * upside-down monitor          — WORKS (attitude only).
-  * belly-down yaw / lift clamp  — needs real IMU accel (zero in this SITL).
+  * belly-down yaw / lift clamp  — needs real IMU accel (zero in the SITL).
   * move_to_target_ned           — NOT SUPPORTED.  Betaflight has no world-frame
     position controller and no GPS-free NED state.  Keep FOLLOW_TARGET_POSITION_NED
     and ESTIMATION_3D OFF; the call is a logged no-op that holds the last attitude.
 
 Connection string (passed positionally, same slot as the MAVSDK URL):
-  - "127.0.0.1"            -> RC udp 127.0.0.1:9004, MSP tcp 127.0.0.1:5761
-  - "127.0.0.1:9004"      -> RC port overridden
-  - ""/None               -> all defaults
-Per-channel scales and ports are also overridable via the config dict.
+  - "ip://127.0.0.1"        -> UDP RC :9004 + MSP/TCP :5761 (sim)
+  - "ip://127.0.0.1:9005"   -> RC port overridden
+  - "uart"                  -> CRSF/serial RC + MSP/serial (real hardware)
+  - ""/None / bare host     -> ip mode (sim), back-compat
+Ports, serial devices, baud and per-channel scales are overridable via config.
 """
 from __future__ import annotations
 
@@ -49,13 +55,25 @@ from helpers import dotdict
 
 logger = logging.getLogger(__name__)
 
-# --- RC wire format (must match BetaFlightSim/scripts/fly.py) ---------------
+# --- RC channel model (transport-independent, microseconds) -----------------
 RC_NUM_CHANNELS = 16
-RC_PACKET_FMT = "<d16H"            # double timestamp + 16×uint16 µs
 US_MIN, US_MID, US_MAX = 1000, 1500, 2000
+
+# UDP (sim) wire format — must match BetaFlightSim/scripts/fly.py
+RC_UDP_PACKET_FMT = "<d16H"        # double timestamp + 16×uint16 µs
 DEFAULT_RC_PORT = 9004
 DEFAULT_MSP_PORT = 5761
-DEFAULT_RC_RATE_HZ = 100           # keepalive cadence; <50 Hz risks failsafe
+
+# CRSF (real hardware) wire format — must match _TMP/crsf_bridge_msp_watch.py
+CRSF_SYNC = 0xC8
+CRSF_FRAMETYPE_RC = 0x16
+DEFAULT_CRSF_UART = "/dev/ttyAMA2"
+DEFAULT_CRSF_BAUD = 420000
+DEFAULT_MSP_UART = "/dev/ttyAMA3"
+DEFAULT_MSP_BAUD = 115200
+
+DEFAULT_RC_RATE_UDP_HZ = 100       # keepalive cadence; <50 Hz risks failsafe
+DEFAULT_RC_RATE_CRSF_HZ = 250      # CRSF comfortably runs faster than UDP sim
 
 # AETR + AUX channel indices
 CH_ROLL, CH_PITCH, CH_THROTTLE, CH_YAW, CH_AUX1_ARM = 0, 1, 2, 3, 4
@@ -77,6 +95,44 @@ def _to_us(value: float, full_scale: float) -> int:
     return int(round(US_MID + frac * (US_MAX - US_MID)))
 
 
+def _us_to_crsf(us: int) -> int:
+    """RC µs (1000–2000, centre 1500) -> CRSF 11-bit tick (≈191–1792, centre 992).
+
+    Inverse of Betaflight's `us = (crsf - 992) * 5/8 + 1500`."""
+    return _clamp(int(round((us - US_MID) * 8 / 5)) + 992, 0, 0x7FF)
+
+
+def _crsf_crc8(data: bytes) -> int:
+    """CRSF CRC-8/DVB-S2 (poly 0xD5) over type+payload."""
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0xD5) & 0xFF if (crc & 0x80) else (crc << 1) & 0xFF
+    return crc
+
+
+def _build_crsf_rc_frame(channels_us) -> bytes:
+    """Pack 16 µs channels into a CRSF RC frame (0x16): 16×11-bit little-endian."""
+    bits = 0
+    nbits = 0
+    payload = bytearray()
+    for us in channels_us:
+        bits |= (_us_to_crsf(us) & 0x7FF) << nbits
+        nbits += 11
+        while nbits >= 8:
+            payload.append(bits & 0xFF)
+            bits >>= 8
+            nbits -= 8
+    if nbits:
+        payload.append(bits & 0xFF)
+    length = len(payload) + 2          # type + payload + crc
+    frame = bytearray([CRSF_SYNC, length, CRSF_FRAMETYPE_RC])
+    frame += payload
+    frame.append(_crsf_crc8(frame[2:]))
+    return bytes(frame)
+
+
 def _euler_to_quaternion(roll_deg: float, pitch_deg: float, yaw_deg: float) -> dict:
     """ZYX (yaw-pitch-roll) Euler -> quaternion, matching the PX4 dict's odometry.q."""
     r, p, y = math.radians(roll_deg), math.radians(pitch_deg), math.radians(yaw_deg)
@@ -92,18 +148,123 @@ def _euler_to_quaternion(roll_deg: float, pitch_deg: float, yaw_deg: float) -> d
     }
 
 
+# ===========================================================================
+# Transports — RC injection links and MSP byte-stream links. Each pair (UDP/TCP
+# for sim, CRSF/serial for hardware) is selected from the connection string.
+# ===========================================================================
+class _UDPRCLink:
+    """RC sticks as `<d16H` UDP packets (BetaFlightSim)."""
+    def __init__(self, host: str, port: int):
+        self.addr = (host, port)
+        self.sock: socket.socket | None = None
+
+    def open(self) -> None:
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def send(self, channels_us) -> None:
+        self.sock.sendto(struct.pack(RC_UDP_PACKET_FMT, time.time(), *channels_us), self.addr)
+
+    def close(self) -> None:
+        if self.sock:
+            try:
+                self.sock.close()
+            finally:
+                self.sock = None
+
+    def __repr__(self):
+        return f"udp://{self.addr[0]}:{self.addr[1]}"
+
+
+class _CRSFSerialRCLink:
+    """RC sticks as CRSF 0x16 frames on a serial UART into the FC's RX port."""
+    def __init__(self, device: str, baud: int):
+        self.device, self.baud = device, baud
+        self.ser = None
+
+    def open(self) -> None:
+        import serial  # lazy: only the hardware path needs pyserial
+        self.ser = serial.Serial(self.device, self.baud, timeout=0)
+
+    def send(self, channels_us) -> None:
+        self.ser.write(_build_crsf_rc_frame(channels_us))
+
+    def close(self) -> None:
+        if self.ser:
+            try:
+                self.ser.close()
+            finally:
+                self.ser = None
+
+    def __repr__(self):
+        return f"crsf://{self.device}@{self.baud}"
+
+
+class _TCPMSPLink:
+    """MSP byte stream over TCP (BetaFlightSim UART1 bridge, :5761)."""
+    def __init__(self, host: str, port: int):
+        self.addr = (host, port)
+        self.sock: socket.socket | None = None
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(self.addr, timeout=2.0)
+
+    def write(self, data: bytes) -> None:
+        self.sock.sendall(data)
+
+    def read(self, n: int) -> bytes:
+        chunk = self.sock.recv(n)
+        if not chunk:
+            raise OSError("MSP connection closed")
+        return chunk
+
+    def close(self) -> None:
+        if self.sock:
+            try:
+                self.sock.close()
+            finally:
+                self.sock = None
+
+    def __repr__(self):
+        return f"tcp://{self.addr[0]}:{self.addr[1]}"
+
+
+class _SerialMSPLink:
+    """MSP byte stream over a serial UART (real hardware)."""
+    def __init__(self, device: str, baud: int):
+        self.device, self.baud = device, baud
+        self.ser = None
+
+    def connect(self) -> None:
+        import serial  # lazy
+        self.ser = serial.Serial(self.device, self.baud, timeout=0.1)
+
+    def write(self, data: bytes) -> None:
+        self.ser.write(data)
+
+    def read(self, n: int) -> bytes:
+        chunk = self.ser.read(n)        # up to n bytes, blocks up to `timeout`
+        if not chunk:
+            raise OSError("MSP serial read timeout")
+        return chunk
+
+    def close(self) -> None:
+        if self.ser:
+            try:
+                self.ser.close()
+            finally:
+                self.ser = None
+
+    def __repr__(self):
+        return f"serial://{self.device}@{self.baud}"
+
+
 class BetaflightDroneMover:
-    """RC-over-UDP / MSP-over-TCP backend with the DroneMover public surface."""
+    """Betaflight backend (UDP+TCP for sim, CRSF+MSP serial for hardware)."""
 
     def __init__(self, drone_connection_string: str | None = None, config: dict | None = None) -> None:
         self.config = {} if config is None else config
 
-        host, rc_port = self._parse_connection(drone_connection_string)
-        self.rc_addr = (host, int(self.config.get("rc_port", rc_port)))
-        self.msp_addr = (self.config.get("msp_host", host),
-                         int(self.config.get("msp_port", DEFAULT_MSP_PORT)))
-
-        self.rc_rate_hz = float(self.config.get("rc_rate_hz", DEFAULT_RC_RATE_HZ))
+        self.rc_rate_hz = self.config.get("rc_rate_hz")  # resolved per-transport below
         self.use_set_attitude = self.config.get("use_set_attitude", False)
 
         # Stick scaling. In ACRO (rate) mode roll/pitch are deg/s; in ANGLE mode
@@ -121,8 +282,15 @@ class BetaflightDroneMover:
         # Telemetry (MSP) is opt-in — see module docstring on the arming guard.
         self.msp_telemetry = bool(self.config.get("msp_telemetry", False))
 
+        # Pick transports from the connection string.
+        self.mode, self.rc_link, self.msp_link = self._build_links(drone_connection_string)
+        if self.rc_rate_hz is None:
+            self.rc_rate_hz = (DEFAULT_RC_RATE_CRSF_HZ if self.mode == "uart"
+                               else DEFAULT_RC_RATE_UDP_HZ)
+        else:
+            self.rc_rate_hz = float(self.rc_rate_hz)
+
         # --- runtime state ---
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._channels = [US_MID, US_MID, US_MIN, US_MID, AUX_LOW] + [US_MIN] * (RC_NUM_CHANNELS - 5)
         self._ch_lock = threading.Lock()
         self._tx_thread: threading.Thread | None = None
@@ -133,21 +301,41 @@ class BetaflightDroneMover:
 
         self._telemetry: dict = {}
         self._tele_lock = threading.Lock()
-        self._msp = None  # MSPClient when enabled
+        self._msp = None  # _MSPClient when enabled
 
     # -- connection-string parsing -----------------------------------------
     @staticmethod
-    def _parse_connection(s: str | None) -> tuple[str, int]:
-        if not s:
-            return "127.0.0.1", DEFAULT_RC_PORT
-        s = s.split("://", 1)[-1]          # tolerate udp://host:port
-        if ":" in s:
-            host, port = s.rsplit(":", 1)
-            try:
-                return host or "127.0.0.1", int(port)
-            except ValueError:
-                return s, DEFAULT_RC_PORT
-        return s, DEFAULT_RC_PORT
+    def _parse_connection(s: str | None) -> tuple[str, str, int]:
+        """Return (mode, host, rc_port). mode is 'uart' or 'ip'."""
+        if s and s.strip().lower().startswith("uart"):
+            return "uart", "", 0
+        host, port = "127.0.0.1", DEFAULT_RC_PORT
+        if s:
+            rest = s.split("://", 1)[-1]          # tolerate ip://, udp://, bare host
+            if rest:
+                if ":" in rest:
+                    h, p = rest.rsplit(":", 1)
+                    try:
+                        host, port = (h or host), int(p)
+                    except ValueError:
+                        host = rest
+                else:
+                    host = rest
+        return "ip", host, port
+
+    def _build_links(self, s: str | None):
+        mode, host, rc_port = self._parse_connection(s)
+        c = self.config
+        if mode == "uart":
+            rc = _CRSFSerialRCLink(c.get("crsf_uart", DEFAULT_CRSF_UART),
+                                   int(c.get("crsf_baud", DEFAULT_CRSF_BAUD)))
+            msp = _SerialMSPLink(c.get("msp_uart", DEFAULT_MSP_UART),
+                                 int(c.get("msp_baud", DEFAULT_MSP_BAUD)))
+        else:
+            rc = _UDPRCLink(host, int(c.get("rc_port", rc_port)))
+            msp = _TCPMSPLink(c.get("msp_host", host), int(c.get("msp_port", DEFAULT_MSP_PORT)))
+        logger.info("Betaflight transport: %s  (RC %r, MSP %r)", mode, rc, msp)
+        return mode, rc, msp
 
     # -- RC channel plumbing -----------------------------------------------
     def _set_channels(self, **named: int) -> None:
@@ -158,15 +346,21 @@ class BetaflightDroneMover:
                 self._channels[idx[name]] = int(_clamp(value, US_MIN, US_MAX))
 
     def _tx_loop(self) -> None:
+        try:
+            self.rc_link.open()
+        except Exception as e:   # missing serial device / pyserial / socket
+            logger.error("RC link open failed (%r): %s; no sticks will be sent.", self.rc_link, e)
+            return
         period = 1.0 / self.rc_rate_hz
         while not self._stop.is_set():
             with self._ch_lock:
                 ch = tuple(self._channels)
             try:
-                self._sock.sendto(struct.pack(RC_PACKET_FMT, time.time(), *ch), self.rc_addr)
+                self.rc_link.send(ch)
             except OSError as e:
                 logger.warning("RC send failed: %s", e)
             time.sleep(period)
+        self.rc_link.close()
 
     # -- lifecycle ----------------------------------------------------------
     async def startup_sequence(self, arm_attempts: int = 100, force_arm: bool = False) -> None:
@@ -195,7 +389,7 @@ class BetaflightDroneMover:
         self._set_channels(throttle=US_MIN, aux1=AUX_HIGH)
         await asyncio.sleep(1.5)
         self._armed = True
-        logger.info("Betaflight RC link up on %s; armed (open-loop).", self.rc_addr)
+        logger.info("Betaflight RC link up (%s, %r); armed (open-loop).", self.mode, self.rc_link)
 
     # -- telemetry ----------------------------------------------------------
     def get_telemetry_dict_cached(self) -> dotdict:
@@ -308,10 +502,10 @@ class BetaflightDroneMover:
     # -- MSP telemetry reader ----------------------------------------------
     def _start_msp(self) -> None:
         try:
-            self._msp = _MSPClient(self.msp_addr)
-            self._msp.connect()
-        except OSError as e:
-            logger.warning("MSP connect to %s failed (%s); telemetry disabled.", self.msp_addr, e)
+            self.msp_link.connect()
+            self._msp = _MSPClient(self.msp_link)
+        except Exception as e:   # connect refused / missing device / pyserial
+            logger.warning("MSP connect failed (%r): %s; telemetry disabled.", self.msp_link, e)
             self._msp = None
             return
         t = threading.Thread(target=self._msp_loop, name="bf-msp-rx", daemon=True)
@@ -366,52 +560,40 @@ class BetaflightDroneMover:
         if self._msp is not None:
             self._msp.close()
         try:
-            self._sock.close()
-        except OSError:
+            self.rc_link.close()        # idempotent; tx loop also closes on stop
+        except Exception:
             pass
 
 
 class _MSPClient:
-    """Minimal MSP v1 client over TCP (request/response). Hand-rolled framing so
-    the backend has no extra dependency; swap for `yamspy`/`pyMultiWii` if richer
-    coverage is needed."""
+    """Minimal MSP v1 client over an abstract byte link (TCP or serial). Hand-rolled
+    framing so the backend has no extra dependency; swap for `yamspy`/`pyMultiWii`
+    if richer coverage is needed."""
 
     MSP_RAW_IMU = 102
     MSP_ATTITUDE = 108
     MSP_ALTITUDE = 109
 
-    def __init__(self, addr: tuple[str, int]):
-        self.addr = addr
-        self.sock: socket.socket | None = None
-
-    def connect(self) -> None:
-        self.sock = socket.create_connection(self.addr, timeout=2.0)
+    def __init__(self, link):
+        self.link = link
 
     def close(self) -> None:
-        if self.sock:
-            self.sock.close()
-            self.sock = None
+        self.link.close()
 
     def _request(self, cmd: int, payload: bytes = b"") -> bytes:
-        assert self.sock is not None
         # $M< <size> <cmd> <payload> <checksum>
         header = struct.pack("<BB", len(payload), cmd)
         checksum = 0
         for b in header + payload:
             checksum ^= b
-        self.sock.sendall(b"$M<" + header + payload + bytes([checksum]))
+        self.link.write(b"$M<" + header + payload + bytes([checksum]))
         return self._read_response(cmd)
 
     def _read_response(self, expect_cmd: int) -> bytes:
-        assert self.sock is not None
-
         def recvn(n: int) -> bytes:
             buf = b""
             while len(buf) < n:
-                chunk = self.sock.recv(n - len(buf))
-                if not chunk:
-                    raise OSError("MSP connection closed")
-                buf += chunk
+                buf += self.link.read(n - len(buf))   # raises OSError on close/timeout
             return buf
 
         # sync on '$M>'
@@ -444,9 +626,9 @@ class _MSPClient:
 
 
 # --- standalone smoke test: replicate fly.py's takeoff→hover→land -----------
-async def _demo() -> None:
+async def _demo(connection: str = "ip://127.0.0.1") -> None:
     logging.basicConfig(level=logging.INFO)
-    drone = BetaflightDroneMover("127.0.0.1")
+    drone = BetaflightDroneMover(connection)
     await drone.startup_sequence(arm_attempts=1, force_arm=True)
     try:
         await drone.move_to_target_zenith_async(0, 0, thrust=0.80, current_telemetry=None)  # takeoff
@@ -464,4 +646,5 @@ async def _demo() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(_demo())
+    import sys
+    asyncio.run(_demo(sys.argv[1] if len(sys.argv) > 1 else "ip://127.0.0.1"))
