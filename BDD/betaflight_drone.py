@@ -363,11 +363,14 @@ class BetaflightDroneMover:
         self.rc_link.close()
 
     # -- lifecycle ----------------------------------------------------------
-    async def startup_sequence(self, arm_attempts: int = 100, force_arm: bool = False) -> None:
+    async def startup_sequence(self, arm_attempts: int = 100, force_arm: bool = False,
+                               arm: bool = True) -> None:
         """Start the RC keepalive, prime the link (AUX1 LOW), then arm (AUX1 HIGH).
 
         `force_arm` has no Betaflight analogue (arming preconditions are enforced
         FC-side); it is accepted for API parity and only shortens the link prime.
+        `arm=False` brings the link up but never toggles the arm switch — for
+        bench/telemetry verification where the motors must stay disarmed.
         """
         if self._tx_thread is None:
             self._stop.clear()
@@ -382,6 +385,11 @@ class BetaflightDroneMover:
         prime_s = 0.5 if force_arm else 2.0
         self._set_channels(throttle=US_MIN, aux1=AUX_LOW)
         await asyncio.sleep(prime_s)
+
+        if not arm:
+            logger.info("Betaflight RC link up (%s, %r); staying DISARMED (arm=False).",
+                        self.mode, self.rc_link)
+            return
 
         # 2) Arm: AUX1 HIGH, throttle at idle. There is no SET-and-confirm; we set
         #    the switch and hold. If MSP telemetry is on we could read STATUS flags
