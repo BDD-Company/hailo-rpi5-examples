@@ -111,6 +111,9 @@ camera:
   width: 1280
   height: 720
   fps: 30
+  # video_format is auto-derived from the model input at startup (NV12-input hef
+  # -> capture NV12, else RGB) and overrides this value; kept only as a fallback
+  # if the HEF can't be inspected. The capture format MUST match the hef input.
   video_format: RGB
   active_id: 0
   # Relative target size (or bigger) that triggers switching to wide-angle camera.

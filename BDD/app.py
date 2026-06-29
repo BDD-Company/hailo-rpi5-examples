@@ -390,6 +390,25 @@ class App(GStreamerDetectionApp):
         super().run()
 
 
+def detect_hef_video_format(hef_path, default='RGB'):
+    """Read the model's input format from the HEF and map it to a capture video
+    format: 'NV12' when the input vstream order is NV12, else 'RGB'. The capture
+    format MUST match the model input — the whole-buffer hailocropper requires its
+    input format to equal the hailonet input format, so deriving it from the model
+    prevents the "Cropper Input and output caps have different formats" crash and
+    the silent format mismatches. Falls back to `default` if the HEF can't be read
+    (e.g. hailo_platform unavailable on a dev host)."""
+    try:
+        from hailo_platform import HEF
+        info = HEF(str(hef_path)).get_input_vstream_infos()[0]
+        order = getattr(info.format.order, 'name', str(info.format.order)).upper()
+        return 'NV12' if 'NV12' in order else 'RGB'
+    except Exception as e:
+        logger.warning("Could not read HEF input format from %s (%s); defaulting to %s",
+                       hef_path, e, default)
+        return default
+
+
 def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -495,6 +514,28 @@ def main():
     tiles = tiles_override if tiles_override is not None else (config.tiling.tiles_x, config.tiling.tiles_y)
     logger.info("!!! Inference tiling: %dx%d (%s)", tiles[0], tiles[1],
                 "whole-frame" if tiles == (1, 1) else f"{tiles[0]*tiles[1]} tiles/frame")
+    if tiles != (1, 1):
+        logger.warning(
+            "!!! TILING %dx%d enabled (%d inferences/frame): capture->command LATENCY and CPU "
+            "will be SUB-PAR vs whole-frame. On this rig only ~2 tiles stay under the 200ms "
+            "budget (2x2 ~230ms e2e). Use tiling for small-object recall, not low-latency control.",
+            tiles[0], tiles[1], tiles[0] * tiles[1])
+
+    # Capture format follows the MODEL input: NV12-input hef -> capture NV12,
+    # RGB-input hef -> capture RGB. The hailocropper requires capture format ==
+    # hailonet input format, so deriving it from the model is the only correct
+    # choice (a mismatch crashes the cropper). CLI --hef-path wins over config.
+    effective_hef = sys.argv[sys.argv.index('--hef-path') + 1] if '--hef-path' in sys.argv \
+        else str(config.inference.hef_model_path)
+    video_format = detect_hef_video_format(effective_hef)
+    if video_format != config.camera.video_format:
+        logger.warning("!!! capture video_format: %s (from model input) overrides "
+                       "config.camera.video_format=%s", video_format, config.camera.video_format)
+    else:
+        logger.info("!!! capture video_format: %s (matches model input)", video_format)
+    if tiles != (1, 1) and video_format == 'NV12':
+        logger.warning("!!! NV12 capture + tiling together: extra format handling on the "
+                       "tile path may further raise latency/CPU — measure before relying on it.")
 
     bytetracker = BYTETracker(**config.bytetrack.tracker_kwargs()) if config.bytetrack is not None else None
 
@@ -520,7 +561,7 @@ def main():
             width=camera_section.width,
             height=camera_section.height,
             fps=camera_section.fps,
-            video_format=camera_section.video_format,
+            video_format=video_format,
             active_id=camera_section.active_id,
             switch_to_wide_size=camera_section.switch_to_wide_size,
             switch_to_zoom_size=camera_section.switch_to_zoom_size,
@@ -543,7 +584,7 @@ def main():
         video_filename_base=f"RAW_{start_time_str}",
         record_videos=record_videos,
         inference=config.inference,
-        video_format=camera_section.video_format,
+        video_format=video_format,
         tiles=tiles)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
