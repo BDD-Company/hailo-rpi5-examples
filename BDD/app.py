@@ -264,6 +264,13 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     else:
         dets_array = np.empty((0, 5))
 
+    # Throttled detection summary — confirms the model is producing valid
+    # detections from the current pixel format (e.g. NV12 fed correctly).
+    if frame_id % 30 == 0:
+        _confs = [c for _, c in raw_dets]
+        logger.info("!!! DETS frame=#%d n=%d maxconf=%.3f", frame_id, len(raw_dets),
+                    max(_confs) if _confs else 0.0)
+
     # logger.debug(
     #     "frame=#%04d ByteTracker input: %d detections %s",
     #     frame_id,

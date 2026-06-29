@@ -307,7 +307,11 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
             f'tiles-along-x-axis={tiles_x} tiles-along-y-axis={tiles_y} {overlap}'
             f'internal-offset=true '
         )
-        aggregator = f'hailotileaggregator name={name}_agg '
+        # flatten-detections=true is REQUIRED: without it the per-tile detections
+        # stay nested in tile sub-ROIs and `roi.get_objects_typed(HAILO_DETECTION)`
+        # in the callback finds NOTHING (silent n=0). flatten lifts them into the
+        # frame ROI (in global coords). iou-threshold dedups across tile seams.
+        aggregator = f'hailotileaggregator name={name}_agg flatten-detections=true iou-threshold=0.4 '
         # N tiles flow per frame; hold a frame's worth so the cropper isn't blocked
         # tile-by-tile waiting on the single shared hailonet.
         tile_q_depth = tiles_x * tiles_y + 1
