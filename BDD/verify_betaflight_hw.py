@@ -71,6 +71,45 @@ def _read_msp_rc(drone: bf.BetaflightDroneMover) -> list[int] | None:
     return list(struct.unpack(f"<{n}H", payload[: n * 2]))
 
 
+def _probe_msp_baud(device: str, candidates=(115200, 230400, 57600, 100000, 420000, 19200)) -> None:
+    """When MSP is silent, find out why: try an MSP_ATTITUDE request at several
+    bauds and report which (if any) yields a valid response — vs garbage (baud
+    mismatch) vs total silence (port-not-MSP / wiring)."""
+    print(f"\n--- MSP probe on {device}: requesting MSP_ATTITUDE at candidate bauds ---")
+    any_bytes = False
+    for baud in candidates:
+        link = bf._SerialMSPLink(device, baud)
+        try:
+            link.connect()
+        except Exception as e:
+            print(f"  {baud:>7} baud: cannot open ({e})")
+            continue
+        ser = link.ser
+        try:
+            roll, pitch, yaw = bf._MSPClient(link).attitude()
+            print(f"  {baud:>7} baud: VALID MSP response (roll={roll} pitch={pitch} yaw={yaw})"
+                  f"  <-- set msp_baud={baud}")
+            link.close()
+            return
+        except OSError:
+            raw = b""
+            if ser is not None:
+                ser.timeout = 0.3                           # raw look at what comes back
+                raw = ser.read(64)
+            any_bytes = any_bytes or bool(raw)
+            print(f"  {baud:>7} baud: no valid MSP; {len(raw)} raw byte(s)"
+                  + (f" {raw[:16].hex()}" if raw else ""))
+        finally:
+            link.close()
+    if any_bytes:
+        print("  -> bytes arrived but didn't parse: likely a BAUD mismatch (or it's CRSF "
+              "telemetry, not MSP). Match msp_baud to the FC port; ensure the port FUNCTION is MSP.")
+    else:
+        print("  -> zero bytes at every baud: the FC isn't transmitting on this line. "
+              "Check wiring (FC UART TX -> Pi RX), that the UART has MSP enabled in the "
+              "Betaflight Ports tab, and that it's the right /dev/ttyAMA*.")
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("connection", nargs="?", default="uart",
@@ -127,6 +166,10 @@ async def main() -> int:
     drone.ABORT()
     await asyncio.sleep(0.5)
     drone.close()
+
+    # If MSP never answered, probe the UART to pinpoint why (baud / wiring / port function).
+    if not msp_ok and drone.mode == "uart" and isinstance(drone.msp_link, bf._SerialMSPLink):
+        _probe_msp_baud(drone.msp_link.device)
 
     print("\n================ VERIFICATION RESULT ================")
     print(f"  transport            : {drone.mode}  (RC {drone.rc_link!r}, MSP {drone.msp_link!r})")

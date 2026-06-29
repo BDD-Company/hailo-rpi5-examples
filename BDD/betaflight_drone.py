@@ -299,6 +299,9 @@ class _TCPMSPLink:
             raise OSError("MSP connection closed")
         return chunk
 
+    def reset_input(self) -> None:
+        pass    # TCP stream stays in sync; nothing to flush
+
     def close(self) -> None:
         if self.sock:
             try:
@@ -328,6 +331,10 @@ class _SerialMSPLink:
         if not chunk:
             raise OSError("MSP serial read timeout")
         return chunk
+
+    def reset_input(self) -> None:
+        if self.ser:
+            self.ser.reset_input_buffer()   # drop stale bytes so framing stays synced
 
     def close(self) -> None:
         if self.ser:
@@ -369,7 +376,7 @@ class BetaflightDroneMover:
         # channel decides who drives the FC — below threshold the pilot's sticks
         # pass straight through; at/above it the companion (this code) commands.
         # Opt-in so the 2-UART path (and the sim) are unaffected.
-        self.pilot_passthrough = bool(self.config.get("pilot_passthrough", False))
+        self.pilot_passthrough = bool(self.config.get("pilot_passthrough", True))
         self.pilot_control_channel = int(self.config.get("pilot_control_channel", 6))   # AUX3
         self.pilot_control_threshold_us = float(self.config.get("pilot_control_threshold_us", 1500))
         self.pilot_link_timeout_s = float(self.config.get("pilot_link_timeout_s", 0.5))
@@ -683,15 +690,33 @@ class BetaflightDroneMover:
         accel_lsb_per_g = float(self.config.get("accel_lsb_per_g", 2048.0))
         mag_lsb_per_gauss = float(self.config.get("mag_lsb_per_gauss", 1090.0))
         period = 1.0 / float(self.config.get("msp_rate_hz", 50.0))
+        fails = 0   # consecutive read failures, for rate-limited logging
         while not self._stop.is_set() and self._msp is not None:
             try:
                 att = self._msp.attitude()      # roll/pitch deci-deg, yaw deg
                 imu = self._msp.raw_imu()        # raw counts (zeros in this SITL)
                 alt = self._msp.altitude()       # cm, cm/s
             except OSError as e:
-                logger.warning("MSP read error: %s", e)
+                fails += 1
+                # The FC may simply not answer MSP on this UART (port function/baud/
+                # wiring). Surface it once with guidance, then back off quietly so we
+                # don't flood — re-state only every ~5 s while it stays broken.
+                if fails == 1:
+                    logger.warning("MSP telemetry not responding on %r (%s). Check the FC "
+                                   "Ports tab has MSP enabled on this UART, the baud matches "
+                                   "(msp_baud, currently %d), and TX/RX aren't swapped.",
+                                   self.msp_link, e, getattr(self.msp_link, "baud", 0))
+                elif fails % 100 == 0:
+                    logger.warning("MSP telemetry still silent after %d attempts (%r).",
+                                   fails, self.msp_link)
+                else:
+                    logger.debug("MSP read error: %s", e)
                 time.sleep(0.2)
                 continue
+            if fails:
+                logger.info("MSP telemetry responding (%r) after %d failed attempt(s).",
+                            self.msp_link, fails)
+                fails = 0
 
             roll_deg, pitch_deg, yaw_deg = att
             ax, ay, az = (c / accel_lsb_per_g * 9.81 for c in imu[0:3])
@@ -752,6 +777,7 @@ class _MSPClient:
 
     def _request(self, cmd: int, payload: bytes = b"") -> bytes:
         # $M< <size> <cmd> <payload> <checksum>
+        self.link.reset_input()     # discard any stale/partial bytes from a prior timeout
         header = struct.pack("<BB", len(payload), cmd)
         checksum = 0
         for b in header + payload:
