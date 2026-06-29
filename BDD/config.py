@@ -155,6 +155,17 @@ class Config:
     inference: Inference
 
     @dataclass(slots=True, kw_only=True, frozen=True)
+    class Tiling:
+        # Inference tile grid. 1×1 = whole-frame (default, lowest latency). >1
+        # enables hailotilecropper: tiles_x*tiles_y inferences/frame, raising
+        # small-object recall at the cost of latency (~N×15 ms on Hailo-8).
+        tiles_x: Annotated[int, Range(min=1)] = 1
+        tiles_y: Annotated[int, Range(min=1)] = 1
+        # Fractional tile overlap on both axes (0..1); 0 = abutting tiles.
+        overlap: Annotated[float, Range(0.0, 1.0)] = 0.0
+    tiling: Tiling = field(default_factory=Tiling)
+
+    @dataclass(slots=True, kw_only=True, frozen=True)
     class Thrust:
         # PX4 normalized thrust, 0..1.
         cruise:  Annotated[float, Range(0.0, 1.0)] = 0.53

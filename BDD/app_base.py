@@ -174,6 +174,11 @@ class GStreamerApp:
         self.video_width = 1280
         self.video_height = 720
         self.video_format = HAILO_RGB_VIDEO_FORMAT
+        # Tile grid for the inference wrapper. 1×1 = whole-frame (default, lowest
+        # latency); >1 enables hailotilecropper (more small-object recall, more
+        # inference cost). Set from config/CLI by the App subclass.
+        self.tiles_x = 1
+        self.tiles_y = 1
         self.hef_path = None
         self.app_callback = None
 
@@ -1148,7 +1153,8 @@ def display_user_data_frame(user_data: app_callback_class):
     cv2.destroyAllWindows()
 
 class GStreamerDetectionApp(GStreamerApp):
-    def __init__(self, app_callback, user_data, parser=None, inference=None, video_format=None):
+    def __init__(self, app_callback, user_data, parser=None, inference=None, video_format=None,
+                 tiles=None):
         if parser == None:
             parser = get_default_parser()
 
@@ -1166,6 +1172,9 @@ class GStreamerDetectionApp(GStreamerApp):
         # capsfilter matches what the picamera2 producer actually pushes.
         if video_format is not None:
             self.video_format = video_format
+        # Tile grid (tiles_x, tiles_y); 1×1 = whole-frame. From config.tiling / CLI.
+        if tiles is not None:
+            self.tiles_x, self.tiles_y = int(tiles[0]), int(tiles[1])
         # Set Hailo parameters these parameters should be set based on the model used
         self.batch_size = 1
         # Model + NMS come from config.inference (config.yaml); CLI --hef-path /
@@ -1239,7 +1248,8 @@ class GStreamerDetectionApp(GStreamerApp):
             batch_size=self.batch_size,
             config_json=self.labels_json,
             additional_params=self.thresholds_str)
-        detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
+        detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(
+            detection_pipeline, tiles_x=self.tiles_x, tiles_y=self.tiles_y)
 
         tracker_pipeline = ''
         if False:

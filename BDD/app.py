@@ -332,12 +332,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None, video_format=None):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None, video_format=None, tiles=None):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
-        super().__init__(app_callback, user_data, parser, inference=inference, video_format=video_format)
+        super().__init__(app_callback, user_data, parser, inference=inference, video_format=video_format, tiles=tiles)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -422,6 +422,16 @@ def main():
         no_record_flag = True
         sys.argv.remove("--no-record")
 
+    # --tiles NxM: override the inference tile grid (e.g. --tiles 2x2). 1x1 =
+    # whole-frame. Parsed from argv directly (gates App() construction below);
+    # None here means "use config.tiling".
+    tiles_override = None
+    if "--tiles" in sys.argv:
+        i = sys.argv.index("--tiles")
+        nx, _, ny = sys.argv[i + 1].lower().partition("x")
+        tiles_override = (int(nx), int(ny))
+        del sys.argv[i:i + 2]
+
     if DEBUG:
         logger.error('')
         logger.error("!!! ============================================================== !!!")
@@ -474,6 +484,11 @@ def main():
     record_videos = config.record_videos and not no_record_flag
     logger.info("!!! RAW video recording: %s", "ENABLED" if record_videos else "DISABLED")
 
+    # Tile grid: CLI --tiles wins, else config.tiling.
+    tiles = tiles_override if tiles_override is not None else (config.tiling.tiles_x, config.tiling.tiles_y)
+    logger.info("!!! Inference tiling: %dx%d (%s)", tiles[0], tiles[1],
+                "whole-frame" if tiles == (1, 1) else f"{tiles[0]*tiles[1]} tiles/frame")
+
     bytetracker = BYTETracker(**config.bytetrack.tracker_kwargs()) if config.bytetrack is not None else None
 
     user_data = user_app_callback_class(detections_queue, bytetracker)
@@ -521,7 +536,8 @@ def main():
         video_filename_base=f"RAW_{start_time_str}",
         record_videos=record_videos,
         inference=config.inference,
-        video_format=camera_section.video_format)
+        video_format=camera_section.video_format,
+        tiles=tiles)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
