@@ -44,15 +44,31 @@ def _split_constraint(ann):
     return ann, []
 
 
-def _is_optional(hint):
+def _union_variants(hint):
+    """For a Union / ``X | Y`` annotation, return ``(non_none_variants, allows_none)``.
+
+    For a non-union annotation, return ``(None, False)``. The shapes:
+      - ``Optional[X]`` / ``X | None`` -> ``([X], True)``  (single variant, nullable)
+      - ``A | B``                      -> ``([A, B], False)`` (multi-variant)
+      - ``A | B | None``               -> ``([A, B], True)``  (multi-variant, nullable)
+    """
     origin = get_origin(hint)
     if origin is Union or origin is types.UnionType:
-        return _NONE_TYPE in get_args(hint)
-    return False
+        args = get_args(hint)
+        return [a for a in args if a is not _NONE_TYPE], _NONE_TYPE in args
+    return None, False
 
 
-def _non_none_arg(hint):
-    return next(a for a in get_args(hint) if a is not _NONE_TYPE)
+def _type_label(ann) -> str:
+    """Human-readable name for a (possibly Annotated) variant type, for errors."""
+    base, _ = _split_constraint(ann)
+    return base.__name__ if isinstance(base, type) else str(base)
+
+
+def _allows_none(ann) -> bool:
+    """True if a (possibly Annotated) annotation admits None, i.e. Optional[...]."""
+    base, _ = _split_constraint(ann)
+    return _union_variants(base)[1]
 
 
 def _coerce_xy(value, path, errors):
@@ -76,13 +92,20 @@ def _coerce_xy(value, path, errors):
 def _coerce(value, ann, path, errors):
     base, constraints = _split_constraint(ann)
 
-    # Optional[...] / X | None
+    # Union handling. Two shapes flow through here: the nullable single type
+    # (Optional[X] / X | None) and the genuine multi-type union (A | B | ...),
+    # which is resolved by trying each variant left-to-right (_coerce_union).
     optional = False
-    if _is_optional(base):
-        if value is None:
+    variants, allows_none = _union_variants(base)
+    if variants is not None:
+        if allows_none and value is None:
             return None
-        optional = True
-        base, inner_constraints = _split_constraint(_non_none_arg(base))
+        if len(variants) > 1:
+            return _coerce_union(value, variants, constraints, path, errors)
+        # Single variant => plain Optional[X]: unwrap and coerce as X. `optional`
+        # records that None was allowed (it drives the `enabled` section toggle).
+        optional = allows_none
+        base, inner_constraints = _split_constraint(variants[0])
         constraints = constraints + inner_constraints
 
     coerced = _INVALID
@@ -175,6 +198,28 @@ def _coerce(value, ann, path, errors):
     return coerced
 
 
+def _coerce_union(value, variants, constraints, path, errors):
+    """Resolve a multi-type union (``A | B | ...``) by trying each variant in
+    declaration order and taking the first that coerces cleanly.
+
+    Each attempt coerces into a *throwaway* error list, so a variant that fails
+    leaves no partial errors behind (e.g. the loser's unknown-key complaints
+    never reach the caller). The first variant that yields a value with an empty
+    error list wins; the union's own (outer) constraints are then applied to it.
+    Only if *every* variant fails is a single union error reported.
+    """
+    for variant in variants:
+        trial: list[str] = []
+        coerced = _coerce(value, variant, path, trial)
+        if coerced is not _INVALID and not trial:
+            for c in constraints:
+                c.validate(coerced, path, errors)
+            return coerced
+    names = " | ".join(_type_label(v) for v in variants)
+    errors.append(f"{path}: value does not match any of: {names}")
+    return _INVALID
+
+
 def _required_names(cls) -> set:
     """Field names that have no default (neither default nor default_factory)."""
     return {f.name for f in fields(cls)
@@ -196,6 +241,10 @@ def _parse_dataclass(cls, data, path, errors):
         return _blank(cls)
 
     anns = get_type_hints(cls, include_extras=True)
+    # An Optional[...] field (its annotation admits None) is never *required* in
+    # the file: when omitted it silently defaults to None (the placeholder loop
+    # below supplies it). Only non-optional no-default fields are reported missing.
+    config_required = {n for n in required if not _allows_none(anns[n])}
     valid_names = set()
     kwargs = {}
     for f in fields(cls):
@@ -207,15 +256,17 @@ def _parse_dataclass(cls, data, path, errors):
             r = _coerce(data[f.name], anns[f.name], f"{prefix}{f.name}", errors)
             if r is not _INVALID:
                 kwargs[f.name] = r
-        elif f.name in required:
+        elif f.name in config_required:
             errors.append(f"{prefix}{f.name}: missing required configuration key")
 
     for key in data:
         if key not in valid_names or (key in valid_names and _runtime_field(cls, key)):
             errors.append(f"{prefix}{key}: unknown configuration key")
 
-    # Placeholder for any required field still missing, so construction (used to
-    # return *something*) never raises; on the error path the object is discarded.
+    # Supply None for every no-default field still absent. For Optional fields
+    # this is the real value (they default to None on the success path); for a
+    # genuinely-missing required field it's just a placeholder so construction
+    # never raises (an error was already recorded, so the object is discarded).
     for name in required:
         kwargs.setdefault(name, None)
     try:
@@ -275,15 +326,110 @@ def _with_line_numbers(errors: list[str], line_map: dict[str, int], source: str)
     return enriched
 
 
+# ---------------------------------------------------------------------------
+# Schema validation: static checks on the dataclass *schema itself*, with no
+# config data involved. Opt-in via parse_config(..., validate_schema=True),
+# where it runs BEFORE parsing so a malformed schema fails fast. Walks the whole
+# schema (nested dataclasses, union variants, list items) and accumulates every
+# problem, so they can be raised together as one aggregate.
+# ---------------------------------------------------------------------------
+def _is_supported_leaf(base) -> bool:
+    """Whether `_coerce` handles `base` as a (non-container) leaf type."""
+    if base in (bool, int, float, str, XY, ExistingFile, Any):
+        return True
+    return isinstance(base, type) and issubclass(base, (Enum, Path))
+
+
+def _walk_schema_type(base, path, errors, seen):
+    """Recurse a constraint-stripped type, reaching every nested dataclass
+    (through union variants and list items) and flagging unsupported leaf types."""
+    variants, _ = _union_variants(base)
+    if variants is not None:
+        for v in variants:
+            _walk_schema_type(_split_constraint(v)[0], path, errors, seen)
+        return
+    if _is_supported_leaf(base):                 # scalar / enum / Path / XY / ExistingFile
+        return
+    if is_dataclass(base):
+        _walk_schema(base, path, errors, seen)
+        return
+    if get_origin(base) in (list, types.GenericAlias) or base is list:
+        args = get_args(base)
+        item = _split_constraint(args[0])[0] if args else Any
+        _walk_schema_type(item, f"{path}[]", errors, seen)
+        return
+    errors.append(f"{path}: unsupported field type {base!r}")
+
+
+def _walk_schema(cls, path, errors, seen):
+    """Accumulate schema inconsistencies for dataclass `cls` into `errors`.
+
+    Per field (recursing into nested dataclasses / unions / lists):
+      - an Optional[...] field must NOT declare a default or default_factory:
+        Optional already yields None when its key is omitted, so a default is
+        redundant or contradictory (e.g. `a: Optional[A] = 0`, `a: Optional[A] = None`).
+      - the field type must be one the parser can coerce (no unsupported type).
+      - a non-optional scalar field's literal default must itself be a valid
+        value for the field's type and constraints.
+    Runtime fields are skipped (the parser never reads them from the file).
+    """
+    if cls in seen:                              # reused / recursive types: check once
+        return
+    seen.add(cls)
+    try:
+        anns = get_type_hints(cls, include_extras=True)
+    except Exception as exc:                     # unresolved annotation -> schema bug
+        errors.append(f"{path or cls.__name__}: cannot resolve type hints: {exc}")
+        return
+    for f in fields(cls):
+        if f.metadata.get('runtime'):
+            continue
+        fpath = f"{path}.{f.name}" if path else f.name
+        ann = anns[f.name]
+        base, _ = _split_constraint(ann)
+        if _allows_none(ann):
+            if f.default is not MISSING or f.default_factory is not MISSING:
+                errors.append(f"{fpath}: Optional field must not declare a default "
+                              f"(it defaults to None when the key is omitted)")
+        elif f.default is not MISSING and _is_supported_leaf(base):
+            # Validate a plain scalar/enum/XY/Path literal default against its
+            # own declared type and bounds (factories are left alone).
+            trial: list[str] = []
+            _coerce(f.default, ann, fpath, trial)
+            for e in trial:
+                detail = e[len(fpath) + 2:] if e.startswith(f"{fpath}: ") else e
+                errors.append(f"{fpath}: invalid default {f.default!r}: {detail}")
+        _walk_schema_type(base, fpath, errors, seen)
+
+
+def check_schema(config_type: type) -> list[str]:
+    """Return every schema inconsistency in `config_type` (empty list if clean).
+
+    A pure schema check (no config data); see `_walk_schema` for the rules.
+    """
+    errors: list[str] = []
+    _walk_schema(config_type, "", errors, set())
+    return errors
+
+
 def parse_config(config_type: type[T], data: dict | None,
                  line_map: dict[str, int] | None = None,
-                 source: str = "config file") -> T:
+                 source: str = "config file", *,
+                 validate_schema: bool = False) -> T:
     """Validate a parsed-YAML mapping against `config_type`, or raise ConfigError.
 
     `config_type` is the root dataclass the mapping is parsed into (e.g. Config).
     If `line_map` (path -> file line) is supplied, every reported problem is
     annotated with the offending line in `source`.
+
+    If `validate_schema` is True, the dataclass schema is checked for internal
+    inconsistencies (see `check_schema`) *before* any parsing: any problem fails
+    fast with one aggregate ConfigError, even when the config data is itself fine.
     """
+    if validate_schema:
+        schema_problems = check_schema(config_type)
+        if schema_problems:
+            raise ConfigError(schema_problems)
     errors: list[str] = []
     cfg = _parse_dataclass(config_type, data or {}, "", errors)
     if errors:
@@ -291,12 +437,13 @@ def parse_config(config_type: type[T], data: dict | None,
     return cfg
 
 
-def loads_config(config_type: type[T], text: str, source: str = "<config>") -> T:
+def loads_config(config_type: type[T], text: str, source: str = "<config>", *,
+                 validate_schema: bool = False) -> T:
     """Validate a YAML *string* against `config_type` (raises ConfigError).
 
     Unlike `parse_config` (which takes an already-parsed mapping and therefore
     can't reference line numbers), this composes the YAML so every error is
-    annotated with its line in `source`.
+    annotated with its line in `source`. `validate_schema` is forwarded.
     """
     import yaml
     data = yaml.safe_load(text)
@@ -306,12 +453,15 @@ def loads_config(config_type: type[T], text: str, source: str = "<config>") -> T
         raise ConfigError([f"<root>: top level must be a mapping, got {type(data).__name__}"])
     line_map: dict[str, int] = {}
     _collect_node_lines(yaml.compose(text), "", line_map)
-    return parse_config(config_type, data, line_map, source=source)
+    return parse_config(config_type, data, line_map, source=source, validate_schema=validate_schema)
 
 
-def load_config(config_type: type[T], path: str | Path) -> T:
+def load_config(config_type: type[T], path: str | Path, *,
+                validate_schema: bool = False) -> T:
     """Read a YAML file and validate it against `config_type` (raises ConfigError).
 
     Errors are reported in bulk and annotated with the offending file line.
+    `validate_schema` is forwarded.
     """
-    return loads_config(config_type, Path(path).read_text(), source=Path(path).name)
+    return loads_config(config_type, Path(path).read_text(), source=Path(path).name,
+                        validate_schema=validate_schema)

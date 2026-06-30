@@ -20,7 +20,7 @@ import yaml
 import pytest
 
 from config import Config, Range, Choices, MinItems, ExistingFile, _Constraint
-from parse_config import parse_config, load_config, loads_config, ConfigError
+from parse_config import parse_config, load_config, loads_config, ConfigError, check_schema
 from helpers import XY
 
 
@@ -45,7 +45,7 @@ class TestConfig:
     color:  Color = Color.GREEN                              # bare enum field
     point:  Annotated[XY, Range(0.0, 1.0)] = \
         dataclasses.field(default_factory=lambda: XY(0.5, 0.5))   # XY + bound
-    threshold: Annotated[Optional[float], Range(min=0.0)] = None   # optional scalar
+    threshold: Annotated[Optional[float], Range(min=0.0)]          # optional scalar (auto-None when omitted)
 
     # required (no default)
     gain:   Annotated[XY, Range(min=0.0)]                    # required XY
@@ -73,6 +73,22 @@ class TestConfig:
     feature: Optional[FeatureSection]                        # Optional[dataclass] -> enabled toggle
 
     @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class OptionA:
+        a : int = 0
+        foo : str = ''
+        quix : float = 0.0
+
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class OptionB:
+        b : int
+        bar : str
+        quix : float
+
+    option : OptionA | OptionB = dataclasses.field(default_factory=lambda: TestConfig.OptionA())
+    option_no_default : OptionA | OptionB
+    optional_option : Optional[OptionA | OptionB]
+
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
     class Item:
         item_id: Annotated[int, Range(min=0)] = 0
         angle:   Annotated[XY, Range(min=0.0, min_inclusive=False, max=360.0)]   # required
@@ -85,6 +101,8 @@ class TestConfig:
 SubSection = TestConfig.SubSection
 Limits = TestConfig.SubSection.Limits
 FeatureSection = TestConfig.FeatureSection
+OptionA = TestConfig.OptionA
+OptionB = TestConfig.OptionB
 Item = TestConfig.Item
 
 # Path to THIS test file: a file guaranteed to exist while the tests run, used as
@@ -111,6 +129,15 @@ sub_section:
 feature:
   intensity: 0.7
   mode: auto
+option:                  # union A|B, OptionA-shaped -> resolves to OptionA
+  a: 1
+  foo: hello
+  quix: 0.5
+option_no_default:       # union A|B, OptionB-shaped -> falls through to OptionB
+  b: 2
+  bar: world
+  quix: 1.5
+optional_option: null    # Optional[A|B], absent feature -> None
 items:
   - item_id: 0
     angle: [90, 60]
@@ -168,6 +195,11 @@ def test_full_valid_config_parses():
     assert isinstance(cfg.sub_section.limits, Limits)   # 2-level nesting
     assert cfg.sub_section.limits.lo == 0.1
     assert isinstance(cfg.feature, FeatureSection)  # optional section present
+    assert isinstance(cfg.option, OptionA)          # union resolved to 1st variant
+    assert cfg.option.a == 1
+    assert isinstance(cfg.option_no_default, OptionB)   # resolved to 2nd variant
+    assert cfg.option_no_default.b == 2
+    assert cfg.optional_option is None              # Optional[union], null -> None
     assert [i.item_id for i in cfg.items] == [0, 1]
     assert cfg.items[0].angle == XY(90, 60)
 
@@ -294,8 +326,13 @@ def test_missing_required_top_level_reported():
     with pytest.raises(ConfigError) as ei:
         covert_to_config({})
     probs = ei.value.problems
-    for name in ('gain', 'sub_section', 'feature', 'items'):
+    # Non-optional no-default fields are required; `feature`/`optional_option`
+    # are Optional and silently default to None (see test below), so they are
+    # NOT among the missing-required complaints even on an empty config.
+    for name in ('gain', 'sub_section', 'option_no_default', 'items'):
         assert any(p.startswith(f"{name}:") and 'missing required' in p for p in probs), name
+    assert not any(p.startswith('feature:') and 'missing required' in p for p in probs)
+    assert not any(p.startswith('optional_option:') and 'missing required' in p for p in probs)
 
 
 def test_missing_required_nested_field_reported():
@@ -442,6 +479,254 @@ def test_section_method_survives_parsing():
 
 
 # ---------------------------------------------------------------------------
+# Union-typed fields (A | B | ...): parse_config tries each variant left-to-
+# right and uses the first that coerces cleanly, raising only if none match.
+# ---------------------------------------------------------------------------
+def test_union_resolves_to_first_matching_variant():
+    cfg = covert_to_config(tvalid_with(option={'a': 5, 'foo': 'hi', 'quix': 1.5}))
+    assert isinstance(cfg.option, OptionA)       # OptionA-shaped -> 1st variant
+    assert cfg.option.a == 5
+
+
+def test_union_falls_through_to_second_variant():
+    # OptionA can't hold b/bar (unknown keys) -> resolution falls through to OptionB.
+    cfg = covert_to_config(tvalid_with(option={'b': 7, 'bar': 'xx', 'quix': 2.0}))
+    assert isinstance(cfg.option, OptionB)
+    assert (cfg.option.b, cfg.option.bar, cfg.option.quix) == (7, 'xx', 2.0)
+
+
+def test_union_first_match_wins_and_preserves_type():
+    # int before float: an int value stays an int (the leftmost variant wins)
+    # rather than being widened by the float variant.
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Scalar:
+        value: int | float | str = 0
+
+    assert parse_config(Scalar, {'value': 7}).value == 7            # 1st: int
+    assert type(parse_config(Scalar, {'value': 7}).value) is int
+    assert parse_config(Scalar, {'value': 1.5}).value == 1.5        # 2nd: float
+    assert parse_config(Scalar, {'value': 'hi'}).value == 'hi'      # 3rd: str
+
+
+def test_union_supports_more_than_two_variants_and_reports_all():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Scalar:
+        value: int | float | str = 0
+
+    with pytest.raises(ConfigError) as ei:
+        parse_config(Scalar, {'value': [1, 2]})    # a list matches no variant
+    msg = "\n".join(ei.value.problems)
+    assert 'value' in msg and 'does not match any of' in msg
+    assert 'int' in msg and 'float' in msg and 'str' in msg   # every variant named
+
+
+def test_union_rejects_value_matching_no_variant():
+    # {a: <str>}: invalid for OptionA (a is int) and OptionB (a unknown; b/bar/quix missing).
+    with pytest.raises(ConfigError) as ei:
+        covert_to_config(tvalid_with(option={'a': 'not_an_int'}))
+    assert any('option' in p and 'does not match any of' in p
+               for p in ei.value.problems), ei.value.problems
+
+
+def test_union_does_not_leak_losing_variant_errors():
+    # OptionB-shaped value: OptionA loses internally (b/bar are unknown to it),
+    # but those failures must not surface -- the config parses cleanly.
+    cfg = covert_to_config(tvalid_with(option={'b': 9, 'bar': 'zz', 'quix': 3.0}))
+    assert isinstance(cfg.option, OptionB)
+    assert cfg.option.b == 9
+
+
+def test_union_default_factory_applies_when_omitted():
+    d = tvalid()
+    del d['option']                              # has default_factory -> OptionA()
+    cfg = covert_to_config(d)
+    assert isinstance(cfg.option, OptionA)
+    assert cfg.option.a == 0                      # OptionA's own defaults
+
+
+def test_required_union_missing_is_reported():
+    d = tvalid()
+    del d['option_no_default']                   # required (no default)
+    with pytest.raises(ConfigError) as ei:
+        covert_to_config(d)
+    assert any(p.startswith('option_no_default:') and 'missing required' in p
+               for p in ei.value.problems), ei.value.problems
+
+
+def test_optional_union_accepts_null_and_value():
+    assert covert_to_config(tvalid_with(optional_option=None)).optional_option is None
+    cfg = covert_to_config(tvalid_with(optional_option={'b': 4, 'bar': 'q', 'quix': 1.0}))
+    assert isinstance(cfg.optional_option, OptionB)
+
+
+def test_non_optional_union_rejects_null():
+    # option_no_default is A|B (no None member) -> null matches no variant.
+    with pytest.raises(ConfigError) as ei:
+        covert_to_config(tvalid_with(option_no_default=None))
+    assert any('option_no_default' in p and 'does not match any of' in p
+               for p in ei.value.problems), ei.value.problems
+
+
+# ---------------------------------------------------------------------------
+# Optional fields are never required: an omitted Optional[...] (with no explicit
+# default) silently defaults to None instead of raising "missing required".
+# Covers Optional[dataclass] (`feature`) and Optional[union] (`optional_option`).
+# ---------------------------------------------------------------------------
+def test_optional_field_defaults_to_none_when_omitted():
+    d = tvalid()
+    del d['feature']            # Optional[FeatureSection], no explicit default
+    del d['optional_option']    # Optional[OptionA | OptionB], no explicit default
+    cfg = covert_to_config(d)   # must NOT raise
+    assert cfg.feature is None
+    assert cfg.optional_option is None
+
+
+def test_optional_field_omitted_does_not_report_missing():
+    d = tvalid()
+    del d['feature']
+    del d['optional_option']
+    # parses clean: build it and confirm no error path was taken at all.
+    cfg = covert_to_config(d)
+    assert isinstance(cfg, TestConfig)
+
+
+def test_optional_section_still_validated_when_present():
+    # Optional doesn't mean "skip validation": a present-but-bad section still errors.
+    with pytest.raises(ConfigError) as ei:
+        covert_to_config(tvalid_section('feature', intensity=5.0))   # out of [0, 1]
+    assert any('feature.intensity' in p and 'maximum' in p for p in ei.value.problems)
+
+
+# ---------------------------------------------------------------------------
+# Schema validation (opt-in `validate_schema=True`): static checks on the
+# dataclass schema ITSELF, run BEFORE parsing (fail fast). The headline rule:
+# an Optional[...] field must not declare a default (Optional auto-defaults to
+# None). Plus: unsupported field types and invalid literal defaults. Every
+# problem is aggregated into one ConfigError.
+# ---------------------------------------------------------------------------
+def test_clean_schema_passes_validation():
+    # TestConfig is the canonical consistent schema -> no problems...
+    assert check_schema(TestConfig) == []
+    # ...and validate_schema=True parses valid data without raising.
+    cfg = parse_config(TestConfig, tvalid(), validate_schema=True)
+    assert isinstance(cfg, TestConfig)
+
+
+def test_schema_validation_is_off_by_default():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Bad:
+        x: Optional[int] = None       # inconsistent, but not checked unless opted-in
+    assert parse_config(Bad, {}).x is None          # parses fine, no schema check
+    assert parse_config(Bad, {'x': 5}).x == 5
+
+
+def test_schema_flags_optional_with_none_default():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Bad:
+        x: Optional[int] = None
+    assert any('x' in p and 'Optional' in p and 'default' in p for p in check_schema(Bad))
+    with pytest.raises(ConfigError) as ei:
+        parse_config(Bad, {}, validate_schema=True)   # raised even though data is valid
+    assert any('x' in p and 'Optional' in p for p in ei.value.problems)
+
+
+def test_schema_flags_optional_with_value_default():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Inner:
+        n: int = 0
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Bad:
+        a: Optional[Inner] = 0        # `0` is not a valid Optional[Inner], and a default at all
+    assert any(p.startswith('a:') and 'Optional' in p for p in check_schema(Bad))
+
+
+def test_schema_validation_runs_before_parse_fail_fast():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Bad:
+        x: Optional[int] = None       # schema inconsistency
+        req: int                      # required; absent in the data below
+    with pytest.raises(ConfigError) as ei:
+        parse_config(Bad, {}, validate_schema=True)
+    # fail fast: only the schema problem is raised; the data was never parsed,
+    # so the missing-required `req` is NOT among the problems.
+    assert any('Optional' in p for p in ei.value.problems)
+    assert not any('req' in p and 'missing required' in p for p in ei.value.problems)
+
+
+def test_schema_validation_aggregates_all_problems():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Bad:
+        x: Optional[int] = None
+        y: Optional[str] = "hi"
+        z: Optional[float] = 1.0
+    probs = check_schema(Bad)
+    assert len(probs) >= 3
+    for name in ('x', 'y', 'z'):
+        assert any(p.startswith(f"{name}:") for p in probs), name
+    with pytest.raises(ConfigError) as ei:
+        parse_config(Bad, {}, validate_schema=True)
+    assert len(ei.value.problems) >= 3
+
+
+def test_schema_flags_unsupported_field_type():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Bad:
+        x: complex = 0j               # parser has no coercion for complex
+    assert any('x' in p and 'unsupported' in p for p in check_schema(Bad))
+
+
+def test_schema_flags_invalid_literal_default():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Bad:
+        n: Annotated[int, Range(0, 10)] = 99    # default violates its own bound
+        s: int = "not an int"                   # default has the wrong type
+    probs = check_schema(Bad)
+    assert any(p.startswith('n:') and 'invalid default' in p for p in probs)
+    assert any(p.startswith('s:') and 'invalid default' in p for p in probs)
+
+
+def test_schema_detects_nested_dataclass_inconsistency():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Inner:
+        bad: Optional[int] = None
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Outer:
+        inner: Inner
+    assert any('inner.bad' in p and 'Optional' in p for p in check_schema(Outer))
+
+
+def test_schema_detects_inconsistency_in_union_variant():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class V1:
+        ok: int = 0
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class V2:
+        bad: Optional[int] = None     # inside the 2nd variant
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Outer:
+        choice: V1 | V2
+    assert any('bad' in p and 'Optional' in p for p in check_schema(Outer))
+
+
+def test_schema_detects_inconsistency_in_list_item():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class ItemBad:
+        bad: Optional[int] = None
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Outer:
+        items: list[ItemBad]
+    assert any('bad' in p and 'Optional' in p for p in check_schema(Outer))
+
+
+def test_schema_validation_ignores_runtime_fields():
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Bad:
+        # runtime fields are never read from the file -> their schema is irrelevant
+        x: Optional[int] = dataclasses.field(default=None, metadata={'runtime': True})
+    assert check_schema(Bad) == []
+
+
+# ---------------------------------------------------------------------------
 # Introspection-driven tests: walk the TestConfig schema, so any field added
 # to it is automatically covered for type/bound/choices/unknown-key/required.
 # ---------------------------------------------------------------------------
@@ -484,11 +769,21 @@ def iter_leaf_fields(cls, prefix=()):
         yield seg, base, consts
 
 
+def _admits_none(ann):
+    """True if the annotation is Optional[...] (a union including None)."""
+    base = get_args(ann)[0] if get_origin(ann) is Annotated else ann
+    return get_origin(base) in (Union, types.UnionType) and type(None) in get_args(base)
+
+
 def required_names(cls):
+    # Mirrors parse_config: a field is required only if it has no default/factory
+    # AND is not Optional (Optional[...] silently defaults to None when omitted).
+    hints = get_type_hints(cls, include_extras=True)
     return [f.name for f in dataclasses.fields(cls)
             if not f.metadata.get('runtime')
             and f.default is dataclasses.MISSING
-            and f.default_factory is dataclasses.MISSING]
+            and f.default_factory is dataclasses.MISSING
+            and not _admits_none(hints[f.name])]
 
 
 def _build_nested(segments, value):
@@ -523,7 +818,9 @@ def test_schema_has_leaf_fields():
 
 
 def test_schema_has_required_fields():
-    assert {'gain', 'sub_section', 'feature', 'items'} <= set(REQUIRED_TOP)
+    # Non-optional no-default fields are required; Optional[...] ones are not.
+    assert {'gain', 'sub_section', 'option_no_default', 'items'} <= set(REQUIRED_TOP)
+    assert not ({'feature', 'optional_option'} & set(REQUIRED_TOP))   # Optional -> not required
 
 
 def test_full_config_builds_full_object():
