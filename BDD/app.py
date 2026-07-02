@@ -174,7 +174,7 @@ def _read_camera_id(buffer: Gst.Buffer) -> int:
 # libcamera's CLOCK_BOOTTIME and the appsrc-push stamp is time.monotonic_ns();
 # on a Pi that never suspends these share an origin, so the Stage-A delta is
 # accurate in practice (and the offset is constant, so cross-run deltas are valid).
-_LATENCY_LOG_EVERY_N = 100
+_LATENCY_LOG_EVERY_N = int(os.environ.get("BDD_LATENCY_LOG_EVERY_N", "100"))
 _stage_a_samples_ms: list[float] = []
 _stage_b_samples_ms: list[float] = []
 _latency_frame_counter = 0
@@ -208,6 +208,25 @@ def _record_stage_latency(stage_a_ms, stage_b_ms):
     )
     _stage_a_samples_ms.clear()
     _stage_b_samples_ms.clear()
+
+
+# Detection throughput (callbacks/s) — time-based so it's meaningful even when
+# tiling drops delivered fps well below capture. Logged every ~2 s.
+_det_fps_last_t = None
+_det_fps_count = 0
+
+def _log_det_fps():
+    global _det_fps_last_t, _det_fps_count
+    _det_fps_count += 1
+    now = time.monotonic()
+    if _det_fps_last_t is None:
+        _det_fps_last_t = now
+        return
+    dt = now - _det_fps_last_t
+    if dt >= 2.0:
+        logger.info("!!! DET FPS: %.1f (%d callbacks / %.2fs)", _det_fps_count / dt, _det_fps_count, dt)
+        _det_fps_last_t = now
+        _det_fps_count = 0
 
 _MIN_MATCH_IOU = 0.1
 
@@ -244,6 +263,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
     # Using the user_data to count the number of frames
     user_data.increment()
+    _log_det_fps()
 
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
@@ -529,6 +549,13 @@ def main():
         switch_test_s = float(sys.argv[i + 1])
         del sys.argv[i:i + 2]
 
+    # --plus-one: benchmark the "NxM + 1" load — open both branches so the tile
+    # grid AND a whole frame are inferred each frame (needs switchable tiling).
+    plus_one = False
+    if "--plus-one" in sys.argv:
+        plus_one = True
+        sys.argv.remove("--plus-one")
+
     if DEBUG:
         logger.error('')
         logger.error("!!! ============================================================== !!!")
@@ -585,7 +612,7 @@ def main():
     # When on, the tile-branch geometry is the --switch-tiles value (or config
     # tiles_x/y), and the pipeline builds whole-frame + tile branches hot-switchable
     # at runtime (whole-frame active at startup).
-    switchable = switch_tiles_override is not None or config.tiling.switchable or config.tiling.auto_switch
+    switchable = switch_tiles_override is not None or config.tiling.switchable or config.tiling.auto_switch or plus_one
     if switchable:
         tiles = switch_tiles_override if switch_tiles_override is not None \
             else (config.tiling.tiles_x, config.tiling.tiles_y)
@@ -718,6 +745,14 @@ def main():
                 to_tiling = not to_tiling
         threading.Thread(target=_tiling_switch_test, name="tiling-switch-test", daemon=True).start()
         logger.info("!!! tiling-switch-test: toggling whole<->tiling every %.1fs", switch_test_s)
+
+    # --plus-one benchmark: once the pipeline is warm, open both branches so the
+    # device runs NxM + 1 inferences/frame; the measured path stays the tile branch.
+    if plus_one and switchable:
+        def _enable_plus_one():
+            time.sleep(6)
+            app.enable_plus_one()
+        threading.Thread(target=_enable_plus_one, name="plus-one-enable", daemon=True).start()
         logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
 
     logger.info("!!! Config: %s", config)

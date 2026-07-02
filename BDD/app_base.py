@@ -388,6 +388,31 @@ class GStreamerApp:
         self._tiling_active = to_tiling
         logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
 
+    def enable_plus_one(self):
+        """Benchmark aid (switchable pipeline only): open BOTH valves so the tile
+        branch AND the whole-frame branch feed the device every frame — i.e. the
+        "NxM + 1" load (NxM tiles + 1 whole frame = NxM+1 inferences/frame, two
+        net-groups round-robin). Keeps the input-selector on the tile branch so the
+        measured capture->detection path is the tiling path under whole-frame
+        contention (matches the bench 'NxM+1' latency)."""
+        sel = self.pipeline.get_by_name("branch_selector")
+        v_tile = self.pipeline.get_by_name("valve_tile")
+        if sel is None or v_tile is None:
+            logger.warning("enable_plus_one: switchable-tiling pipeline not present; ignoring")
+            return
+        v_tile.set_property("drop", False)   # tile branch now also feeds (whole stays open)
+        tile_pad = sel.get_static_pad("sink_1")
+        ready = threading.Event()
+        def _first(pad, info, _u):
+            ready.set()
+            return Gst.PadProbeReturn.REMOVE
+        pid = tile_pad.add_probe(Gst.PadProbeType.BUFFER, _first, None)
+        if not ready.wait(3.0):
+            try: tile_pad.remove_probe(pid)
+            except Exception: pass
+        sel.set_property("active-pad", tile_pad)
+        logger.warning("!!! PLUS-ONE active: whole-frame + tiles both feeding device (NxM+1)")
+
     def _log_pipeline_health(self):
         """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)
         and current-level-buffers for every named GstQueue. If the deepest probe (last
