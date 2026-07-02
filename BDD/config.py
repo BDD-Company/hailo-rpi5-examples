@@ -169,6 +169,15 @@ class Config:
         # (e.g. tile-to-reacquire when the target is lost) trade latency for recall
         # on demand. When false, tiling is static (whole-frame if 1×1, else fixed).
         switchable: bool = False
+        # Automatic detection-state policy (implies switchable): switch to tiling
+        # after `lost_frames_to_tile` consecutive frames with no confident target
+        # (reacquire small/distant objects), and back to whole-frame after
+        # `locked_frames_to_whole` consecutive confident frames (restore low
+        # latency for control). A target counts as "confident" at >= switch_conf.
+        auto_switch: bool = False
+        lost_frames_to_tile:    Annotated[int, Range(min=1)] = 10
+        locked_frames_to_whole: Annotated[int, Range(min=1)] = 5
+        switch_conf: Annotated[float, Range(0.0, 1.0)] = 0.4
     tiling: Tiling = field(default_factory=Tiling)
 
     @dataclass(slots=True, kw_only=True, frozen=True)

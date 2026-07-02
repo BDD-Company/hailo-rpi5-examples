@@ -59,6 +59,57 @@ class user_app_callback_class(app_callback_class):
         self.detections_queue = detections_queue
         self.tracker = tracker
 
+        # Detection-state tiling policy (configured by main() when auto_switch is
+        # on). Switch to tiling after `lost_frames_to_tile` consecutive frames with
+        # no confident target (reacquire), back to whole-frame after
+        # `locked_frames_to_whole` confident frames (restore low latency).
+        self.request_switch = None            # callable(bool) -> app.switch_tiling
+        self.auto_switch = False
+        self.switch_conf = 0.4
+        self.lost_frames_to_tile = 10
+        self.locked_frames_to_whole = 5
+        self._lost_streak = 0
+        self._lock_streak = 0
+        self._tiling_on = False               # current active branch (False=whole)
+        self._switch_pending = False
+        self._switch_lock = threading.Lock()
+
+    def note_detection(self, best_conf: float):
+        """Per-frame detection-state hot-switch policy. `best_conf` is the highest
+        target confidence this frame (0 if none). Decides whole<->tile and fires
+        the (blocking) switch on a worker thread so the GStreamer streaming thread
+        is never stalled. No-op unless auto_switch is configured."""
+        if not self.auto_switch or self.request_switch is None:
+            return
+        if best_conf >= self.switch_conf:
+            self._lock_streak += 1
+            self._lost_streak = 0
+        else:
+            self._lost_streak += 1
+            self._lock_streak = 0
+        want_tiling = self._tiling_on
+        if not self._tiling_on and self._lost_streak >= self.lost_frames_to_tile:
+            want_tiling = True          # target lost -> tile to reacquire
+        elif self._tiling_on and self._lock_streak >= self.locked_frames_to_whole:
+            want_tiling = False         # confidently locked -> whole-frame (low latency)
+        if want_tiling != self._tiling_on:
+            self._fire_switch(want_tiling)
+
+    def _fire_switch(self, to_tiling: bool):
+        with self._switch_lock:
+            if self._switch_pending or to_tiling == self._tiling_on:
+                return
+            self._switch_pending = True
+        def _run():
+            try:
+                self.request_switch(to_tiling)
+                self._tiling_on = to_tiling
+            finally:
+                self._lost_streak = 0
+                self._lock_streak = 0
+                self._switch_pending = False
+        threading.Thread(target=_run, name="tiling-policy-switch", daemon=True).start()
+
 
 # -----------------------------------------------------------------------------------------------
 # User-defined callback function
@@ -264,12 +315,14 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     else:
         dets_array = np.empty((0, 5))
 
+    _best_conf = max((c for _, c in raw_dets), default=0.0)
+    # Detection-state whole<->tile policy (no-op unless tiling.auto_switch is on).
+    user_data.note_detection(_best_conf)
+
     # Throttled detection summary — confirms the model is producing valid
     # detections from the current pixel format (e.g. NV12 fed correctly).
     if frame_id % 30 == 0:
-        _confs = [c for _, c in raw_dets]
-        logger.info("!!! DETS frame=#%d n=%d maxconf=%.3f", frame_id, len(raw_dets),
-                    max(_confs) if _confs else 0.0)
+        logger.info("!!! DETS frame=#%d n=%d maxconf=%.3f", frame_id, len(raw_dets), _best_conf)
 
     # logger.debug(
     #     "frame=#%04d ByteTracker input: %d detections %s",
@@ -532,7 +585,7 @@ def main():
     # When on, the tile-branch geometry is the --switch-tiles value (or config
     # tiles_x/y), and the pipeline builds whole-frame + tile branches hot-switchable
     # at runtime (whole-frame active at startup).
-    switchable = switch_tiles_override is not None or config.tiling.switchable
+    switchable = switch_tiles_override is not None or config.tiling.switchable or config.tiling.auto_switch
     if switchable:
         tiles = switch_tiles_override if switch_tiles_override is not None \
             else (config.tiling.tiles_x, config.tiling.tiles_y)
@@ -621,6 +674,18 @@ def main():
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
+
+    # Detection-state tiling policy: give the callback a handle to switch_tiling
+    # and the thresholds. Only active when switchable + auto_switch are on.
+    if switchable and config.tiling.auto_switch:
+        user_data.request_switch = app.switch_tiling
+        user_data.auto_switch = True
+        user_data.switch_conf = config.tiling.switch_conf
+        user_data.lost_frames_to_tile = config.tiling.lost_frames_to_tile
+        user_data.locked_frames_to_whole = config.tiling.locked_frames_to_whole
+        logger.info("!!! auto-switch tiling policy: lost>=%d -> tile, locked>=%d -> whole, conf>=%.2f",
+                    config.tiling.lost_frames_to_tile, config.tiling.locked_frames_to_whole,
+                    config.tiling.switch_conf)
 
     # Optional dual-camera switching verification harness. The thread drives
     # the same CameraSwitcher.toggle() that production policy will use, so a
