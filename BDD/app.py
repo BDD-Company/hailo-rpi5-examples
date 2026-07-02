@@ -412,12 +412,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None, video_format=None, tiles=None, switchable_tiling=False):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None, video_format=None, tiles=None, switchable_tiling=False, merge_tiles=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
-        super().__init__(app_callback, user_data, parser, inference=inference, video_format=video_format, tiles=tiles, switchable_tiling=switchable_tiling)
+        super().__init__(app_callback, user_data, parser, inference=inference, video_format=video_format, tiles=tiles, switchable_tiling=switchable_tiling, merge_tiles=merge_tiles)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -556,6 +556,15 @@ def main():
         plus_one = True
         sys.argv.remove("--plus-one")
 
+    # --merge-tiles NxM: merged "NxM + 1" via the custom crop .so — the grid PLUS
+    # one whole frame through ONE net-group (single-branch; no round-robin tax).
+    merge_tiles_override = None
+    if "--merge-tiles" in sys.argv:
+        i = sys.argv.index("--merge-tiles")
+        nx, _, ny = sys.argv[i + 1].lower().partition("x")
+        merge_tiles_override = (int(nx), int(ny))
+        del sys.argv[i:i + 2]
+
     if DEBUG:
         logger.error('')
         logger.error("!!! ============================================================== !!!")
@@ -612,8 +621,14 @@ def main():
     # When on, the tile-branch geometry is the --switch-tiles value (or config
     # tiles_x/y), and the pipeline builds whole-frame + tile branches hot-switchable
     # at runtime (whole-frame active at startup).
+    merge_tiles = merge_tiles_override is not None
     switchable = switch_tiles_override is not None or config.tiling.switchable or config.tiling.auto_switch or plus_one
-    if switchable:
+    if merge_tiles:
+        switchable = False  # merged = single branch (custom .so), not two-branch
+        tiles = merge_tiles_override
+        logger.info("!!! MERGED tiling: %dx%d + 1 whole-frame in ONE net-group (%d inf/frame)",
+                    tiles[0], tiles[1], tiles[0] * tiles[1] + 1)
+    elif switchable:
         tiles = switch_tiles_override if switch_tiles_override is not None \
             else (config.tiling.tiles_x, config.tiling.tiles_y)
         if tiles == (1, 1):
@@ -697,7 +712,8 @@ def main():
         inference=config.inference,
         video_format=video_format,
         tiles=tiles,
-        switchable_tiling=switchable)
+        switchable_tiling=switchable,
+        merge_tiles=merge_tiles)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher

@@ -255,7 +255,7 @@ def INFERENCE_PIPELINE(
 
 
 def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='inference_wrapper',
-                               tiles_x=1, tiles_y=1, tiling_overlap=0.0):
+                               tiles_x=1, tiles_y=1, tiling_overlap=0.0, crop_so_path=None):
     """
     Creates a GStreamer pipeline string that wraps an inner pipeline with a cropper and aggregator.
     This allows to keep the original video resolution and color-space (format) of the input frame.
@@ -286,7 +286,22 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
         str: A string representing the GStreamer pipeline for the inference wrapper.
     """
     tiled = tiles_x > 1 or tiles_y > 1
-    if not tiled:
+    if crop_so_path:
+        # Merged "NxM + 1": a stock hailocropper driving a CUSTOM crop .so
+        # (cropper/tiles_and_whole_cropper) that emits the tiles_x*tiles_y grid
+        # PLUS one whole-frame crop — so tiles AND the "+1" run through ONE
+        # hailonet (single net-group), avoiding the round-robin two-net-group tax.
+        # Grid comes from the TILES_X / TILES_Y env vars (set by the app). The
+        # hailoaggregator maps each crop's detections back to full-frame coords.
+        cropper = (
+            f'hailocropper name={name}_crop so-path={crop_so_path} function-name=create_crops '
+            f'use-letterbox=true resize-method=inter-area internal-offset=true '
+        )
+        # plain hailoaggregator has flatten-detections (lifts per-crop dets into the
+        # frame ROI so the callback finds them) but NOT iou-threshold.
+        aggregator = f'hailoaggregator name={name}_agg flatten-detections=true '
+        tile_q_depth = tiles_x * tiles_y + 2   # NxM tiles + 1 whole + margin
+    elif not tiled:
         # Get the directory for post-processing shared objects
         tappas_post_process_dir = os.environ.get(TAPPAS_POSTPROC_PATH_KEY, TAPPAS_POSTPROC_PATH_DEFAULT)
         whole_buffer_crop_so = os.path.join(tappas_post_process_dir, 'cropping_algorithms/libwhole_buffer.so')
