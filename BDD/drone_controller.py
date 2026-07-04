@@ -353,6 +353,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     pd_coeff_p_dynamic_stage = None
 
 
+    drone_config = dict(drone_config)
+    drone_config['yaw_mode'] = cfg.yaw_mode
+    drone_config['yaw_freeze_deg'] = cfg.yaw_freeze_deg
+    drone_config['yaw_rate_max_deg_s'] = cfg.yaw_rate_max_deg_s
+    drone_config['yaw_nadir_img_frac'] = cfg.yaw_nadir_img_frac  # NADIR-FREEZE
     drone = DroneMover(drone_connection_string, drone_config)
     logger.debug("starting up drone... with %s, config: %s", drone_connection_string, drone_config)
 
@@ -416,6 +421,7 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
     lead_home_ned = None       # captured takeoff spot for guidance_lead
     lead_last_down = None      # last known target altitude (down) for the lead-hold
     lead_last_setpoint = None  # last intercept-point setpoint (n, e, down) to hold when target lost
+    drone_pose = None  # persists across frames; last known pose for out-of-view hold branches (avoids UnboundLocalError on early no-detection frames)
     lead_dir_vel = None        # robust line-fit target velocity (direction) for the intercept foot
     locked_track_id: int | None = None
 
@@ -650,6 +656,11 @@ async def drone_controlling_thread_async(drone_connection_string, drone_config, 
                 pd_coeff_p = pd_coeff_p_for_target_size(target_size)
 
                 target_relative_pos = AIM_POINT - detection.bbox.center
+                # NADIR-FREEZE (revert: delete these 3 lines): flag whether the
+                # target sits near the up-camera image centre (near-nadir), where
+                # the horizontal bearing degenerates. Used to gate the yaw freeze.
+                _nadir_frac = ((AIM_POINT.x - detection.bbox.center.x) ** 2 + (AIM_POINT.y - detection.bbox.center.y) ** 2) ** 0.5
+                drone._near_nadir = _nadir_frac < cfg.yaw_nadir_img_frac
                 logger.debug("!!! target : %s, size: %s, pd_coeff_p: %s", target_relative_pos, target_size, pd_coeff_p)
 
                 # TODO maybe use frame capture time?

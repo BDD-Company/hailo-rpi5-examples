@@ -70,6 +70,17 @@ class DroneMover():
         self.initial_pos = None
         self.initial_yaw = None
         self.use_set_attitude = self.config.get('use_set_attitude', False)
+        # A/B yaw experiment: bearing(=guidance) | freeze(hold first) | ratelimit(slew)
+        self.yaw_mode = self.config.get('yaw_mode', 'bearing')
+        self.yaw_freeze_deg = self.config.get('yaw_freeze_deg', None)
+        self.yaw_rate_max_deg_s = self.config.get('yaw_rate_max_deg_s', 30.0)
+        # NADIR-FREEZE: gate threshold + per-frame flag (set by the controller).
+        # >0 => freeze/ratelimit apply ONLY when the target is near-nadir.
+        self.yaw_nadir_img_frac = self.config.get('yaw_nadir_img_frac', 0.0)
+        self._near_nadir = True   # default True => unconditional when gate off
+        self._yaw_frozen = None
+        self._yaw_prev = None
+        self._yaw_prev_t = None
         self.cruise_altitude = self.config.get('cruise_altitude', DEFAULT_TAKEOFF_ALTITUDE_M)
         self.upside_down_angle_deg = self.config.get('upside_down_angle_deg', UPSIDE_DOWN_ANGLE_DEG)
         self.upside_down_hold_s = self.config.get('upside_down_hold_s', UPSIDE_DOWN_HOLD_S)
@@ -330,6 +341,38 @@ class DroneMover():
         logger.info("!!! executing: %s ", drone_offboard.last_command())
 
 
+    def _yaw_cmd(self, cmd_yaw):
+        """A/B yaw override: bearing (as-is) | freeze (hold first) | ratelimit (slew-limit)."""
+        import time as _t
+        # ── CONDITIONAL NEAR-NADIR FREEZE (revert: delete this block) ──────────
+        # Freeze/ratelimit yaw ONLY when the target sits near the up-camera image
+        # centre (near-nadir), where the horizontal bearing atan2(E,N) is degenerate
+        # and chasing it drove the раскачка. Off-nadir the bearing is meaningful, so
+        # track it (A/B 2026-07-04: freeze lifted nadir-120m cells 30%->75% hit but
+        # HURT the off-nadir 100x150 cell). yaw_nadir_img_frac<=0 => unconditional.
+        if (self.yaw_mode in ('freeze', 'ratelimit')
+                and self.yaw_nadir_img_frac > 0.0 and not self._near_nadir):
+            self._yaw_frozen = None      # re-latch fresh on the next near-nadir entry
+            self._yaw_prev = None; self._yaw_prev_t = None
+            return cmd_yaw               # off-nadir: track the bearing, no freeze
+        # ── END conditional block ─────────────────────────────────────────────
+        mode = self.yaw_mode
+        if mode == 'freeze':
+            if self._yaw_frozen is None:
+                self._yaw_frozen = self.yaw_freeze_deg if self.yaw_freeze_deg is not None else cmd_yaw
+            return self._yaw_frozen
+        if mode == 'ratelimit':
+            now = _t.monotonic()
+            if self._yaw_prev is None:
+                self._yaw_prev = cmd_yaw; self._yaw_prev_t = now; return cmd_yaw
+            dt = max(1e-3, now - self._yaw_prev_t)
+            max_step = self.yaw_rate_max_deg_s * dt
+            err = (cmd_yaw - self._yaw_prev + 180) % 360 - 180
+            step = max(-max_step, min(max_step, err))
+            self._yaw_prev = self._yaw_prev + step; self._yaw_prev_t = now
+            return self._yaw_prev
+        return cmd_yaw
+
     async def move_to_target_pronav(self, target_position_ned, target_velocity_ned,
                                     drone_position_ned, *, v_close, n, v_max, vz_max=10.0):
         """Collision-course (proportional-navigation) velocity guidance.
@@ -347,7 +390,7 @@ class DroneMover():
         )
         drone_offboard = debug_collect_call_info(self.drone.offboard)
         await drone_offboard.set_velocity_ned(
-            VelocityNedYaw(cmd.north_m_s, cmd.east_m_s, cmd.down_m_s, cmd.yaw_deg)
+            VelocityNedYaw(cmd.north_m_s, cmd.east_m_s, cmd.down_m_s, self._yaw_cmd(cmd.yaw_deg))
         )
         logger.info("!!! executing: %s ", drone_offboard.last_command())
 
@@ -365,7 +408,7 @@ class DroneMover():
         from mavsdk.offboard import VelocityNedYaw
         drone_offboard = debug_collect_call_info(self.drone.offboard)
         await drone_offboard.set_velocity_ned(
-            VelocityNedYaw(cmd.north_m_s, cmd.east_m_s, cmd.down_m_s, cmd.yaw_deg))
+            VelocityNedYaw(cmd.north_m_s, cmd.east_m_s, cmd.down_m_s, self._yaw_cmd(cmd.yaw_deg)))
         logger.info("!!! VISUAL %s: %s", cmd.phase, drone_offboard.last_command())
 
     def _vertical_energy_bonus(self, current_telemetry) -> float:

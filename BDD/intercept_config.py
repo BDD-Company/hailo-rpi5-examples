@@ -167,6 +167,14 @@ class InterceptConfig:
     parallax_max_miss_m: float = 8.0
     parallax_max_w: float = 0.7
 
+    # guidance: yaw A/B experiment (bearing|freeze|ratelimit)
+    yaw_mode: str = 'bearing'
+    yaw_freeze_deg: Optional[float] = None
+    yaw_rate_max_deg_s: float = 30.0
+    # NADIR-FREEZE: >0 enables conditional near-nadir yaw freeze (image-centre
+    # fraction below which the target counts as near-nadir). 0 = old unconditional.
+    yaw_nadir_img_frac: float = 0.25
+
     def __post_init__(self):
         # Replace None sentinel defaults with actual list defaults from YAML
         if self.frame_angular_size_deg is None:
