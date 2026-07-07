@@ -284,6 +284,7 @@ class Config:
         width:                Annotated[int, Range(min=1)] = 1280
         height:               Annotated[int, Range(min=1)] = 720
         fps:                  Annotated[int, Range(min=1)] = 30
+        # TODO: infer video format based on hef file input
         video_format:         Annotated[str, Choices('RGB', 'BGR', 'RGBA', 'BGRA',
                                     'XRGB', 'XBGR', 'YUV420', 'NV12')] = 'RGB'
         active_id:            Annotated[int, Range(min=0)] = 0
