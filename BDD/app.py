@@ -246,7 +246,7 @@ def _match_track_to_detection(
         inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
         area_a = (x2 - x1) * (y2 - y1)
         area_b = b.width * b.height
-        union = area_a + area_b - intervnc
+        union = area_a + area_b - inter
         iou = inter / union if union > 0 else 0.0
         if iou > best_iou:
             best_iou = iou
@@ -392,6 +392,9 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         matched_sides = [max(raw_dets[i][0].width, raw_dets[i][0].height)
                          for i in track_id_map]      # track_id_map keys are det indices
         primary_side = max(matched_sides) if matched_sides else None
+    if frame_id % 30 == 0:
+        logger.info("!!! TILING-SIZE frame=#%d use_tracker=%s tracks=%d primary_side=%s",
+                    frame_id, USE_TRACKER, len(track_id_map), primary_side)
     user_data.note_tiling(primary_side, time.monotonic())
 
     # Construct immutable Detection objects with track_id set at creation time

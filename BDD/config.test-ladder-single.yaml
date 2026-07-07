@@ -122,7 +122,7 @@ drone:
     belly_down_min_horizontal_g_mss: 2.0
 
 bytetrack:
-  enabled: false
+  enabled: true
   track_thresh: 0.3
   det_thresh: 0.35
   match_thresh: 0.3
@@ -136,7 +136,7 @@ bytetrack:
 # --- size-driven tiling ladder (manual-cycle validation) ---
 tiling:
   overlap: 0.10
-  auto_switch: false
+  auto_switch: true
   lost_to_2x1_s: 1.0
   lost_to_3x2_s: 10.0
   ladder:
