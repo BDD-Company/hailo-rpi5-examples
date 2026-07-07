@@ -156,56 +156,52 @@ class Config:
 
     @dataclass(slots=True, kw_only=True, frozen=True)
     class Tiling:
-        # Inference tile grid. 1×1 = whole-frame (default, lowest latency). >1
-        # enables hailotilecropper: tiles_x*tiles_y inferences/frame, raising
-        # small-object recall at the cost of latency (~N×15 ms on Hailo-8).
-        tiles_x: Annotated[int, Range(min=1)] = 1
-        tiles_y: Annotated[int, Range(min=1)] = 1
-        # Fractional tile overlap on both axes; 0 = abutting tiles. Strictly < 1:
-        # at 1.0 every tile would cover the whole frame (degenerate grid).
+        # Ladder-only tiling control: the size-driven ladder is the SOLE tiling
+        # mechanism. The binary whole<->tile switch and its fields (tiles_x, tiles_y,
+        # switchable, start_on_tiling, switch_conf, lost_frames_to_tile,
+        # locked_frames_to_whole, locked_streak_miss_penalty) and the static --tiles
+        # path are REMOVED. "Switchable" is derived at runtime as len(ladder) >= 2.
+        # start_on_tiling is subsumed: at boot there is no matched track, so the
+        # target-lost escalation below walks the ladder down on its own.
+
+        @dataclass(slots=True, kw_only=True, frozen=True)
+        class Tier:
+            # One rung of the ladder. tiles_x×tiles_y = the grid this rung runs
+            # (1×1 = whole-frame). up_side/down_side are the max(bw,bh) linear-fraction
+            # thresholds for leaving this rung: climb toward whole when side >= up_side,
+            # descend toward more tiles when side < down_side. End rungs omit the
+            # threshold that runs off the ladder (tier 0 = most tiles has no down_side;
+            # the whole-frame rung has no up_side).
+            tiles_x: Annotated[int, Range(min=1)] = 1
+            tiles_y: Annotated[int, Range(min=1)] = 1
+            # Optional: omit the key -> None (parser auto-Nones; no explicit default).
+            up_side:   Optional[Annotated[float, Range(0.0, 1.0)]]
+            down_side: Optional[Annotated[float, Range(0.0, 1.0)]]
+
+        # Ordered ladder (index 0 = MOST tiles -> last = whole-frame). Empty/absent =
+        # plain whole-frame (no tiling, not switchable). Structural validation lives in
+        # tiling_policy.build_ladder (last rung 1×1, strictly-decreasing tile counts).
+        ladder: list[Tier] = field(default_factory=list)
+        # Fractional tile overlap on both axes; 0 = abutting tiles. Applied to every
+        # tiled rung. Strictly < 1: at 1.0 every tile would cover the whole frame.
         overlap: Annotated[float, Range(0.0, 1.0, max_inclusive=False)] = 0.0
         # IoU above which the hailotileaggregator merges two detections coming from
         # different tiles — i.e. how aggressively objects straddling a tile seam get
-        # deduped. Only used on the tiled path. Lower = merge more eagerly.
+        # deduped. Only used on tiled rungs. Lower = merge more eagerly.
         tile_iou_threshold: Annotated[float, Range(0.0, 1.0)] = 0.4
-        # Runtime-switchable tiling: build BOTH a whole-frame branch and a
-        # tiles_x×tiles_y branch behind valves + an input-selector, and hot-switch
-        # between them at runtime (whole-frame active at startup). Lets a policy
-        # (e.g. tile-to-reacquire when the target is lost) trade latency for recall
-        # on demand. When false, tiling is static (whole-frame if 1×1, else fixed).
-        switchable: bool = False
-        # Which branch is ACTIVE at startup (implies switchable). False = whole-frame,
-        # the lowest-latency path. True = boot on the tiles_x×tiles_y branch, so the
-        # first frames are inferred at tiling's small-object recall; the policy then
-        # switches to whole-frame once the target is locked (see locked_frames_to_whole).
-        # Costs latency until that happens — 2x1 StageB ~28ms vs ~13ms whole-frame.
-        start_on_tiling: bool = False
-        # Automatic detection-state policy (implies switchable): switch to tiling
-        # after `lost_frames_to_tile` consecutive frames with no confident target
-        # (reacquire small/distant objects), and back to whole-frame after
-        # `locked_frames_to_whole` consecutive confident frames (restore low
-        # latency for control). A target counts as "confident" at >= switch_conf.
+        # Run the size+loss policy automatically. When false the ladder pipeline is
+        # still built (if len(ladder)>=2) but only --test-switch-s drives switching.
         auto_switch: bool = False
-        lost_frames_to_tile:    Annotated[int, Range(min=1)] = 10
-        locked_frames_to_whole: Annotated[int, Range(min=1)] = 5
-        # A missed frame SUBTRACTS this from the confident-frame streak (floor 0) rather
-        # than resetting it. Resetting would demand `locked_frames_to_whole` hits in an
-        # unbroken row, which a detector that misses even occasionally never delivers —
-        # the rig would stay pinned to the high-latency tile branch. With miss rate m the
-        # streak drifts by (1-m) - m*P per frame; below m = 1/(1+P) the drift is positive
-        # and the return to whole-frame is prompt, above it it happens only by chance.
-        # P=2 is prompt below a 1-in-3 miss rate. Simulated boot-on-tiling time to reach
-        # whole-frame (locked=20, 28fps), old reset rule vs P=2: 17% misses 9.1s -> 1.4s;
-        # 25% 27.3s -> 2.5s; 40% never -> 19.4s. P=0 counts confident frames regardless of
-        # misses; P >= locked_frames_to_whole reproduces the old reset-on-miss behaviour.
-        locked_streak_miss_penalty: Annotated[int, Range(min=0)] = 2
-        switch_conf: Annotated[float, Range(0.0, 1.0)] = 0.4
-        # Post-switch watchdog (switchable tiling only). switch_tiling refuses to move
-        # onto a branch that never warms up, but nothing catches a branch that warms up
-        # and LATER dies: app_callback stops firing and the control loop starves. If no
-        # callback arrives for stall_timeout_s while tiling is active, revert to
-        # whole-frame, then refuse to re-enter tiling for stall_cooldown_s (otherwise the
-        # policy rebuilds its lost-streak in ~0.7s and dives back into the dead branch).
+        # Target-lost escalation: drop to the rung above whole after lost_to_2x1_s of
+        # no matched track, then to tier 0 (most tiles) after lost_to_3x2_s. Seconds.
+        lost_to_2x1_s: Annotated[float, Range(min=0.0)] = 1.0
+        lost_to_3x2_s: Annotated[float, Range(min=0.0)] = 10.0
+        # Post-switch watchdog. switch_to_tier refuses to move onto a rung that never
+        # warms up, but nothing catches a rung that warms up and LATER dies:
+        # app_callback stops firing and the control loop starves. If no callback
+        # arrives for stall_timeout_s while off the whole-frame rung, revert to
+        # whole-frame, then refuse to leave it again for stall_cooldown_s (otherwise
+        # the policy re-escalates within ~1s and dives back into the dead rung).
         stall_timeout_s:  Annotated[float, Range(min=0.0, min_inclusive=False)] = 2.0
         stall_cooldown_s: Annotated[float, Range(min=0.0)] = 30.0
     tiling: Tiling = field(default_factory=Tiling)
