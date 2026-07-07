@@ -10,12 +10,31 @@ import numpy as np
 from helpers import XY, Rect
 
 
-def _extract_largest_object_contour(frame: np.ndarray, bbox: Rect) -> tuple[np.ndarray, int, int, int, int] | None:
-    """Extract largest segmented contour inside bbox using inverted Otsu threshold."""
+def _frame_to_gray(frame) -> 'np.ndarray | None':
+    """Return a 2-D grayscale view of a captured frame.
+
+    Handles both capture formats:
+      - RGB ndarray (H, W, 3): converted with RGB2GRAY.
+      - NV12 planar (Y, UV) tuple, as get_numpy_from_buffer returns under NV12
+        capture: the full-res Y plane already IS the luma/grayscale image, so we
+        use it directly — no colour conversion (zero cost).
+    """
     if frame is None:
         return None
+    if isinstance(frame, tuple):
+        return frame[0]  # NV12 luma plane
+    if frame.ndim == 3:
+        return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    return frame
 
-    fh, fw = frame.shape[:2]
+
+def _extract_largest_object_contour(frame: np.ndarray, bbox: Rect) -> tuple[np.ndarray, int, int, int, int] | None:
+    """Extract largest segmented contour inside bbox using inverted Otsu threshold."""
+    gray = _frame_to_gray(frame)
+    if gray is None:
+        return None
+
+    fh, fw = gray.shape[:2]
     if fw == 0 or fh == 0:
         return None
 
@@ -27,9 +46,8 @@ def _extract_largest_object_contour(frame: np.ndarray, bbox: Rect) -> tuple[np.n
     if (x2 - x1) < 4 or (y2 - y1) < 4:
         return None
 
-    crop = frame[y1:y2, x1:x2]
-    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
-    _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    crop = gray[y1:y2, x1:x2]
+    _, mask = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:

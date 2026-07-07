@@ -59,6 +59,29 @@ def test_result_smaller_than_bbox():
     assert result.y < bbox.size.y
 
 
+def _make_nv12_frame(h=100, w=100):
+    """NV12 planar (Y, UV) tuple, as get_numpy_from_buffer returns under NV12 capture.
+
+    Y is the full-res luma plane (grayscale); UV is half-res 2-channel chroma.
+    """
+    y = np.full((h, w), 255, dtype=np.uint8)                 # bright sky
+    uv = np.full((h // 2, w // 2, 2), 128, dtype=np.uint8)   # neutral chroma
+    return (y, uv)
+
+
+def test_handles_nv12_plane_tuple():
+    # Under NV12 capture, frame is a (Y, UV) tuple, not an RGB ndarray.
+    # Must not raise AttributeError: 'tuple' object has no attribute 'shape'.
+    y, uv = _make_nv12_frame(100, 100)
+    y[20:40, 20:40] = 20  # dark object (drone) in the luma plane
+    frame = (y, uv)
+    bbox = Rect.from_xyxy(0.1, 0.1, 0.7, 0.7)  # 60x60 px bbox
+    result = measure_object_size(frame, bbox)
+    assert result is not None
+    assert abs(result.x - 0.20) < 0.05
+    assert abs(result.y - 0.20) < 0.05
+
+
 def test_clips_bbox_to_frame_bounds():
     frame = _make_frame(100, 100)
     _draw_dark_rect(frame, 90, 90, 99, 99)
