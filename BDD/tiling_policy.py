@@ -1,61 +1,101 @@
-"""Detection-state tiling switch policy — pure decision logic, no GStreamer/hailo.
+"""Size-driven tiling ladder policy — pure decision logic, no GStreamer/hailo.
 
-Split out of app.py so it is host-importable and unit-testable (app.py pulls in
-hailo/GStreamer and cannot be imported off-device). This decides WHEN to hot-switch
-the inference branch between whole-frame (low latency) and tiling (small-object
-recall); the actual switch — threads plus the GStreamer valve/input-selector
-handover — stays in app.py's user_app_callback_class.
+Host-importable and unit-testable (app.py pulls in hailo/GStreamer). Decides WHICH
+inference tier to hot-switch to, given the tracked target's on-screen size
+(side = max(bbox_w, bbox_h), normalized 0..1) or elapsed lost-time when no target.
+The actual switch (threads + GStreamer valve/input-selector handover) stays in
+app.py / app_base.py.
+
+Ladder order: index 0 = MOST tiles (smallest / long-lost target) -> last = whole.
 """
+from collections import namedtuple
 from typing import Optional
 
+LadderTier = namedtuple("LadderTier", "tiles_x tiles_y up_side down_side")
 
-class TilingSwitchPolicy:
-    """Per-frame whole<->tile switch decision driven by detection-confidence streaks.
 
-    Feed each frame's best target confidence to :meth:`note`; it returns the branch
-    to switch TO (``True`` = tiling, ``False`` = whole-frame) when a threshold is
-    crossed, else ``None`` (stay put). Because the switch itself is asynchronous,
-    call :meth:`committed` once it has actually taken effect so the policy adopts the
-    new branch and its streak counters reset.
+def build_ladder(tiling) -> list:
+    """Return the ordered ladder (list[LadderTier]) from a Config.Tiling.
 
-    Thresholds:
-      - ``lost_frames_to_tile`` consecutive frames with no confident target
-        (best_conf < ``switch_conf``) while on whole-frame -> switch to tiling to
-        reacquire small/distant objects.
-      - ``locked_frames_to_whole`` consecutive confident frames while tiling ->
-        switch back to whole-frame to restore low-latency control.
+    The ladder is the SOLE source (no legacy synthesis). An empty tiling.ladder means
+    plain whole-frame (not switchable) -> returns []. A non-empty ladder is mapped and
+    validated; raises ValueError on a malformed ladder.
+    """
+    if not getattr(tiling, "ladder", None):
+        return []                                  # whole-frame only, not switchable
+    tiers = [LadderTier(t.tiles_x, t.tiles_y, t.up_side, t.down_side)
+             for t in tiling.ladder]
+
+    if (tiers[-1].tiles_x, tiers[-1].tiles_y) != (1, 1):
+        raise ValueError("tiling ladder: last rung must be whole-frame (1x1), "
+                         f"got {tiers[-1].tiles_x}x{tiers[-1].tiles_y}")
+    counts = [t.tiles_x * t.tiles_y for t in tiers]
+    if any(b >= a for a, b in zip(counts, counts[1:])):
+        raise ValueError(f"tiling ladder: tile counts must strictly decrease "
+                         f"(index 0 = most tiles); got {counts}")
+    return tiers
+
+
+class TilingLadderPolicy:
+    """Per-frame tier decision from target size (hysteresis) + lost-time escalation.
+
+    Feed :meth:`note` the primary target's ``side`` (max(bw,bh), 0..1) or ``None``
+    when no target is matched, plus a monotonic ``now_s``. It returns the tier index
+    to switch TO (always ONE step from the current tier) or ``None`` to stay. The
+    switch is asynchronous, so call :meth:`committed` once it lands.
+
+    Size (target present): climb toward whole (fewer tiles, higher index) when
+    ``side >= tiers[current].up_side``; descend (more tiles, lower index) when
+    ``side < tiers[current].down_side``. The asymmetric adjacent thresholds are the
+    hysteresis dead-band that prevents thrash.
+
+    Loss (no target): at ``lost_to_2x1_s`` drop to the rung just above whole; at
+    ``lost_to_3x2_s`` drop to tier 0 (most tiles). Loss only ever adds tiles.
     """
 
-    def __init__(self, switch_conf: float = 0.4, lost_frames_to_tile: int = 10,
-                 locked_frames_to_whole: int = 5, tiling_on: bool = False):
-        self.switch_conf = switch_conf
-        self.lost_frames_to_tile = lost_frames_to_tile
-        self.locked_frames_to_whole = locked_frames_to_whole
-        self.tiling_on = tiling_on            # currently-active branch (False = whole)
-        self._lost_streak = 0
-        self._lock_streak = 0
+    def __init__(self, tiers, lost_to_2x1_s, lost_to_3x2_s, current_i):
+        self.tiers = list(tiers)
+        self.lost_to_2x1_s = lost_to_2x1_s
+        self.lost_to_3x2_s = lost_to_3x2_s
+        self.current_i = int(current_i)
+        self._lost_since_s = None     # None => target currently present
 
-    def note(self, best_conf: float) -> Optional[bool]:
-        """Update the streaks with this frame's best confidence and return the branch
-        to switch to if a threshold is crossed, else ``None``."""
-        if best_conf >= self.switch_conf:
-            self._lock_streak += 1
-            self._lost_streak = 0
-        else:
-            self._lost_streak += 1
-            self._lock_streak = 0
-        if not self.tiling_on and self._lost_streak >= self.lost_frames_to_tile:
-            return True          # target lost -> tile to reacquire
-        if self.tiling_on and self._lock_streak >= self.locked_frames_to_whole:
-            return False         # confidently locked -> whole-frame (low latency)
+    def note(self, side: Optional[float], now_s: float) -> Optional[int]:
+        if side is None:
+            return self._note_lost(now_s)
+        self._lost_since_s = None         # target present -> clear the lost timer
+        cur = self.tiers[self.current_i]
+        # index 0 = MOST tiles, last = whole. Bigger target (side up) => FEWER tiles
+        # => climb toward a HIGHER index. Smaller target (side down) => MORE tiles
+        # => descend toward a LOWER index.
+        if self.current_i < len(self.tiers) - 1 and cur.up_side is not None \
+                and side >= cur.up_side:
+            return self.current_i + 1        # fewer tiles (toward whole)
+        if self.current_i > 0 and cur.down_side is not None and side < cur.down_side:
+            return self.current_i - 1        # more tiles
         return None
 
-    def committed(self, tiling_on: bool):
-        """Adopt ``tiling_on`` as the active branch and reset the streak counters
-        (call once the switch has actually taken effect)."""
-        self.tiling_on = tiling_on
-        self.reset_streaks()
+    def _note_lost(self, now_s: float) -> Optional[int]:
+        if self._lost_since_s is None:
+            self._lost_since_s = now_s
+        lost_for = now_s - self._lost_since_s
+        n = len(self.tiers)
+        # Elapsed-time -> target rung (ABSOLUTE, keyed to time not the current tier):
+        #   >= lost_to_3x2_s -> tier 0 (most tiles);
+        #   >= lost_to_2x1_s -> the rung just above whole (index n-2).
+        # Only act if the target adds tiles (strictly LOWER index than current).
+        target = None
+        if lost_for >= self.lost_to_3x2_s:
+            target = 0
+        elif lost_for >= self.lost_to_2x1_s:
+            target = max(n - 2, 0)
+        if target is not None and target < self.current_i:
+            return target
+        return None
 
-    def reset_streaks(self):
-        self._lost_streak = 0
-        self._lock_streak = 0
+    def committed(self, tier_i: int):
+        # Adopt the tier. Do NOT clear the lost timer here: if the target is still
+        # lost the escalation must keep timing from the ORIGINAL loss, so the 10 s
+        # rung fires 10 s after loss (not 10 s after the 1 s switch). note() clears
+        # the timer the instant a target reappears.
+        self.current_i = int(tier_i)

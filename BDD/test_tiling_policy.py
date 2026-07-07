@@ -1,110 +1,122 @@
-"""Unit tests for the detection-state tiling switch policy (host-runnable; the
-policy is pure, so no hailo/GStreamer needed — that's why it was split out of the
-un-importable app.py). These pin the whole<->tile switch decision that
-user_app_callback_class.note_detection delegates to.
+"""Unit tests for the size-driven tiling ladder policy (host-runnable; pure — no
+hailo/GStreamer). Pins the tier decision that user_app_callback_class.note_tiling
+delegates to, plus build_ladder's validation and empty-ladder handling.
 
-Contract mirrored from app.py: each frame's best target confidence is fed to
-``note`` on the streaming thread; when it returns a branch, app.py fires the
-(blocking) switch on a worker thread and calls ``committed`` once it lands.
+side = max(bbox_w, bbox_h) of the primary tracked target (0..1); None = lost.
+now_s is an injected monotonic timestamp so loss timers test without sleeping.
 """
-from tiling_policy import TilingSwitchPolicy
+import pytest
+from tiling_policy import TilingLadderPolicy, LadderTier, build_ladder
 
 
-def feed(policy, confs):
-    """Feed a sequence of confidences; return the list of note() results."""
-    return [policy.note(c) for c in confs]
+# Default 3-rung ladder: index 0 = 3x2 (most tiles) -> 2 = whole.
+def ladder3():
+    return [
+        LadderTier(3, 2, up_side=0.05, down_side=None),
+        LadderTier(2, 1, up_side=0.10, down_side=0.02),
+        LadderTier(1, 1, up_side=None, down_side=0.05),
+    ]
 
 
-# ---------------------------------------------------------------------------
-# whole -> tile: fires only after N *consecutive* lost frames.
-# ---------------------------------------------------------------------------
-def test_stays_whole_while_confident():
-    p = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=10, locked_frames_to_whole=5)
-    assert feed(p, [0.9] * 50) == [None] * 50
-    assert p.tiling_on is False
+def policy(current_i, l2=1.0, l10=10.0):
+    return TilingLadderPolicy(ladder3(), lost_to_2x1_s=l2, lost_to_3x2_s=l10, current_i=current_i)
 
 
-def test_switches_to_tiling_exactly_at_threshold():
-    p = TilingSwitchPolicy(lost_frames_to_tile=10)
-    results = feed(p, [0.0] * 12)
-    # first 9 lost frames: no switch; the 10th crosses the threshold.
-    assert results[:9] == [None] * 9
-    assert results[9] is True
-    # still lost and not yet committed -> keeps asking to switch each frame.
-    assert results[10] is True and results[11] is True
+# --- size hysteresis: one tier per decision, dead-bands don't thrash ----------
+def test_whole_descends_to_2x1_below_down_side():
+    p = policy(current_i=2)                 # whole
+    assert p.note(0.04, now_s=0.0) == 1     # side < 0.05 -> descend to 2x1
+    assert p.note(0.03, now_s=0.0) == 1     # not yet committed -> keeps asking
 
 
-def test_lost_streak_needs_consecutive_frames():
-    p = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=10)
-    # 9 lost, then one confident frame resets the streak, so no switch yet.
-    assert feed(p, [0.0] * 9 + [0.8]) == [None] * 10
-    # need a *fresh* run of 10 lost frames.
-    assert feed(p, [0.0] * 9) == [None] * 9
-    assert p.note(0.0) is True
+def test_whole_holds_in_deadband():
+    p = policy(current_i=2)                 # whole; leaves only at side<0.05
+    assert p.note(0.07, now_s=0.0) is None  # 0.05..0.10 dead-band -> stay whole
 
 
-def test_confidence_at_threshold_counts_as_confident():
-    # best_conf == switch_conf is "confident" (>=), so it does NOT accrue a lost frame.
-    p = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=3)
-    assert feed(p, [0.4, 0.4, 0.4, 0.4]) == [None, None, None, None]
-    assert p.tiling_on is False
+def test_2x1_climbs_to_whole_at_up_side():
+    p = policy(current_i=1)
+    assert p.note(0.10, now_s=0.0) == 2     # side >= 0.10 -> climb to whole
+    assert p.note(0.20, now_s=0.0) == 2
 
 
-# ---------------------------------------------------------------------------
-# tile -> whole: fires only after N *consecutive* confident frames while tiling.
-# ---------------------------------------------------------------------------
-def test_switches_back_to_whole_after_locked_streak():
-    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5, tiling_on=True)
-    results = feed(p, [0.9] * 6)
-    assert results[:4] == [None] * 4
-    assert results[4] is False              # 5th confident frame -> back to whole
-    assert results[5] is False              # keeps asking until committed
+def test_2x1_descends_to_3x2_below_down_side():
+    p = policy(current_i=1)
+    assert p.note(0.01, now_s=0.0) == 0     # side < 0.02 -> descend to 3x2
 
 
-def test_lock_streak_needs_consecutive_frames():
-    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5, tiling_on=True)
-    # 4 confident, then a lost frame resets the lock streak.
-    assert feed(p, [0.9] * 4 + [0.1]) == [None] * 5
-    assert feed(p, [0.9] * 4) == [None] * 4
-    assert p.note(0.9) is False
+def test_2x1_holds_between_thresholds():
+    p = policy(current_i=1)                 # leaves at >=0.10 up or <0.02 down
+    assert p.note(0.05, now_s=0.0) is None
 
 
-def test_no_downswitch_when_already_whole():
-    # Confident frames while already on whole-frame never produce a decision.
-    p = TilingSwitchPolicy(locked_frames_to_whole=1, tiling_on=False)
-    assert feed(p, [0.99] * 5) == [None] * 5
+def test_one_tier_per_decision_even_on_huge_jump():
+    p = policy(current_i=0)                 # 3x2, tiny target suddenly huge
+    assert p.note(0.9, now_s=0.0) == 1      # only ONE step (to 2x1), not to whole
+    p.committed(1)
+    assert p.note(0.9, now_s=0.0) == 2      # next decision climbs one more
 
 
-# ---------------------------------------------------------------------------
-# committed(): adopt the new branch + reset streaks (as app.py's worker does).
-# ---------------------------------------------------------------------------
-def test_committed_adopts_branch_and_resets_streaks():
-    p = TilingSwitchPolicy(lost_frames_to_tile=10, locked_frames_to_whole=5)
-    feed(p, [0.0] * 10)                      # asks to switch to tiling
-    p.committed(True)                        # worker reports the switch landed
-    assert p.tiling_on is True
-    assert p._lost_streak == 0 and p._lock_streak == 0
-    # now the *reverse* threshold applies from a clean slate.
-    assert feed(p, [0.9] * 4) == [None] * 4
-    assert p.note(0.9) is False
+# --- loss escalation (time-based, injected now_s) -----------------------------
+def test_lost_descends_after_1s_then_after_10s():
+    p = policy(current_i=2)                 # whole
+    assert p.note(None, now_s=0.0) is None  # just became lost
+    assert p.note(None, now_s=0.5) is None  # < 1s
+    assert p.note(None, now_s=1.0) == 1     # >= lost_to_2x1_s -> descend one rung
+    p.committed(1)
+    assert p.note(None, now_s=9.9) is None  # < 10s from lost start, already 2x1
+    assert p.note(None, now_s=10.0) == 0    # >= lost_to_3x2_s -> tier 0 (3x2)
 
 
-def test_full_round_trip():
-    p = TilingSwitchPolicy(switch_conf=0.5, lost_frames_to_tile=3, locked_frames_to_whole=2)
-    assert p.note(0.0) is None
-    assert p.note(0.0) is None
-    assert p.note(0.0) is True               # 3 lost -> tile
-    p.committed(True)
-    assert p.note(0.7) is None
-    assert p.note(0.7) is False              # 2 locked -> whole
-    p.committed(False)
-    assert p.tiling_on is False
-    assert p.note(0.7) is None               # clean slate, confident, stay whole
+def test_lost_never_climbs_toward_whole():
+    p = policy(current_i=0)                 # already max tiles
+    assert p.note(None, now_s=100.0) is None  # loss only descends; nothing to do
 
 
-def test_reset_streaks_clears_counters_without_changing_branch():
-    p = TilingSwitchPolicy(tiling_on=True)
-    feed(p, [0.9, 0.9])
-    p.reset_streaks()
-    assert p._lock_streak == 0 and p._lost_streak == 0
-    assert p.tiling_on is True               # branch unchanged
+def test_reacquire_resets_lost_timer_and_resumes_size():
+    p = policy(current_i=2)                 # whole
+    p.note(None, now_s=0.0)                 # lost starts at t=0
+    assert p.note(0.5, now_s=0.5) is None   # target back, large -> stay whole
+    # a fresh loss must re-time from now, not from the old t=0.
+    assert p.note(None, now_s=0.6) is None
+    assert p.note(None, now_s=1.6) == 1     # 0.6 -> 1.6 is >= 1s
+
+
+# --- committed() --------------------------------------------------------------
+def test_committed_adopts_tier():
+    p = policy(current_i=2)
+    p.note(0.04, now_s=0.0)                 # asks for 2x1
+    p.committed(1)
+    assert p.current_i == 1
+    assert p.note(0.10, now_s=0.0) == 2     # reverse threshold from the new rung
+
+
+# --- build_ladder: validation + empty-ladder ----------------------------------
+class _Cfg:  # duck-typed stand-in for Config.Tiling
+    def __init__(self, ladder=None, l2=1.0, l10=10.0):
+        self.ladder = ladder or []
+        self.lost_to_2x1_s, self.lost_to_3x2_s = l2, l10
+
+
+class _T:  # duck-typed Config.Tiling.Tier
+    def __init__(self, tx, ty, up=None, down=None):
+        self.tiles_x, self.tiles_y, self.up_side, self.down_side = tx, ty, up, down
+
+
+def test_build_ladder_uses_explicit_ladder():
+    tiers = build_ladder(_Cfg(ladder=[_T(3, 2, up=0.05), _T(2, 1, up=0.10, down=0.02), _T(1, 1, down=0.05)]))
+    assert [(t.tiles_x, t.tiles_y) for t in tiers] == [(3, 2), (2, 1), (1, 1)]
+
+
+def test_build_ladder_empty_returns_empty():
+    assert build_ladder(_Cfg(ladder=[])) == []      # whole-frame only, not switchable
+
+
+def test_build_ladder_rejects_last_not_whole():
+    with pytest.raises(ValueError):
+        build_ladder(_Cfg(ladder=[_T(3, 2, up=0.05), _T(2, 1, down=0.02)]))  # last is 2x1
+
+
+def test_build_ladder_rejects_non_decreasing_tile_counts():
+    with pytest.raises(ValueError):
+        build_ladder(_Cfg(ladder=[_T(2, 1, up=0.05), _T(3, 2, up=0.10, down=0.02), _T(1, 1, down=0.05)]))
