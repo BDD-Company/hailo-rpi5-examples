@@ -295,8 +295,10 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
             f'use-letterbox=true resize-method=inter-area internal-offset=true '
         )
         aggregator = f'hailoaggregator name={name}_agg '
-        # one inference per frame: a depth-1 tile queue keeps the branch in lockstep
-        tile_q_depth = 1
+        # Whole-frame: one inference/frame, so the inference branch links STRAIGHT to
+        # the aggregator with no intermediate queue — the proven lowest-latency
+        # topology (an extra queue is a thread hand-off this hot path doesn't need).
+        tile_q = ''
     else:
         # hailotilecropper has built-in grid tiling (no so-path); single-scale =
         # exactly tiles_x×tiles_y crops (multi-scale would emit a full pyramid).
@@ -312,9 +314,11 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
         # in the callback finds NOTHING (silent n=0). flatten lifts them into the
         # frame ROI (in global coords). iou-threshold dedups across tile seams.
         aggregator = f'hailotileaggregator name={name}_agg flatten-detections=true iou-threshold=0.4 '
-        # N tiles flow per frame; hold a frame's worth so the cropper isn't blocked
-        # tile-by-tile waiting on the single shared hailonet.
+        # N tiles flow per frame; hold a frame's worth in a queue so the cropper isn't
+        # blocked tile-by-tile waiting on the single shared hailonet. (Only the tiled
+        # path gets this queue; whole-frame links straight through — see above.)
         tile_q_depth = tiles_x * tiles_y + 1
+        tile_q = f'{QUEUE(max_size_buffers=tile_q_depth, leaky="no", name=f"{name}_tile_q")} ! '
 
     # Construct the inference wrapper pipeline string. Two-pad fork:
     #   crop.src_0 = bypass (original full frame) -> agg.sink_0
@@ -324,7 +328,7 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
         f'{cropper}'
         f'{aggregator}'
         f'{name}_crop. ! {QUEUE(max_size_buffers=bypass_max_size_buffers, leaky="no", name=f"{name}_bypass_q")} ! {name}_agg.sink_0 '
-        f'{name}_crop. ! {QUEUE(max_size_buffers=tile_q_depth, leaky="no", name=f"{name}_tile_q")} ! {inner_pipeline} ! {name}_agg.sink_1 '
+        f'{name}_crop. ! {tile_q}{inner_pipeline} ! {name}_agg.sink_1 '
         f'{name}_agg. ! {QUEUE(name=f"{name}_output_q")} '
     )
 
