@@ -46,6 +46,7 @@ class TestConfig:
     point:  Annotated[XY, Range(0.0, 1.0)] = \
         dataclasses.field(default_factory=lambda: XY(0.5, 0.5))   # XY + bound
     threshold: Annotated[Optional[float], Range(min=0.0)] = None   # optional scalar
+    record_flag: bool = True                                # plain readable bool (mirrors Config.record_videos)
 
     # required (no default)
     gain:   Annotated[XY, Range(min=0.0)]                    # required XY
@@ -78,6 +79,19 @@ class TestConfig:
         angle:   Annotated[XY, Range(min=0.0, min_inclusive=False, max=360.0)]   # required
     items: Annotated[list[Item], MinItems(1)]               # list + MinItems, required
 
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class DefaultsSection:
+        # Present-by-default section (mirrors Config.Tiling): a NON-optional section
+        # carrying a default_factory, so omitting it entirely yields an all-defaults
+        # instance (every field must therefore have a default, else the factory
+        # DefaultsSection() would raise). Distinct from `sub_section` (required) and
+        # `feature` (Optional toggle) — the parser must build it from the factory.
+        size_x:   Annotated[int, Range(min=1)] = 1
+        size_y:   Annotated[int, Range(min=1)] = 1
+        fraction: Annotated[float, Range(0.0, 1.0)] = 0.0
+        toggle:   bool = False
+    defaults_section: DefaultsSection = dataclasses.field(default_factory=DefaultsSection)
+
     # runtime-only: never read from the file (providing it is an unknown key)
     DEBUG: bool = dataclasses.field(default=False, metadata={'runtime': True})
 
@@ -86,6 +100,7 @@ SubSection = TestConfig.SubSection
 Limits = TestConfig.SubSection.Limits
 FeatureSection = TestConfig.FeatureSection
 Item = TestConfig.Item
+DefaultsSection = TestConfig.DefaultsSection
 
 # Path to THIS test file: a file guaranteed to exist while the tests run, used as
 # a valid value for the required ExistingFile field (which coerces a config string
@@ -179,6 +194,46 @@ def test_defaults_apply_when_omitted():
     cfg = covert_to_config(d)
     assert cfg.name == "default"
     assert cfg.sub_section.label == 'a'
+
+
+# ---------------------------------------------------------------------------
+# Present-by-default section (default_factory) + plain readable bool — mirrors
+# Config.Tiling (omittable, built from the factory) and Config.record_videos.
+# ---------------------------------------------------------------------------
+def test_defaulted_section_built_from_factory_when_omitted():
+    cfg = covert_to_config(tvalid())          # tvalid() carries no defaults_section / record_flag
+    assert isinstance(cfg.defaults_section, DefaultsSection)
+    assert (cfg.defaults_section.size_x, cfg.defaults_section.size_y) == (1, 1)
+    assert cfg.defaults_section.fraction == 0.0
+    assert cfg.defaults_section.toggle is False
+    assert cfg.record_flag is True
+
+
+def test_defaulted_section_partial_override_keeps_other_defaults():
+    cfg = covert_to_config(tvalid_with(defaults_section={'size_x': 3}))
+    assert cfg.defaults_section.size_x == 3
+    assert cfg.defaults_section.size_y == 1       # untouched -> default
+    assert cfg.defaults_section.fraction == 0.0
+
+
+def test_defaulted_section_still_validates_bounds():
+    with pytest.raises(ConfigError) as ei:
+        covert_to_config(tvalid_with(defaults_section={'size_x': 0}))   # Range(min=1)
+    assert any('defaults_section.size_x' in p and 'minimum' in p for p in ei.value.problems)
+
+
+def test_defaulted_section_rejects_unknown_key():
+    with pytest.raises(ConfigError) as ei:
+        covert_to_config(tvalid_with(defaults_section={'bogus': 1}))
+    assert any('defaults_section.bogus' in p and 'unknown' in p for p in ei.value.problems)
+
+
+def test_plain_bool_field_accepts_true_false_and_rejects_non_bool():
+    assert covert_to_config(tvalid_with(record_flag=False)).record_flag is False
+    assert covert_to_config(tvalid_with(record_flag=True)).record_flag is True
+    with pytest.raises(ConfigError) as ei:
+        covert_to_config(tvalid_with(record_flag=123))
+    assert any('record_flag' in p and 'boolean' in p for p in ei.value.problems)
 
 
 # ---------------------------------------------------------------------------

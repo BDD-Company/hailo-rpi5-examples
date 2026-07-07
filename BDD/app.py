@@ -17,6 +17,7 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_p
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser
 from app_base import GStreamerDetectionApp
+from tiling_policy import TilingSwitchPolicy
 from drone_controller import drone_controlling_thread
 from platform_controller import platform_controlling_thread
 
@@ -59,54 +60,51 @@ class user_app_callback_class(app_callback_class):
         self.detections_queue = detections_queue
         self.tracker = tracker
 
-        # Detection-state tiling policy (configured by main() when auto_switch is
-        # on). Switch to tiling after `lost_frames_to_tile` consecutive frames with
-        # no confident target (reacquire), back to whole-frame after
-        # `locked_frames_to_whole` confident frames (restore low latency).
+        # Detection-state tiling policy. The whole<->tile decision lives in the pure,
+        # unit-tested TilingSwitchPolicy; this class only fires the (blocking) switch
+        # on a worker thread. Enabled by main() via configure_switch_policy().
         self.request_switch = None            # callable(bool) -> app.switch_tiling
         self.auto_switch = False
-        self.switch_conf = 0.4
-        self.lost_frames_to_tile = 10
-        self.locked_frames_to_whole = 5
-        self._lost_streak = 0
-        self._lock_streak = 0
-        self._tiling_on = False               # current active branch (False=whole)
+        self._policy = TilingSwitchPolicy()   # thresholds replaced by configure_switch_policy()
         self._switch_pending = False
         self._switch_lock = threading.Lock()
 
+    def configure_switch_policy(self, request_switch, switch_conf,
+                                lost_frames_to_tile, locked_frames_to_whole):
+        """Enable the auto-switch tiling policy. `request_switch(to_tiling: bool)`
+        performs the actual (blocking) branch handover; the thresholds tune when the
+        policy asks for a switch."""
+        self.request_switch = request_switch
+        self.auto_switch = True
+        self._policy = TilingSwitchPolicy(
+            switch_conf=switch_conf,
+            lost_frames_to_tile=lost_frames_to_tile,
+            locked_frames_to_whole=locked_frames_to_whole,
+        )
+
     def note_detection(self, best_conf: float):
         """Per-frame detection-state hot-switch policy. `best_conf` is the highest
-        target confidence this frame (0 if none). Decides whole<->tile and fires
-        the (blocking) switch on a worker thread so the GStreamer streaming thread
-        is never stalled. No-op unless auto_switch is configured."""
+        target confidence this frame (0 if none). Delegates the whole<->tile decision
+        to TilingSwitchPolicy and fires the (blocking) switch on a worker thread so
+        the GStreamer streaming thread is never stalled. No-op unless auto_switch is
+        configured."""
         if not self.auto_switch or self.request_switch is None:
             return
-        if best_conf >= self.switch_conf:
-            self._lock_streak += 1
-            self._lost_streak = 0
-        else:
-            self._lost_streak += 1
-            self._lock_streak = 0
-        want_tiling = self._tiling_on
-        if not self._tiling_on and self._lost_streak >= self.lost_frames_to_tile:
-            want_tiling = True          # target lost -> tile to reacquire
-        elif self._tiling_on and self._lock_streak >= self.locked_frames_to_whole:
-            want_tiling = False         # confidently locked -> whole-frame (low latency)
-        if want_tiling != self._tiling_on:
-            self._fire_switch(want_tiling)
+        target = self._policy.note(best_conf)
+        if target is not None:
+            self._fire_switch(target)
 
     def _fire_switch(self, to_tiling: bool):
         with self._switch_lock:
-            if self._switch_pending or to_tiling == self._tiling_on:
+            if self._switch_pending or to_tiling == self._policy.tiling_on:
                 return
             self._switch_pending = True
         def _run():
             try:
                 self.request_switch(to_tiling)
-                self._tiling_on = to_tiling
+                self._policy.tiling_on = to_tiling
             finally:
-                self._lost_streak = 0
-                self._lock_streak = 0
+                self._policy.reset_streaks()
                 self._switch_pending = False
         threading.Thread(target=_run, name="tiling-policy-switch", daemon=True).start()
 
@@ -482,6 +480,46 @@ def detect_hef_video_format(hef_path, default='RGB'):
         return default
 
 
+def _pop_flag(argv: list[str], flag: str) -> bool:
+    """Remove a boolean CLI flag from ``argv`` in place; return whether it was
+    present. These flags are parsed off sys.argv directly (before the argparser)
+    because they gate App() construction."""
+    if flag in argv:
+        argv.remove(flag)
+        return True
+    return False
+
+
+def _pop_value(argv: list[str], flag: str) -> str | None:
+    """Remove ``<flag> <value>`` from ``argv`` in place and return the value, or
+    None if the flag is absent. Exits with a clear message (not an IndexError) if
+    the flag is given with no value following it."""
+    if flag not in argv:
+        return None
+    i = argv.index(flag)
+    if i + 1 >= len(argv):
+        raise SystemExit(f"{flag} requires a value (e.g. {flag} 2x2)")
+    value = argv[i + 1]
+    del argv[i:i + 2]
+    return value
+
+
+def _parse_grid(spec: str) -> tuple[int, int]:
+    """Parse an ``NxM`` tile-grid spec (case-insensitive, e.g. ``2x2``) into
+    ``(nx, ny)``. Exits with a clear message (not an opaque ValueError/IndexError)
+    on anything that isn't two positive integers."""
+    nx_s, sep, ny_s = spec.lower().partition("x")
+    if not sep or not nx_s or not ny_s:
+        raise SystemExit(f"tile grid must look like NxM (e.g. 2x2), got {spec!r}")
+    try:
+        nx, ny = int(nx_s), int(ny_s)
+    except ValueError:
+        raise SystemExit(f"tile grid must be two integers NxM, got {spec!r}")
+    if nx < 1 or ny < 1:
+        raise SystemExit(f"tile grid values must be >= 1, got {nx}x{ny}")
+    return nx, ny
+
+
 def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -513,57 +551,37 @@ def main():
         config_path = Path(sys.argv[i + 1])
         del sys.argv[i:i + 2]
 
-    # --no-record: force the RAW video recording off regardless of config
-    # (frees ~1 CPU core for inference/tiling). Parsed from argv directly, like
-    # --DEBUG / --config above, because it gates the App() construction below.
-    no_record_flag = False
-    if "--no-record" in sys.argv:
-        no_record_flag = True
-        sys.argv.remove("--no-record")
+    # These flags are parsed off sys.argv directly (before the argparser) because
+    # they gate App() construction below. NxM grids go through _parse_grid, which
+    # validates them; a missing value or malformed grid exits with a clear message.
 
-    # --tiles NxM: override the inference tile grid (e.g. --tiles 2x2). 1x1 =
-    # whole-frame. Parsed from argv directly (gates App() construction below);
-    # None here means "use config.tiling".
-    tiles_override = None
-    if "--tiles" in sys.argv:
-        i = sys.argv.index("--tiles")
-        nx, _, ny = sys.argv[i + 1].lower().partition("x")
-        tiles_override = (int(nx), int(ny))
-        del sys.argv[i:i + 2]
+    # --no-record: force RAW recording off regardless of config (frees ~1 CPU core
+    # for inference/tiling).
+    no_record_flag = _pop_flag(sys.argv, "--no-record")
 
-    # --switch-tiles NxM: enable runtime-switchable tiling with an NxM tile branch
-    # (whole-frame active at startup, hot-switchable). Forces switchable on and
-    # sets the tile-branch geometry. Parsed from argv (gates App construction).
-    switch_tiles_override = None
-    if "--switch-tiles" in sys.argv:
-        i = sys.argv.index("--switch-tiles")
-        nx, _, ny = sys.argv[i + 1].lower().partition("x")
-        switch_tiles_override = (int(nx), int(ny))
-        del sys.argv[i:i + 2]
+    # --tiles NxM: static inference tile grid (e.g. --tiles 2x2; 1x1 = whole-frame).
+    # None => use config.tiling.
+    tiles_spec = _pop_value(sys.argv, "--tiles")
+    tiles_override = _parse_grid(tiles_spec) if tiles_spec else None
+
+    # --switch-tiles NxM: runtime-switchable tiling with an NxM tile branch (whole-
+    # frame active at startup, hot-switchable). Forces switchable on.
+    switch_tiles_spec = _pop_value(sys.argv, "--switch-tiles")
+    switch_tiles_override = _parse_grid(switch_tiles_spec) if switch_tiles_spec else None
 
     # --switch-test-s N: manual handover validation — toggle whole-frame<->tiling
     # every N seconds (only meaningful with switchable tiling enabled).
-    switch_test_s = None
-    if "--switch-test-s" in sys.argv:
-        i = sys.argv.index("--switch-test-s")
-        switch_test_s = float(sys.argv[i + 1])
-        del sys.argv[i:i + 2]
+    switch_test_s_spec = _pop_value(sys.argv, "--switch-test-s")
+    switch_test_s = float(switch_test_s_spec) if switch_test_s_spec else None
 
-    # --plus-one: benchmark the "NxM + 1" load — open both branches so the tile
-    # grid AND a whole frame are inferred each frame (needs switchable tiling).
-    plus_one = False
-    if "--plus-one" in sys.argv:
-        plus_one = True
-        sys.argv.remove("--plus-one")
+    # --plus-one: benchmark the "NxM + 1" load — open both branches so the tile grid
+    # AND a whole frame are inferred each frame (needs switchable tiling).
+    plus_one = _pop_flag(sys.argv, "--plus-one")
 
-    # --merge-tiles NxM: merged "NxM + 1" via the custom crop .so — the grid PLUS
-    # one whole frame through ONE net-group (single-branch; no round-robin tax).
-    merge_tiles_override = None
-    if "--merge-tiles" in sys.argv:
-        i = sys.argv.index("--merge-tiles")
-        nx, _, ny = sys.argv[i + 1].lower().partition("x")
-        merge_tiles_override = (int(nx), int(ny))
-        del sys.argv[i:i + 2]
+    # --merge-tiles NxM: merged "NxM + 1" via the custom crop .so — the grid PLUS one
+    # whole frame through ONE net-group (single-branch; no round-robin tax).
+    merge_tiles_spec = _pop_value(sys.argv, "--merge-tiles")
+    merge_tiles_override = _parse_grid(merge_tiles_spec) if merge_tiles_spec else None
 
     if DEBUG:
         logger.error('')
@@ -721,11 +739,12 @@ def main():
     # Detection-state tiling policy: give the callback a handle to switch_tiling
     # and the thresholds. Only active when switchable + auto_switch are on.
     if switchable and config.tiling.auto_switch:
-        user_data.request_switch = app.switch_tiling
-        user_data.auto_switch = True
-        user_data.switch_conf = config.tiling.switch_conf
-        user_data.lost_frames_to_tile = config.tiling.lost_frames_to_tile
-        user_data.locked_frames_to_whole = config.tiling.locked_frames_to_whole
+        user_data.configure_switch_policy(
+            request_switch=app.switch_tiling,
+            switch_conf=config.tiling.switch_conf,
+            lost_frames_to_tile=config.tiling.lost_frames_to_tile,
+            locked_frames_to_whole=config.tiling.locked_frames_to_whole,
+        )
         logger.info("!!! auto-switch tiling policy: lost>=%d -> tile, locked>=%d -> whole, conf>=%.2f",
                     config.tiling.lost_frames_to_tile, config.tiling.locked_frames_to_whole,
                     config.tiling.switch_conf)
@@ -747,6 +766,7 @@ def main():
                     new_id, cfg.name, cfg.frame_angular_size_deg, cfg.zoom_factor,
                 )
         threading.Thread(target=_switch_test_thread, name="camera-switch-test", daemon=True).start()
+        logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
 
     # Manual hot-switch validation: toggle whole-frame <-> tiling every N seconds
     # so the handover (valve + input-selector) can be confirmed glitch-free on the
@@ -769,7 +789,6 @@ def main():
             time.sleep(6)
             app.enable_plus_one()
         threading.Thread(target=_enable_plus_one, name="plus-one-enable", daemon=True).start()
-        logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
 
     logger.info("!!! Config: %s", config)
     if DEBUG:
