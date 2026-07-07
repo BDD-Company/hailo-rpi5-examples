@@ -37,6 +37,13 @@ on a switch (invariant preserved from the existing design).
 3. **Lost handling:** tracker-driven "lost" (no matched track this frame) → **time-based
    escalation** toward more tiles. On reacquire, resume size policy.
 4. **`--plus-one`:** removed entirely (flag, `switch_tiling_plus_one`/benchmark method, wiring).
+5. **Ladder-only (no legacy, no static):** the ladder is the SOLE tiling control. No production
+   config uses the old fields yet, so drop them outright rather than keep back-compat. Removed from
+   `Config.Tiling`: `tiles_x`, `tiles_y`, `switchable`, `switch_conf`, `lost_frames_to_tile`,
+   `locked_frames_to_whole`. Kept: `ladder`, `overlap`, `auto_switch`, `lost_to_2x1_s`,
+   `lost_to_3x2_s`. "Switchable" is derived: `len(ladder) >= 2`. Also removed: the static
+   single-grid tiling path (`--tiles NxM` CLI + the non-switchable `hailotilecropper` branch) and
+   the `--switch-tiles` CLI. All tiling flows through `ladder`; an empty ladder = plain whole-frame.
 
 ## 1. Ladder model
 
@@ -141,28 +148,34 @@ the `note_detection(best_conf)` call with `user_data.note_tiling(side, now_s)`.
 
 ### Config (`BDD/config.py`, mirror into `test_config.py`)
 
+`Config.Tiling` after the ladder-only cleanup (Decision 5) — surviving fields only:
+
 ```yaml
 tiling:
-  switchable: true
-  auto_switch: true          # size + loss ladder policy on
+  auto_switch: true          # run the size+loss policy (else ladder built but only --switch-test-s drives it)
   overlap: 0.10              # applied to every tiled branch
   lost_to_2x1_s: 1.0
   lost_to_3x2_s: 10.0
-  ladder:                    # ordered: most tiles -> whole; last MUST be 1x1
-    - {grid: [3, 2], up_side: 0.05}
-    - {grid: [2, 1], up_side: 0.10, down_side: 0.02}
-    - {grid: [1, 1], down_side: 0.05}
+  ladder:                    # ordered: most tiles -> whole; last MUST be 1x1. Empty/absent = whole-frame only.
+    - {tiles_x: 3, tiles_y: 2, up_side: 0.05}
+    - {tiles_x: 2, tiles_y: 1, up_side: 0.10, down_side: 0.02}
+    - {tiles_x: 1, tiles_y: 1, down_side: 0.05}
 ```
 
-**Validation:** ladder non-empty; last tier grid `== [1,1]`; tile counts strictly decreasing down
-the list (index 0 most tiles); every threshold in `[0,1]`. Threshold presence follows position:
-tier 0 (most tiles) has **no `down_side`** (nothing below it); the last tier (whole) has **no
-`up_side`** (nothing above it); every middle tier has **both**.
+Per-tier `grid` is expressed as scalar `tiles_x`/`tiles_y` int fields (not a `[N,M]` list) so the
+existing declarative parser handles them without a new list-of-ints coercion. "Switchable" is not a
+config field — it is derived: `len(ladder) >= 2`.
 
-**Back-compat:** if `ladder:` is absent, synthesize a 2-tier ladder `[{grid:[tiles_x,tiles_y]},
-{grid:[1,1]}]` from the legacy fields so existing configs still run. Legacy
-`lost_frames_to_tile`/`locked_frames_to_whole`/`switch_conf` are retained-but-unused by the new
-policy when `ladder:` is present (kept parseable so old configs don't error).
+**Validation** (only when the ladder is non-empty; an empty/absent ladder = plain whole-frame, no
+tiling): last tier grid `== 1×1`; tile counts strictly decreasing down the list (index 0 most
+tiles); every threshold in `[0,1]`. Threshold presence follows position: tier 0 (most tiles) has
+**no `down_side`** (nothing below it); the last tier (whole) has **no `up_side`** (nothing above
+it); every middle tier has **both**. Validation lives in `tiling_policy.build_ladder`, not the
+config dataclass.
+
+**No back-compat, no static path:** the legacy fields and the `--tiles`/`--switch-tiles` static
+grid are removed (Decision 5). `build_ladder` has no legacy-synthesis branch — the ladder is the
+sole source; an empty ladder yields `[]` (whole-frame only).
 
 ### Testing
 
@@ -172,8 +185,10 @@ policy when `ladder:` is present (kept parseable so old configs don't error).
   - loss escalation fires at `lost_to_2x1_s` and `lost_to_3x2_s` using injected `now_s`;
   - reacquire resets the lost timer and resumes size policy;
   - `committed()` adopts the tier and clears transient state.
-- `BDD/test_config.py`: ladder parsing, validation errors (bad last tier, non-monotonic grids,
-  out-of-range thresholds), and legacy-field back-compat synthesis.
+- `BDD/test_tiling_policy.py` also covers `build_ladder`: valid ladder passes; empty ladder → `[]`;
+  validation errors (last tier not 1×1, non-monotonic tile counts).
+- `BDD/test_config.py`: `Config.Tiling` field/default shape + the `TestConfig` parser mirror for a
+  list-of-defaulted-nested-dataclasses (the `ladder` shape).
 
 ### On-device validation (the rig) — commit after each passes
 
