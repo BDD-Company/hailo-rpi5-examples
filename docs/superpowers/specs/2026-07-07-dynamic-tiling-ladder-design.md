@@ -30,9 +30,10 @@ on a switch (invariant preserved from the existing design).
 ## Decisions (locked in brainstorming)
 
 1. **Ladder shape:** config-driven ordered N-tier ladder (not hardcoded 3 tiers).
-2. **Size metric:** `min(bw, bh)` — the **smaller normalized side** of the tracked target's bbox
+2. **Size metric:** `max(bw, bh)` — the **larger normalized side** of the tracked target's bbox
    (bbox coords normalized 0..1). Area is **not** used. Thresholds are **linear fractions of the
    frame side**. (Differs from camera switching's area-based `switch_to_wide_size`; that stays as-is.)
+   Using MAX instead of MIN since target is relatively flat and in the worst case presents a thin but wide profile.
 3. **Lost handling:** tracker-driven "lost" (no matched track this frame) → **time-based
    escalation** toward more tiles. On reacquire, resume size policy.
 4. **`--plus-one`:** removed entirely (flag, `switch_tiling_plus_one`/benchmark method, wiring).
@@ -48,7 +49,7 @@ Ordered tiers, index `0` = **most tiles** (smallest / long-lost target) → last
 | 1 | 2×1 | 0.10 (→ whole) | 0.02 (→ 3×2) |
 | 2 | 1×1 whole | — (top) | 0.05 (→ 2×1) |
 
-Let `s = min(bw, bh)` for the primary tracked target. Per decision, the policy moves **at most one
+Let `s = max(bw, bh)` for the primary tracked target. Per decision, the policy moves **at most one
 tier**:
 - **climb** (toward whole / fewer tiles) if `s >= tiers[current].up_side` → `current-1`
 - **descend** (toward more tiles) if `s < tiers[current].down_side` → `current+1`
@@ -57,6 +58,8 @@ tier**:
 **Hysteresis** is the asymmetry between adjacent tiers' thresholds: e.g. whole→2×1 at `s < 0.05`,
 but 2×1→whole at `s >= 0.10`; 2×1→3×2 at `s < 0.02`, but 3×2→2×1 at `s >= 0.05`. The gaps
 (0.05..0.10 and 0.02..0.05) are dead-bands that prevent thrash on jitter.
+
+When constructing a ladder make sure that there is enough room for hysteresis and there's not going to be needless back and forth switching.
 
 ## 2. Loss escalation (time-based, tracker-driven)
 
@@ -72,7 +75,7 @@ monotonic clock passed **into** the policy as `now_s` (see §4) so they are unit
 sleeping.
 
 **Primary target selection** when multiple tracks match: the matched track with the **largest
-`min(bw, bh)`** (the most solidly-large target), consistent with the size metric. `None` when no
+`max(bw, bh)`** (the most solidly-large target), consistent with the size metric. `None` when no
 track matches.
 
 ## 3. Pipeline & handover — generalize 2 → N branches
@@ -116,24 +119,25 @@ class TilingLadderPolicy:
     def __init__(self, tiers, lost_to_2x1_s, lost_to_3x2_s, current_i):
         # tiers: ordered list of Tier(grid, up_side, down_side); index 0 = most tiles.
         ...
-    def note(self, min_side: Optional[float], now_s: float) -> Optional[int]:
-        # min_side is None  => target lost => time-based escalation using (now_s - lost_since_s)
-        # min_side is float => size hysteresis vs tiers[current].up_side / down_side
+    def note(self, side: Optional[float], now_s: float) -> Optional[int]:
+        # side = max(bw, bh) of the primary target, or None => target lost.
+        # None  => time-based escalation using (now_s - lost_since_s).
+        # float => size hysteresis vs tiers[current].up_side / down_side.
         # returns the tier index to switch TO (one step), or None to stay.
     def committed(self, tier_i: int):   # adopt tier_i as active + reset streak/lost state
 ```
 
-- `now_s` and `min_side` are **parameters**, not read inside the policy — keeps loss timers and
+- `now_s` and `side` are **parameters**, not read inside the policy — keeps loss timers and
   hysteresis deterministically unit-testable.
 - The `_fire_switch` worker-thread wrapper in `app.py` (single in-flight switch, `_switch_pending`
   lock, revert-on-abort backoff) stays, retargeted from `switch_tiling(bool)` to
-  `switch_to_tier(i)` / `note(min_side, now_s)`.
+  `switch_to_tier(i)` / `note(side, now_s)`.
 
 ### Callback wiring (`BDD/app.py`)
 
-After tracking, compute the primary target's `min_side = min(bw, bh)` (largest-`min_side` matched
-track) or `None` if no matched track, and the current `now_s` (monotonic). Replace the
-`note_detection(best_conf)` call with `user_data.note_tiling(min_side, now_s)`.
+After tracking, compute the primary target's `side = max(bw, bh)` (the matched track with the
+largest `max(bw, bh)`) or `None` if no matched track, and the current `now_s` (monotonic). Replace
+the `note_detection(best_conf)` call with `user_data.note_tiling(side, now_s)`.
 
 ### Config (`BDD/config.py`, mirror into `test_config.py`)
 
@@ -188,7 +192,7 @@ policy when `ladder:` is present (kept parseable so old configs don't error).
 2. `TilingLadderPolicy` + unit tests (host-only).
 3. Pipeline generalization to N branches + `switch_to_tier` handover; remove `--plus-one`; validate
    build + manual `--switch-test-s` cycle on rig.
-4. Wire callback (tracked-target `min_side` + loss timing) → policy → `_fire_switch`; validate auto
+4. Wire callback (tracked-target `max_side` + loss timing) → policy → `_fire_switch`; validate auto
    size-switch + loss escalation on rig.
 
 ## Out of scope / non-goals
