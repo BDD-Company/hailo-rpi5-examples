@@ -29,6 +29,34 @@ inference:
   nms_iou_threshold: 0.45
   # labels_json: /home/bdd/models/labels.json
 
+# Inference tiling. Whole-frame (1×1) is the default and the lowest-latency path;
+# tiling splits each frame into a tiles_x×tiles_y grid (one inference per tile) for
+# better small-object recall at distance, at the cost of latency (~N×15 ms on
+# Hailo-8 — only ~2 tiles stay under the ~200 ms control budget). CLI --tiles /
+# --switch-tiles / --merge-tiles override these. Omit the whole block for defaults.
+tiling:
+  # Static tile grid. 1×1 = whole-frame; >1 enables the hailotilecropper.
+  tiles_x: 1
+  tiles_y: 1
+  # Fractional tile overlap on both axes (0..1); 0 = abutting tiles. >0 recovers
+  # objects straddling a tile seam. Only applied when tiling is active.
+  overlap: 0.0
+
+  # Runtime-switchable tiling: build BOTH a whole-frame branch and a tiles_x×tiles_y
+  # branch behind valves + an input-selector, hot-switchable at runtime (whole-frame
+  # active at startup). Set true to let a policy trade latency for recall on demand.
+  switchable: false
+
+  # Automatic detection-state policy (implies switchable): switch to tiling after
+  # `lost_frames_to_tile` consecutive frames with no confident target (reacquire
+  # small/distant objects), and back to whole-frame after `locked_frames_to_whole`
+  # consecutive confident frames (restore low latency). "Confident" = detection
+  # confidence >= switch_conf.
+  auto_switch: false
+  lost_frames_to_tile: 10
+  locked_frames_to_whole: 5
+  switch_conf: 0.4
+
 thrust:
   cruise: 0.53
   hover: 0.4

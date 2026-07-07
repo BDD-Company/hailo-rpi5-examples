@@ -180,6 +180,9 @@ class GStreamerApp:
         # inference cost). Set from config/CLI by the App subclass.
         self.tiles_x = 1
         self.tiles_y = 1
+        # Fractional tile overlap (0..1) for the hailotilecropper; 0 = abutting tiles.
+        # Set from config.tiling.overlap by the App subclass; only the tiled path uses it.
+        self.tiling_overlap = 0.0
         self.hef_path = None
         self.app_callback = None
 
@@ -1217,7 +1220,7 @@ def display_user_data_frame(user_data: app_callback_class):
 
 class GStreamerDetectionApp(GStreamerApp):
     def __init__(self, app_callback, user_data, parser=None, inference=None, video_format=None,
-                 tiles=None, switchable_tiling=False, merge_tiles=False):
+                 tiles=None, tiling_overlap=None, switchable_tiling=False, merge_tiles=False):
         if parser == None:
             parser = get_default_parser()
 
@@ -1238,6 +1241,10 @@ class GStreamerDetectionApp(GStreamerApp):
         # Tile grid (tiles_x, tiles_y); 1×1 = whole-frame. From config.tiling / CLI.
         if tiles is not None:
             self.tiles_x, self.tiles_y = int(tiles[0]), int(tiles[1])
+        # Fractional tile overlap (0..1) for the hailotilecropper; only affects the
+        # tiled path (ignored for whole-frame and the merged .so). From config.tiling.overlap.
+        if tiling_overlap is not None:
+            self.tiling_overlap = float(tiling_overlap)
         # Switchable tiling: build whole-frame + tile branches behind valves +
         # input-selector, hot-switchable at runtime (whole-frame active at start).
         self.switchable_tiling = bool(switchable_tiling)
@@ -1333,7 +1340,9 @@ class GStreamerDetectionApp(GStreamerApp):
                 name=branch_name,
                 additional_params=self.thresholds_str + (' scheduling-algorithm=1 ' if share_device else ''))
             return INFERENCE_PIPELINE_WRAPPER(inner, name=f'{branch_name}_wrapper',
-                                              tiles_x=tx, tiles_y=ty, crop_so_path=crop_so)
+                                              tiles_x=tx, tiles_y=ty,
+                                              tiling_overlap=self.tiling_overlap,
+                                              crop_so_path=crop_so)
 
         # Single-branch path keeps the historic 'inference'/'inference_wrapper'
         # element names (latency probes + health logs reference them).

@@ -410,12 +410,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None, video_format=None, tiles=None, switchable_tiling=False, merge_tiles=False):
+    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None, video_format=None, tiles=None, tiling_overlap=None, switchable_tiling=False, merge_tiles=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
-        super().__init__(app_callback, user_data, parser, inference=inference, video_format=video_format, tiles=tiles, switchable_tiling=switchable_tiling, merge_tiles=merge_tiles)
+        super().__init__(app_callback, user_data, parser, inference=inference, video_format=video_format, tiles=tiles, tiling_overlap=tiling_overlap, switchable_tiling=switchable_tiling, merge_tiles=merge_tiles)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -730,6 +730,7 @@ def main():
         inference=config.inference,
         video_format=video_format,
         tiles=tiles,
+        tiling_overlap=config.tiling.overlap,
         switchable_tiling=switchable,
         merge_tiles=merge_tiles)
     if camera_switcher is not None:
