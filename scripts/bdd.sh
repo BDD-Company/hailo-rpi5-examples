@@ -75,11 +75,8 @@ export GST_DEBUG=3
 export LIBCAMERA_LOG_LEVELS=1
 
 export DISPLAY=:0
-export HAILO_MODEL="/home/bdd/models/2026-04-07_11n_ball_v2.hef"
 
 python \
     ./BDD/app.py \
-    --hef-path "${HAILO_MODEL}" \
     -i rpi \
     "$@"
-

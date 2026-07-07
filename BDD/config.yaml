@@ -24,7 +24,7 @@ record_videos: true
 # point to an EXISTING .hef on the machine running the app (deployed under
 # /home/bdd/models on the Pi; absent on dev hosts). labels_json is optional.
 inference:
-  hef_model_path: /home/bdd/models/2026-04-07_11n_ball_v2.hef
+  hef_model_path: /home/bdd/models/2026-04-09_11n_ball_v3_nv12_h8.hef
   nms_score_threshold: 0.3
   nms_iou_threshold: 0.45
   # labels_json: /home/bdd/models/labels.json
@@ -177,10 +177,10 @@ camera:
       name: wide
       sensor_index: 0          # Picamera2 camera_num -> ov5647
       frame_angular_size_deg: [107, 85]
-    - camera_id: 1
-      name: zoom
-      sensor_index: 1          # Picamera2 camera_num -> imx477
-      frame_angular_size_deg: [14, 8]
+    # - camera_id: 1
+    #   name: zoom
+    #   sensor_index: 1          # Picamera2 camera_num -> imx477
+    #   frame_angular_size_deg: [14, 8]
 
 drone:
   # connection_string options:

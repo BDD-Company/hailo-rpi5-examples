@@ -167,3 +167,5 @@ coverage/
 benchmark/
 .idea/
 .claude/
+# Local test recordings (large videos/logs, not for VCS)
+recordings/
