@@ -1,192 +1,145 @@
-"""Unit tests for the detection-state tiling switch policy (host-runnable; the
-policy is pure, so no hailo/GStreamer needed — that's why it was split out of the
-un-importable app.py). These pin the whole<->tile switch decision that
-user_app_callback_class.note_detection delegates to.
+"""Unit tests for the size-driven tiling ladder policy (host-runnable; pure — no
+hailo/GStreamer). Pins the tier decision that user_app_callback_class.note_tiling
+delegates to, plus build_ladder's validation and empty-ladder handling.
 
-Contract mirrored from app.py: each frame's best target confidence is fed to
-``note`` on the streaming thread; when it returns a branch, app.py fires the
-(blocking) switch on a worker thread and calls ``committed`` once it lands.
+side = max(bbox_w, bbox_h) of the primary tracked target (0..1); None = lost.
+now_s is an injected monotonic timestamp so loss timers test without sleeping.
 
 The second half of this file covers TilingSwitchCoordinator, which serializes every
 switch (policy worker + --test-switch-s harness) through one entry point, and
-BranchStallWatchdog, which reverts to whole-frame when an accepted branch later dies.
+BranchStallWatchdog, which reverts to whole-frame when an accepted rung later dies.
 """
 import threading
 import time
 
+import pytest
 from tiling_policy import (
     BranchStallWatchdog,
+    LadderTier,
+    TilingLadderPolicy,
     TilingSwitchCoordinator,
-    TilingSwitchPolicy,
+    build_ladder,
 )
 
 
-def feed(policy, confs):
-    """Feed a sequence of confidences; return the list of note() results."""
-    return [policy.note(c) for c in confs]
+# Default 3-rung ladder: index 0 = 3x2 (most tiles) -> 2 = whole.
+def ladder3():
+    return [
+        LadderTier(3, 2, up_side=0.05, down_side=None),
+        LadderTier(2, 1, up_side=0.10, down_side=0.02),
+        LadderTier(1, 1, up_side=None, down_side=0.05),
+    ]
 
 
-# ---------------------------------------------------------------------------
-# whole -> tile: fires only after N *consecutive* lost frames.
-# ---------------------------------------------------------------------------
-def test_stays_whole_while_confident():
-    p = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=10, locked_frames_to_whole=5)
-    assert feed(p, [0.9] * 50) == [None] * 50
-    assert p.tiling_on is False
+def policy(current_i, l2=1.0, l10=10.0):
+    return TilingLadderPolicy(ladder3(), lost_to_2x1_s=l2, lost_to_3x2_s=l10, current_i=current_i)
 
 
-def test_switches_to_tiling_exactly_at_threshold():
-    p = TilingSwitchPolicy(lost_frames_to_tile=10)
-    results = feed(p, [0.0] * 12)
-    # first 9 lost frames: no switch; the 10th crosses the threshold.
-    assert results[:9] == [None] * 9
-    assert results[9] is True
-    # still lost and not yet committed -> keeps asking to switch each frame.
-    assert results[10] is True and results[11] is True
+# --- size hysteresis: one tier per decision, dead-bands don't thrash ----------
+def test_whole_descends_to_2x1_below_down_side():
+    p = policy(current_i=2)                 # whole
+    assert p.note(0.04, now_s=0.0) == 1     # side < 0.05 -> descend to 2x1
+    assert p.note(0.03, now_s=0.0) == 1     # not yet committed -> keeps asking
 
 
-def test_lost_streak_needs_consecutive_frames():
-    p = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=10)
-    # 9 lost, then one confident frame resets the streak, so no switch yet.
-    assert feed(p, [0.0] * 9 + [0.8]) == [None] * 10
-    # need a *fresh* run of 10 lost frames.
-    assert feed(p, [0.0] * 9) == [None] * 9
-    assert p.note(0.0) is True
+def test_whole_holds_in_deadband():
+    p = policy(current_i=2)                 # whole; leaves only at side<0.05
+    assert p.note(0.07, now_s=0.0) is None  # 0.05..0.10 dead-band -> stay whole
 
 
-def test_confidence_at_threshold_counts_as_confident():
-    # best_conf == switch_conf is "confident" (>=), so it does NOT accrue a lost frame.
-    p = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=3)
-    assert feed(p, [0.4, 0.4, 0.4, 0.4]) == [None, None, None, None]
-    assert p.tiling_on is False
+def test_2x1_climbs_to_whole_at_up_side():
+    p = policy(current_i=1)
+    assert p.note(0.10, now_s=0.0) == 2     # side >= 0.10 -> climb to whole
+    assert p.note(0.20, now_s=0.0) == 2
 
 
-# ---------------------------------------------------------------------------
-# tile -> whole: fires only after N *consecutive* confident frames while tiling.
-# ---------------------------------------------------------------------------
-def test_switches_back_to_whole_after_locked_streak():
-    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5, tiling_on=True)
-    results = feed(p, [0.9] * 6)
-    assert results[:4] == [None] * 4
-    assert results[4] is False              # 5th confident frame -> back to whole
-    assert results[5] is False              # keeps asking until committed
+def test_2x1_descends_to_3x2_below_down_side():
+    p = policy(current_i=1)
+    assert p.note(0.01, now_s=0.0) == 0     # side < 0.02 -> descend to 3x2
 
 
-def test_lock_streak_decays_by_the_penalty_on_a_miss_it_does_not_reset():
-    """A miss costs `locked_streak_miss_penalty` frames of progress, not all of it.
-    Resetting would demand `locked_frames_to_whole` hits in an unbroken row, which a
-    detector that misses even occasionally never delivers — the rig would stay pinned to
-    the high-latency tile branch forever."""
-    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5,
-                           locked_streak_miss_penalty=2, tiling_on=True)
-    assert feed(p, [0.9] * 4) == [None] * 4          # streak 4
-    assert p.note(0.1) is None                       # miss -> 4 - 2 = 2
-    assert p._lock_streak == 2
-    assert feed(p, [0.9] * 2) == [None] * 2          # 3, 4
-    assert p.note(0.9) is False                      # 5 -> switch to whole-frame
+def test_2x1_holds_between_thresholds():
+    p = policy(current_i=1)                 # leaves at >=0.10 up or <0.02 down
+    assert p.note(0.05, now_s=0.0) is None
 
 
-def test_lock_streak_floors_at_zero_so_a_miss_run_banks_no_debt():
-    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5,
-                           locked_streak_miss_penalty=2, tiling_on=True)
-    feed(p, [0.9] * 2)                               # streak 2
-    feed(p, [0.0] * 10)                              # long miss run
-    assert p._lock_streak == 0                       # not -18
-    assert feed(p, [0.9] * 4) == [None] * 4          # so 5 confident frames still suffice
-    assert p.note(0.9) is False
+def test_one_tier_per_decision_even_on_huge_jump():
+    p = policy(current_i=0)                 # 3x2, tiny target suddenly huge
+    assert p.note(0.9, now_s=0.0) == 1      # only ONE step (to 2x1), not to whole
+    p.committed(1)
+    assert p.note(0.9, now_s=0.0) == 2      # next decision climbs one more
 
 
-def test_a_flaky_detector_still_reaches_whole_frame_below_the_miss_threshold():
-    """Drift per frame is (1-m) - m*P, so whole-frame is reached iff m < 1/(1+P).
-    P=2 => tolerates just under 1-in-3 misses. This is the whole point of the decay."""
-    # 1 miss every 4 frames (m=0.25 < 1/3): converges.
-    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=10,
-                           locked_streak_miss_penalty=2, tiling_on=True)
-    assert any(p.note(c) is False for c in [0.9, 0.9, 0.9, 0.0] * 40), \
-        "a 25% miss rate must still get back to whole-frame"
-
-    # 1 miss every 2 frames (m=0.5 > 1/3): never converges, stays on tiling.
-    q = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=10,
-                           locked_streak_miss_penalty=2, tiling_on=True)
-    assert all(q.note(c) is None for c in [0.9, 0.0] * 200)
-    assert q._lock_streak == 0
+# --- loss escalation (time-based, injected now_s) -----------------------------
+def test_lost_descends_after_1s_then_after_10s():
+    p = policy(current_i=2)                 # whole
+    assert p.note(None, now_s=0.0) is None  # just became lost
+    assert p.note(None, now_s=0.5) is None  # < 1s
+    assert p.note(None, now_s=1.0) == 1     # >= lost_to_2x1_s -> descend one rung
+    p.committed(1)
+    assert p.note(None, now_s=9.9) is None  # < 10s from lost start, already 2x1
+    assert p.note(None, now_s=10.0) == 0    # >= lost_to_3x2_s -> tier 0 (3x2)
 
 
-def test_penalty_zero_counts_confident_frames_regardless_of_misses():
-    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=3,
-                           locked_streak_miss_penalty=0, tiling_on=True)
-    assert feed(p, [0.9, 0.0, 0.9, 0.0]) == [None] * 4    # streak 2, misses ignored
-    assert p.note(0.9) is False                            # 3rd confident frame
+def test_lost_never_climbs_toward_whole():
+    p = policy(current_i=0)                 # already max tiles
+    assert p.note(None, now_s=100.0) is None  # loss only descends; nothing to do
 
 
-def test_penalty_at_or_above_the_threshold_reproduces_reset_on_miss():
-    """The old behaviour stays expressible, for anyone who wants it back."""
-    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5,
-                           locked_streak_miss_penalty=5, tiling_on=True)
-    feed(p, [0.9] * 4)
-    assert p.note(0.0) is None
-    assert p._lock_streak == 0                       # fully reset
-    assert feed(p, [0.9] * 4) == [None] * 4
-    assert p.note(0.9) is False
+def test_reacquire_resets_lost_timer_and_resumes_size():
+    p = policy(current_i=2)                 # whole
+    p.note(None, now_s=0.0)                 # lost starts at t=0
+    assert p.note(0.5, now_s=0.5) is None   # target back, large -> stay whole
+    # a fresh loss must re-time from now, not from the old t=0.
+    assert p.note(None, now_s=0.6) is None
+    assert p.note(None, now_s=1.6) == 1     # 0.6 -> 1.6 is >= 1s
 
 
-def test_the_lost_streak_still_resets_on_a_single_confident_frame():
-    """Deliberately asymmetric: the decay applies to the LOCK streak only. One real
-    sighting means the target is not lost, so do not pay tiling's latency to hunt it."""
-    p = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=5, tiling_on=False)
-    assert feed(p, [0.0] * 4) == [None] * 4
-    assert p.note(0.9) is None                       # one sighting...
-    assert p._lost_streak == 0                       # ...wipes the whole lost streak
-    assert feed(p, [0.0] * 4) == [None] * 4          # a fresh run of 5 is required
-    assert p.note(0.0) is True
+# --- committed() --------------------------------------------------------------
+def test_committed_adopts_tier():
+    p = policy(current_i=2)
+    p.note(0.04, now_s=0.0)                 # asks for 2x1
+    p.committed(1)
+    assert p.current_i == 1
+    assert p.note(0.10, now_s=0.0) == 2     # reverse threshold from the new rung
 
 
-def test_no_downswitch_when_already_whole():
-    # Confident frames while already on whole-frame never produce a decision.
-    p = TilingSwitchPolicy(locked_frames_to_whole=1, tiling_on=False)
-    assert feed(p, [0.99] * 5) == [None] * 5
+# --- build_ladder: validation + empty-ladder ----------------------------------
+class _Cfg:  # duck-typed stand-in for Config.Tiling
+    def __init__(self, ladder=None, l2=1.0, l10=10.0):
+        self.ladder = ladder or []
+        self.lost_to_2x1_s, self.lost_to_3x2_s = l2, l10
 
 
-# ---------------------------------------------------------------------------
-# committed(): adopt the new branch + reset streaks (as app.py's worker does).
-# ---------------------------------------------------------------------------
-def test_committed_adopts_branch_and_resets_streaks():
-    p = TilingSwitchPolicy(lost_frames_to_tile=10, locked_frames_to_whole=5)
-    feed(p, [0.0] * 10)                      # asks to switch to tiling
-    p.committed(True)                        # worker reports the switch landed
-    assert p.tiling_on is True
-    assert p._lost_streak == 0 and p._lock_streak == 0
-    # now the *reverse* threshold applies from a clean slate.
-    assert feed(p, [0.9] * 4) == [None] * 4
-    assert p.note(0.9) is False
+class _T:  # duck-typed Config.Tiling.Tier
+    def __init__(self, tx, ty, up=None, down=None):
+        self.tiles_x, self.tiles_y, self.up_side, self.down_side = tx, ty, up, down
 
 
-def test_full_round_trip():
-    p = TilingSwitchPolicy(switch_conf=0.5, lost_frames_to_tile=3, locked_frames_to_whole=2)
-    assert p.note(0.0) is None
-    assert p.note(0.0) is None
-    assert p.note(0.0) is True               # 3 lost -> tile
-    p.committed(True)
-    assert p.note(0.7) is None
-    assert p.note(0.7) is False              # 2 locked -> whole
-    p.committed(False)
-    assert p.tiling_on is False
-    assert p.note(0.7) is None               # clean slate, confident, stay whole
+def test_build_ladder_uses_explicit_ladder():
+    tiers = build_ladder(_Cfg(ladder=[_T(3, 2, up=0.05), _T(2, 1, up=0.10, down=0.02), _T(1, 1, down=0.05)]))
+    assert [(t.tiles_x, t.tiles_y) for t in tiers] == [(3, 2), (2, 1), (1, 1)]
 
 
-def test_reset_streaks_clears_counters_without_changing_branch():
-    p = TilingSwitchPolicy(tiling_on=True)
-    feed(p, [0.9, 0.9])
-    p.reset_streaks()
-    assert p._lock_streak == 0 and p._lost_streak == 0
-    assert p.tiling_on is True               # branch unchanged
+def test_build_ladder_empty_returns_empty():
+    assert build_ladder(_Cfg(ladder=[])) == []      # whole-frame only, not switchable
+
+
+def test_build_ladder_rejects_last_not_whole():
+    with pytest.raises(ValueError):
+        build_ladder(_Cfg(ladder=[_T(3, 2, up=0.05), _T(2, 1, down=0.02)]))  # last is 2x1
+
+
+def test_build_ladder_rejects_non_decreasing_tile_counts():
+    with pytest.raises(ValueError):
+        build_ladder(_Cfg(ladder=[_T(2, 1, up=0.05), _T(3, 2, up=0.10, down=0.02), _T(1, 1, down=0.05)]))
 
 
 # ===========================================================================
-# TilingSwitchCoordinator — the ONE serialized entry point for branch switches.
+# TilingSwitchCoordinator — the ONE serialized entry point for tier switches.
 # ===========================================================================
 class FakeSwitch:
-    """Stand-in for GStreamerApp.switch_tiling: records calls, can be slow, can fail.
+    """Stand-in for GStreamerApp.switch_to_tier: records calls, can be slow, can fail.
 
     `overlap` records whether any two calls were ever in flight simultaneously —
     the race the coordinator exists to prevent.
@@ -200,97 +153,122 @@ class FakeSwitch:
         self._active = 0
         self._lock = threading.Lock()
 
-    def __call__(self, to_tiling):
+    def __call__(self, tier_i):
         with self._lock:
             self._active += 1
             if self._active > 1:
                 self.overlap = True
         try:
-            self.calls.append(to_tiling)
+            self.calls.append(tier_i)
             if self.delay:
                 time.sleep(self.delay)
             if self.raises:
                 raise self.raises
-            return self.result(to_tiling) if callable(self.result) else self.result
+            return self.result(tier_i) if callable(self.result) else self.result
         finally:
             with self._lock:
                 self._active -= 1
 
 
-def make_coord(**kw):
-    policy = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=3,
-                                locked_frames_to_whole=2, tiling_on=False)
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+    def __call__(self):
+        return self.t
+    def advance(self, dt):
+        self.t += dt
+
+
+def make_coord(clock=None, **kw):
+    """Coordinator on the default 3-rung ladder, booted on whole-frame (tier 2)."""
+    p = policy(current_i=2)
     sw = FakeSwitch(**kw)
-    return TilingSwitchCoordinator(policy, sw), sw, policy
+    coord = (TilingSwitchCoordinator(p, sw, now=clock) if clock
+             else TilingSwitchCoordinator(p, sw))
+    return coord, sw, p
 
 
-def test_successful_request_commits_the_branch():
-    coord, sw, policy = make_coord()
-    assert coord.request(True) is True
-    assert sw.calls == [True]
-    assert policy.tiling_on is True and coord.tiling_on is True
+def test_successful_request_commits_the_tier():
+    coord, sw, p = make_coord()
+    assert coord.request(1) is True
+    assert sw.calls == [1]
+    assert p.current_i == 1 and coord.current_tier == 1
+    assert coord.on_whole is False
 
 
-def test_request_is_a_noop_when_already_on_target_branch():
+def test_request_is_a_noop_when_already_on_target_tier():
     coord, sw, _ = make_coord()
-    assert coord.request(False) is True      # already whole-frame
+    assert coord.request(2) is True          # already whole-frame
     assert sw.calls == []                    # never touched the pipeline
 
 
 def test_manual_toggle_keeps_policy_in_sync():
-    """THE DESYNC BUG: --test-switch-s used to call switch_tiling directly, leaving
-    policy.tiling_on stale so the policy could never command the reverse switch."""
-    coord, _, policy = make_coord()
-    coord.request(True)                      # what the harness thread does
-    assert policy.tiling_on is True
+    """THE DESYNC BUG: --test-switch-s used to call the switch directly, leaving the
+    policy's current_i stale so it could never command the reverse switch."""
+    coord, _, p = make_coord()
+    coord.request(1)                         # what the harness thread does
+    assert p.current_i == 1
 
-    # Policy now sees confident frames while tiling -> must be able to ask for whole.
-    assert coord.note(0.9) is None           # locked_frames_to_whole=2, first frame
-    assert coord.note(0.9) is False          # streak reached -> switch back to whole
-    assert coord.request(False) is True
-    assert policy.tiling_on is False
+    # Policy now sees a big target on 2x1 -> must be able to ask for whole-frame.
+    assert coord.note(0.5, now_s=0.0) == 2
+    assert coord.request(2) is True
+    assert p.current_i == 2
 
 
-def test_failed_switch_keeps_the_working_branch_and_backs_off():
-    coord, sw, policy = make_coord(result=False)
-    assert coord.request(True) is False
-    assert policy.tiling_on is False         # still on the branch that was producing
-    assert policy._lost_streak == 0 and policy._lock_streak == 0   # backed off
+def test_failed_switch_keeps_the_working_tier_and_backs_off():
+    clock = FakeClock()
+    coord, sw, p = make_coord(clock=clock, result=False)
+    assert coord.request(0) is False
+    assert p.current_i == 2                  # still on the rung that was producing
+    assert coord.tiles_blocked is True       # backed off instead of retrying per frame
 
-    # It must be able to try again once a fresh streak builds.
-    assert [coord.note(0.0) for _ in range(3)] == [None, None, True]
+    # A tiled target is refused while the backoff holds...
+    assert coord.note(0.001, now_s=0.0) is None
+    # ...and it can try again once the backoff expires.
+    clock.advance(TilingSwitchCoordinator.FAILED_SWITCH_BACKOFF_S + 0.1)
+    assert coord.tiles_blocked is False
+    assert coord.note(0.001, now_s=0.0) == 1
+
+
+def test_a_failed_switch_never_blocks_the_way_back_to_whole_frame():
+    clock = FakeClock()
+    coord, sw, p = make_coord(clock=clock, result=False)
+    coord.request(0)                         # fails, arms the backoff
+    assert coord.tiles_blocked is True
+    sw.result = True
+    assert coord.request(coord.whole_i) is True   # whole-frame is never refused
 
 
 def test_switch_fn_exception_is_treated_as_a_failed_switch():
-    coord, _, policy = make_coord(raises=RuntimeError("gst blew up"))
-    assert coord.request(True) is False      # does not propagate
-    assert policy.tiling_on is False
+    coord, _, p = make_coord(raises=RuntimeError("gst blew up"))
+    assert coord.request(1) is False         # does not propagate
+    assert p.current_i == 2
 
 
 def test_note_returns_none_while_a_switch_is_in_flight():
-    """Otherwise the streaming thread spawns a worker per frame: TilingSwitchPolicy.note
-    keeps returning a target once its streak threshold is crossed."""
+    """Otherwise the streaming thread spawns a worker per frame: the policy keeps
+    returning a target for as long as the size/loss condition holds."""
     coord, sw, _ = make_coord(delay=0.2)
-    t = threading.Thread(target=coord.request, args=(True,))
+    t = threading.Thread(target=coord.request, args=(1,))
     t.start()
     time.sleep(0.05)                         # switch is now in flight
     assert coord.switch_in_flight is True
-    assert coord.note(0.0) is None
-    assert coord.note(0.0) is None
+    assert coord.note(0.001, now_s=0.0) is None
+    assert coord.note(0.001, now_s=0.0) is None
     t.join()
-    assert sw.calls == [True]
+    assert sw.calls == [1]
 
 
 def test_note_never_blocks_while_a_switch_is_in_flight():
     """The lock must NOT be held across the handover: the GStreamer streaming thread
     calls note() every frame and would stall ~30 frames on every switch."""
     coord, _, _ = make_coord(delay=0.5)
-    t = threading.Thread(target=coord.request, args=(True,))
+    t = threading.Thread(target=coord.request, args=(1,))
     t.start()
     time.sleep(0.05)
     t0 = time.perf_counter()
     for _ in range(50):
-        coord.note(0.0)
+        coord.note(0.001, now_s=0.0)
     elapsed = time.perf_counter() - t0
     t.join()
     assert elapsed < 0.05, f"note() blocked on the handover ({elapsed:.3f}s for 50 calls)"
@@ -300,52 +278,52 @@ def test_concurrent_requests_never_overlap_in_the_handover():
     """THE RACE: two callers interleaving valve/selector set_property calls could leave
     the input-selector on a shut-valve branch."""
     coord, sw, _ = make_coord(delay=0.05)
-    threads = [threading.Thread(target=coord.request, args=(bool(i % 2),))
-               for i in range(8)]
+    threads = [threading.Thread(target=coord.request, args=(i % 3,)) for i in range(8)]
     for t in threads: t.start()
     for t in threads: t.join()
-    assert sw.overlap is False, "two switch_tiling calls were in flight at once"
+    assert sw.overlap is False, "two switch_to_tier calls were in flight at once"
 
 
-def test_in_flight_request_reports_current_branch_rather_than_queueing():
+def test_in_flight_request_reports_current_tier_rather_than_queueing():
     coord, sw, _ = make_coord(delay=0.2)
-    t = threading.Thread(target=coord.request, args=(True,))
+    t = threading.Thread(target=coord.request, args=(1,))
     t.start()
     time.sleep(0.05)
-    # A second caller asking for whole-frame while the tiling switch settles: we are
+    # A second caller asking for whole-frame while the tier-1 switch settles: we are
     # still on whole-frame, so it is already satisfied; it must not touch the pipeline.
-    assert coord.request(False) is True
+    assert coord.request(2) is True
     t.join()
-    assert sw.calls == [True]
+    assert sw.calls == [1]
 
 
 def test_policy_and_harness_do_not_leave_pipeline_and_policy_diverged():
-    """End-to-end of the two bugs together: a harness thread toggling while the policy
-    also drives. Whatever the interleaving, the policy's belief must equal the branch
-    the fake pipeline actually ended on."""
-    pipeline_branch = {'tiling': False}
+    """End-to-end of the two bugs together: a harness thread cycling tiers while the
+    policy also drives. Whatever the interleaving, the policy's belief must equal the
+    tier the fake pipeline actually ended on."""
+    pipeline_tier = {'i': 2}
 
-    def switch(to_tiling):
+    def switch(tier_i):
         time.sleep(0.01)
-        pipeline_branch['tiling'] = to_tiling
+        pipeline_tier['i'] = tier_i
         return True
 
-    policy = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=2,
-                                locked_frames_to_whole=2, tiling_on=False)
-    coord = TilingSwitchCoordinator(policy, switch)
+    p = policy(current_i=2)
+    coord = TilingSwitchCoordinator(p, switch)
 
     stop = threading.Event()
 
     def harness():
-        want = True
+        want = 0
         while not stop.is_set():
             coord.request(want)
-            want = not want
+            want = (want + 1) % 3
             time.sleep(0.005)
 
     def streaming():
         while not stop.is_set():
-            target = coord.note(0.0 if pipeline_branch['tiling'] is False else 0.9)
+            # Alternate a tiny and a large target so the policy keeps asking to move.
+            side = 0.001 if pipeline_tier['i'] == 2 else 0.9
+            target = coord.note(side, now_s=time.monotonic())
             if target is not None:
                 coord.request(target)
             time.sleep(0.001)
@@ -358,49 +336,40 @@ def test_policy_and_harness_do_not_leave_pipeline_and_policy_diverged():
 
     # Quiesce: no switch in flight, then the two views must agree.
     assert coord.switch_in_flight is False
-    assert coord.tiling_on == pipeline_branch['tiling'], (
-        f"policy believes tiling={coord.tiling_on} but pipeline is on "
-        f"tiling={pipeline_branch['tiling']}")
+    assert coord.current_tier == pipeline_tier['i'], (
+        f"policy believes tier={coord.current_tier} but pipeline is on "
+        f"tier={pipeline_tier['i']}")
 
 
 # ===========================================================================
-# BranchStallWatchdog — recovers from a branch that warmed up and then DIED.
+# BranchStallWatchdog — recovers from a rung that warmed up and then DIED.
 # ===========================================================================
-class FakeClock:
-    def __init__(self):
-        self.t = 1000.0
-    def __call__(self):
-        return self.t
-    def advance(self, dt):
-        self.t += dt
-
-
 class FakePipeline:
-    """A switchable pipeline whose tile branch can be 'killed' (stops delivering)."""
-    def __init__(self):
-        self.tiling = False
+    """A ladder pipeline whose tiled rungs can be 'killed' (stop delivering)."""
+    def __init__(self, whole_i=2):
+        self.whole_i = whole_i
+        self.tier = whole_i
         self.tile_dead = False
         self.frames = 0
         self.switch_calls = []
 
-    def switch(self, to_tiling):
-        self.switch_calls.append(to_tiling)
-        self.tiling = to_tiling
+    def switch(self, tier_i):
+        self.switch_calls.append(tier_i)
+        self.tier = tier_i
         return True
 
     def tick(self):
-        """One source frame. A dead tile branch delivers nothing to the callback."""
-        if self.tiling and self.tile_dead:
+        """One source frame. A dead tiled rung delivers nothing to the callback."""
+        if self.tier != self.whole_i and self.tile_dead:
             return
         self.frames += 1
 
 
-def make_watchdog(stall_timeout_s=2.0, cooldown_s=30.0, lost_frames_to_tile=3):
+def make_watchdog(stall_timeout_s=2.0, cooldown_s=30.0):
     clock = FakeClock()
     pipe = FakePipeline()
-    policy = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=lost_frames_to_tile,
-                                locked_frames_to_whole=2, tiling_on=False)
-    coord = TilingSwitchCoordinator(policy, pipe.switch, now=clock)
+    p = policy(current_i=2)
+    coord = TilingSwitchCoordinator(p, pipe.switch, now=clock)
     wd = BranchStallWatchdog(coord, lambda: pipe.frames, stall_timeout_s=stall_timeout_s,
                              cooldown_s=cooldown_s, now=clock)
     return wd, coord, pipe, clock
@@ -408,34 +377,34 @@ def make_watchdog(stall_timeout_s=2.0, cooldown_s=30.0, lost_frames_to_tile=3):
 
 def test_watchdog_is_quiet_while_frames_flow():
     wd, coord, pipe, clock = make_watchdog()
-    coord.request(True)
+    coord.request(1)
     for _ in range(20):
         pipe.tick()
         clock.advance(0.25)
         assert wd.poll() is False
-    assert coord.tiling_on is True          # never touched a healthy branch
+    assert coord.current_tier == 1          # never touched a healthy rung
 
 
-def test_watchdog_reverts_a_tile_branch_that_died_after_warming_up():
+def test_watchdog_reverts_a_tiled_rung_that_died_after_warming_up():
     wd, coord, pipe, clock = make_watchdog(stall_timeout_s=2.0)
-    coord.request(True)
+    coord.request(1)
     pipe.tick(); wd.poll()                  # establish progress
-    pipe.tile_dead = True                   # branch dies AFTER being accepted
+    pipe.tile_dead = True                   # rung dies AFTER being accepted
 
     clock.advance(1.0); assert wd.poll() is False   # inside the stall window
     clock.advance(1.5)                              # now past stall_timeout_s
     assert wd.poll() is True
 
-    assert coord.tiling_on is False
-    assert pipe.tiling is False
-    assert pipe.switch_calls == [True, False]
+    assert coord.current_tier == 2
+    assert pipe.tier == 2
+    assert pipe.switch_calls == [1, 2]
 
 
-def test_watchdog_never_switches_when_whole_frame_is_the_stalled_branch():
+def test_watchdog_never_switches_when_whole_frame_is_the_stalled_rung():
     """Whole-frame is fed by the same source tee and the same hailonet: if it is starved,
     tiling cannot help. Log, do not thrash."""
     wd, coord, pipe, clock = make_watchdog()
-    # never switched to tiling; simply stop delivering frames
+    # never left whole-frame; simply stop delivering frames
     pipe.tick(); wd.poll()
     clock.advance(10.0)
     assert wd.poll() is False
@@ -447,7 +416,7 @@ def test_a_handover_in_flight_is_not_mistaken_for_a_stall(caplog):
     `poll() is False` is not enough: the coordinator's own in-flight guard would make a
     spurious revert a no-op and still return False. Assert nothing was even attempted."""
     wd, coord, pipe, clock = make_watchdog(stall_timeout_s=1.0)
-    coord.request(True)
+    coord.request(1)
     pipe.tick(); wd.poll()
 
     with coord._lock:
@@ -456,8 +425,8 @@ def test_a_handover_in_flight_is_not_mistaken_for_a_stall(caplog):
     with caplog.at_level("ERROR"):
         assert wd.poll() is False
     assert not [r for r in caplog.records if "STALL" in r.getMessage()]
-    assert coord.tiling_blocked is False        # no cooldown armed
-    assert pipe.switch_calls == [True]          # pipeline untouched
+    assert coord.tiles_blocked is False         # no cooldown armed
+    assert pipe.switch_calls == [1]             # pipeline untouched
 
     with coord._lock:
         coord._in_flight = False
@@ -467,50 +436,50 @@ def test_a_handover_in_flight_is_not_mistaken_for_a_stall(caplog):
     assert wd.poll() is True                    # ...and then it does fire
 
 
-def test_cooldown_blocks_re_entering_the_dead_branch():
-    """Without this the policy rebuilds its lost-streak in ~0.7s and dives straight back
-    into the branch the watchdog just proved dead."""
+def test_cooldown_blocks_re_entering_the_dead_rung():
+    """Without this the loss escalation fires again within ~1s and dives straight back
+    into the rung the watchdog just proved dead."""
     wd, coord, pipe, clock = make_watchdog(stall_timeout_s=1.0, cooldown_s=30.0)
-    coord.request(True)
+    coord.request(1)
     pipe.tick(); wd.poll()
     pipe.tile_dead = True
     clock.advance(1.5)
     assert wd.poll() is True                       # reverted
-    assert coord.tiling_blocked is True
+    assert coord.tiles_blocked is True
 
-    # The policy wants tiling again immediately (target lost every frame).
-    assert [coord.note(0.0) for _ in range(5)] == [None] * 5   # note() refuses to even ask
-    assert coord.request(True) is False                        # and a direct request is refused
-    assert pipe.tiling is False
-    assert pipe.switch_calls == [True, False]                  # never re-entered
+    # The policy wants tiles again immediately (target tiny / lost every frame).
+    assert [coord.note(0.001, now_s=0.0) for _ in range(5)] == [None] * 5
+    assert coord.request(1) is False               # and a direct request is refused
+    assert pipe.tier == 2
+    assert pipe.switch_calls == [1, 2]             # never re-entered
 
-    clock.advance(31.0)                                        # cooldown expires
-    assert coord.tiling_blocked is False
-    assert coord.request(True) is True
-    assert pipe.switch_calls == [True, False, True]
+    clock.advance(31.0)                            # cooldown expires
+    assert coord.tiles_blocked is False
+    assert coord.request(1) is True
+    assert pipe.switch_calls == [1, 2, 1]
 
 
 def test_watchdog_retries_if_the_revert_itself_fails():
     """If whole-frame will not come back either, keep trying — never give up on
-    returning to the known-good branch."""
+    returning to the known-good rung."""
     wd, coord, pipe, clock = make_watchdog(stall_timeout_s=1.0)
-    coord.request(True)
+    coord.request(1)
     pipe.tick(); wd.poll()
     pipe.tile_dead = True
 
     calls = []
-    def failing_switch(to_tiling):
-        calls.append(to_tiling)
+    def failing_switch(tier_i):
+        calls.append(tier_i)
         return False                       # revert cannot land
     coord._switch_fn = failing_switch
 
     clock.advance(1.5)
     assert wd.poll() is False              # reported failure, did not claim success
-    assert coord.tiling_on is True         # still stuck on the dead branch, honestly reported
+    assert coord.current_tier == 1         # still stuck on the dead rung, honestly reported
 
     clock.advance(1.5)
     assert wd.poll() is False
-    assert calls == [False, False]         # retried rather than latching
+    assert calls == [2, 2]                 # retried rather than latching
 
 
 def test_whole_frame_stall_is_logged_once_not_every_poll(caplog):
@@ -553,46 +522,3 @@ def test_watchdog_stays_disarmed_until_the_first_frame_ever_arrives(caplog):
     with caplog.at_level("ERROR"):
         wd.poll()
     assert [r for r in caplog.records if "STALL" in r.getMessage()]
-
-
-# ===========================================================================
-# start_on_tiling: the policy must be seeded with the branch the pipeline booted on.
-# ===========================================================================
-def test_policy_booted_on_tiling_switches_to_whole_after_the_locked_streak():
-    """Shipped config: start_on_tiling + locked_frames_to_whole=30. The first decision
-    must be about the branch we are ACTUALLY on."""
-    policy = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=10,
-                                locked_frames_to_whole=30, tiling_on=True)
-    pipe = FakePipeline(); pipe.tiling = True
-    coord = TilingSwitchCoordinator(policy, pipe.switch)
-
-    assert coord.tiling_on is True
-    # 29 confident frames: still tiling.
-    assert [coord.note(0.81) for _ in range(29)] == [None] * 29
-    assert coord.note(0.81) is False              # the 30th crosses the threshold
-    assert coord.request(False) is True
-    assert pipe.tiling is False and coord.tiling_on is False
-
-
-def test_one_unconfident_frame_costs_two_frames_not_the_whole_locked_streak():
-    """Through the coordinator, end to end: a single miss must not throw away 29 frames
-    of progress, or a merely-flaky detector never gets the rig off the tile branch."""
-    policy = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=30,
-                                locked_streak_miss_penalty=2, tiling_on=True)
-    coord = TilingSwitchCoordinator(policy, lambda t: True)
-    for _ in range(29):
-        coord.note(0.81)
-    assert coord.note(0.1) is None                # one miss: 29 -> 27
-    assert [coord.note(0.81) for _ in range(2)] == [None, None]   # 28, 29
-    assert coord.note(0.81) is False              # 30 -> back to whole-frame
-
-
-def test_seeding_the_policy_wrong_would_invert_the_first_decision():
-    """If the pipeline boots on tiling but the policy is told tiling_on=False (the bug the
-    assert in main() guards), confident frames produce NO switch and lost frames ask to
-    switch to the branch we are already on."""
-    wrong = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=10,
-                               locked_frames_to_whole=30, tiling_on=False)
-    assert [wrong.note(0.81) for _ in range(60)] == [None] * 60    # never comes back to whole
-    assert wrong.note(0.0) is None
-    assert [wrong.note(0.0) for _ in range(9)][-1] is True         # asks for tiling... again
