@@ -100,11 +100,14 @@ class user_app_callback_class(app_callback_class):
                 return
             self._switch_pending = True
         def _run():
+            committed = False
             try:
                 self.request_switch(to_tiling)
-                self._policy.tiling_on = to_tiling
+                self._policy.committed(to_tiling)   # adopt new branch + reset streaks
+                committed = True
             finally:
-                self._policy.reset_streaks()
+                if not committed:
+                    self._policy.reset_streaks()    # switch failed: drop the streak, keep branch
                 self._switch_pending = False
         threading.Thread(target=_run, name="tiling-policy-switch", daemon=True).start()
 
