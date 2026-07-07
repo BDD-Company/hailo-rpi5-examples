@@ -41,18 +41,19 @@ tiling:
   overlap: 0.10
   # Run the size+loss policy automatically. When false the pipeline is still built
   # (if the ladder has >= 2 rungs) but only --switch-test-s drives switching.
-  auto_switch: false
+  # Requires bytetrack.enabled: true (size comes from matched tracks).
+  auto_switch: true
   # Target-lost escalation (seconds): drop to the rung above whole after lost_to_2x1_s
   # of no matched track, then to tier 0 (most tiles) after lost_to_3x2_s.
   lost_to_2x1_s: 1.0
   lost_to_3x2_s: 10.0
   # Size-driven ladder. side = max(bbox_w, bbox_h) of the tracked target (0..1).
   # Climb toward whole when side >= up_side; descend toward more tiles when
-  # side < down_side. Last rung MUST be 1x1. Uncomment + set auto_switch: true to use.
-  # ladder:
-  #   - {tiles_x: 3, tiles_y: 2, up_side: 0.05}
-  #   - {tiles_x: 2, tiles_y: 1, up_side: 0.10, down_side: 0.02}
-  #   - {tiles_x: 1, tiles_y: 1, down_side: 0.05}
+  # side < down_side. Last rung MUST be 1x1. Set empty/remove to run whole-frame only.
+  ladder:
+    - {tiles_x: 3, tiles_y: 2, up_side: 0.05}
+    - {tiles_x: 2, tiles_y: 1, up_side: 0.10, down_side: 0.02}
+    - {tiles_x: 1, tiles_y: 1, down_side: 0.05}
 
 thrust:
   cruise: 0.53
@@ -200,7 +201,7 @@ drone:
     belly_down_min_horizontal_g_mss: 2.0  # min in-plane gravity to engage
 
 bytetrack:
-  enabled: false   # set true to enable ByteTrack (section is still validated)
+  enabled: true    # required by tiling.auto_switch (size ladder reads matched tracks)
   track_thresh: 0.3
   det_thresh: 0.35
   match_thresh: 0.3
