@@ -22,6 +22,23 @@
             "console": "integratedTerminal"
         },
         {
+            "name": "app.py --preview",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "BDD/app.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--preview"
+                ,"--i=rpi"
+                // NV12-input + HAILO8 ball detector, copied to the Pi's tmpfs models dir
+                // (re-copy after a reboot: scp .../2026-04-09_11n_ball_v3_nv12_h8.hef bdd@bdd-sd9.local:/home/bdd/models/)
+                ,"--hef-path=/home/bdd/models/2026-04-09_11n_ball_v3_nv12_h8.hef"
+            ],
+            "env": {
+                "DISPLAY": ":0" // force the preview window onto the local display, even over SSH
+            }
+        },
+        {
             "name": "debug_drone_controller.py",
             "type": "debugpy",
             "request": "launch",

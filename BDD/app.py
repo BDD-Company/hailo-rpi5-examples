@@ -419,11 +419,17 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, tiles=None, tiling_overlap=None, switchable_tiling=False):
+    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, tiles=None, tiling_overlap=None, switchable_tiling=False, preview=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
+        # --preview: fan the display branch out to a live window (autovideosink) so
+        # the incoming camera video can be watched during a run. Needs a display
+        # (DISPLAY set), so it is opt-in and off on headless benches. Read below in
+        # get_output_pipeline_string, which runs during super().__init__() ->
+        # create_pipeline(), so it MUST be set before the super() call.
+        self.preview = bool(preview)
         self.camera_switcher = camera_switcher
         super().__init__(app_callback, user_data, inference=config.inference, camera_settings=config.camera, parser=parser,
                          video_format=video_format, tiles=tiles, tiling_overlap=tiling_overlap, switchable_tiling=switchable_tiling)
@@ -433,8 +439,19 @@ class App(GStreamerDetectionApp):
 
 
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
+        # Live preview branch (--preview): its own leaky, tiny queue gives it a
+        # separate streaming thread and sync=false so a slow/stalled window sink
+        # can neither back-pressure the recorder nor add capture latency.
+        preview_branch = (
+            'queue name=preview_queue leaky=downstream max-size-buffers=2 '
+            '    max-size-bytes=0 max-size-time=0 '
+            '! videoconvert '
+            '! autovideosink name=preview_sink sync=false'
+        )
+
         if not self.record_videos:
-            return "fakesink"
+            # Preview only (no recording) — or a plain fakesink terminator.
+            return preview_branch if self.preview else "fakesink"
 
         record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         video_file_name = Path(self.video_filename_base if self.video_filename_base else f"RAW_{record_start_time_str}.mkv")
@@ -443,7 +460,7 @@ class App(GStreamerDetectionApp):
         video_file_name = video_file_name.stem + "_%05d" + (video_file_name.suffix if video_file_name.suffix else '.mkv')
 
         video_output_chunk_length_ns = self.video_output_chunk_length_s * 1000_000_000
-        return f'''
+        record_branch = f'''
             videoconvert \
             ! x264enc \
                 key-int-max=30 \
@@ -462,6 +479,17 @@ class App(GStreamerDetectionApp):
                 sink-properties="properties,buffer-mode=2,o-sync=true" \
                 max-size-time={video_output_chunk_length_ns} async-finalize=true \
                 location="{self.video_output_directory}/{video_file_name}"
+        '''
+
+        if not self.preview:
+            return record_branch
+
+        # Record + preview: split the display branch with a tee so the preview
+        # window and the recorder each get their own leg (recorder unchanged).
+        return f'''
+            tee name=display_tee
+            display_tee. ! {preview_branch}
+            display_tee. ! {record_branch}
         '''
 
     def run(self, wait_event_before_starting=None):
@@ -584,6 +612,11 @@ def main():
     # --no-record: force RAW recording off regardless of config (frees ~1 CPU core
     # for inference/tiling).
     no_record_flag = _pop_flag(sys.argv, "--no-record")
+
+    # --preview: also show the incoming camera video in a live window
+    # (autovideosink). Opt-in because it needs a display; on a headless bench run
+    # without it (see the "app.py --preview (DISPLAY=:0)" launch config).
+    preview_flag = _pop_flag(sys.argv, "--preview")
 
     # --tiles NxM: static inference tile grid (e.g. --tiles 2x2; 1x1 = whole-frame).
     # None => use config.tiling.
@@ -751,7 +784,10 @@ def main():
         video_format=video_format,
         tiles=tiles,
         tiling_overlap=config.tiling.overlap,
-        switchable_tiling=switchable)
+        switchable_tiling=switchable,
+        preview=preview_flag)
+    if preview_flag:
+        logger.info("!!! PREVIEW window enabled (autovideosink); needs a display (DISPLAY set)")
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
