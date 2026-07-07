@@ -17,6 +17,7 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_p
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser
 from app_base import GStreamerDetectionApp
+from tiling_policy import TilingSwitchPolicy
 from drone_controller import drone_controlling_thread
 from platform_controller import platform_controlling_thread
 
@@ -58,6 +59,63 @@ class user_app_callback_class(app_callback_class):
         super().__init__()
         self.detections_queue = detections_queue
         self.tracker = tracker
+
+        # Detection-state tiling policy. The whole<->tile decision lives in the pure,
+        # unit-tested TilingSwitchPolicy; this class only fires the (blocking) switch
+        # on a worker thread. Enabled by main() via configure_switch_policy().
+        self.request_switch = None            # callable(bool) -> app.switch_tiling
+        self.auto_switch = False
+        self._policy = TilingSwitchPolicy()   # thresholds replaced by configure_switch_policy()
+        self._switch_pending = False
+        self._switch_lock = threading.Lock()
+
+    def configure_switch_policy(self, request_switch, switch_conf,
+                                lost_frames_to_tile, locked_frames_to_whole):
+        """Enable the auto-switch tiling policy. `request_switch(to_tiling: bool)`
+        performs the actual (blocking) branch handover; the thresholds tune when the
+        policy asks for a switch."""
+        self.request_switch = request_switch
+        self.auto_switch = True
+        self._policy = TilingSwitchPolicy(
+            switch_conf=switch_conf,
+            lost_frames_to_tile=lost_frames_to_tile,
+            locked_frames_to_whole=locked_frames_to_whole,
+        )
+
+    def note_detection(self, best_conf: float):
+        """Per-frame detection-state hot-switch policy. `best_conf` is the highest
+        target confidence this frame (0 if none). Delegates the whole<->tile decision
+        to TilingSwitchPolicy and fires the (blocking) switch on a worker thread so
+        the GStreamer streaming thread is never stalled. No-op unless auto_switch is
+        configured."""
+        if not self.auto_switch or self.request_switch is None:
+            return
+        target = self._policy.note(best_conf)
+        if target is not None:
+            self._fire_switch(target)
+
+    def _fire_switch(self, to_tiling: bool):
+        with self._switch_lock:
+            if self._switch_pending or to_tiling == self._policy.tiling_on:
+                return
+            self._switch_pending = True
+        def _run():
+            switched = False
+            try:
+                # request_switch (app.switch_tiling) returns True only if the incoming
+                # branch actually produced buffers and the selector flipped; on a
+                # graceful abort (dead incoming branch) it returns False and keeps the
+                # branch that was still delivering detections.
+                switched = bool(self.request_switch(to_tiling))
+                if switched:
+                    self._policy.committed(to_tiling)   # adopt new branch + reset streaks
+            finally:
+                if not switched:
+                    # aborted/failed: keep the current branch, drop the streak so the
+                    # policy backs off and retries after a fresh run rather than thrashing.
+                    self._policy.reset_streaks()
+                self._switch_pending = False
+        threading.Thread(target=_run, name="tiling-policy-switch", daemon=True).start()
 
 
 # -----------------------------------------------------------------------------------------------
@@ -123,7 +181,7 @@ def _read_camera_id(buffer: Gst.Buffer) -> int:
 # libcamera's CLOCK_BOOTTIME and the appsrc-push stamp is time.monotonic_ns();
 # on a Pi that never suspends these share an origin, so the Stage-A delta is
 # accurate in practice (and the offset is constant, so cross-run deltas are valid).
-_LATENCY_LOG_EVERY_N = 100
+_LATENCY_LOG_EVERY_N = int(os.environ.get("BDD_LATENCY_LOG_EVERY_N", "100"))
 _stage_a_samples_ms: list[float] = []
 _stage_b_samples_ms: list[float] = []
 _latency_frame_counter = 0
@@ -157,6 +215,25 @@ def _record_stage_latency(stage_a_ms, stage_b_ms):
     )
     _stage_a_samples_ms.clear()
     _stage_b_samples_ms.clear()
+
+
+# Detection throughput (callbacks/s) — time-based so it's meaningful even when
+# tiling drops delivered fps well below capture. Logged every ~2 s.
+_det_fps_last_t = None
+_det_fps_count = 0
+
+def _log_det_fps():
+    global _det_fps_last_t, _det_fps_count
+    _det_fps_count += 1
+    now = time.monotonic()
+    if _det_fps_last_t is None:
+        _det_fps_last_t = now
+        return
+    dt = now - _det_fps_last_t
+    if dt >= 2.0:
+        logger.info("!!! DET FPS: %.1f (%d callbacks / %.2fs)", _det_fps_count / dt, _det_fps_count, dt)
+        _det_fps_last_t = now
+        _det_fps_count = 0
 
 _MIN_MATCH_IOU = 0.1
 
@@ -193,6 +270,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
     # Using the user_data to count the number of frames
     user_data.increment()
+    _log_det_fps()
 
     # Get the caps from the pad
     format, width, height = get_caps_from_pad(pad)
@@ -264,6 +342,15 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     else:
         dets_array = np.empty((0, 5))
 
+    _best_conf = max((c for _, c in raw_dets), default=0.0)
+    # Detection-state whole<->tile policy (no-op unless tiling.auto_switch is on).
+    user_data.note_detection(_best_conf)
+
+    # Throttled detection summary — confirms the model is producing valid
+    # detections from the current pixel format (e.g. NV12 fed correctly).
+    if frame_id % 30 == 0:
+        logger.info("!!! DETS frame=#%d n=%d maxconf=%.3f", frame_id, len(raw_dets), _best_conf)
+
     # logger.debug(
     #     "frame=#%04d ByteTracker input: %d detections %s",
     #     frame_id,
@@ -332,13 +419,14 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None):
+    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, tiles=None, tiling_overlap=None, switchable_tiling=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
         self.camera_switcher = camera_switcher
-        super().__init__(app_callback, user_data, inference=config.inference, camera_settings=config.camera, parser=parser)
+        super().__init__(app_callback, user_data, inference=config.inference, camera_settings=config.camera, parser=parser,
+                         video_format=video_format, tiles=tiles, tiling_overlap=tiling_overlap, switchable_tiling=switchable_tiling)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -384,6 +472,80 @@ class App(GStreamerDetectionApp):
         super().run()
 
 
+def detect_hef_video_format(hef_path, default='RGB'):
+    """Read the model's input format from the HEF and map it to a capture video
+    format: 'NV12' when the input vstream order is NV12, else 'RGB'. The capture
+    format MUST match the model input — the whole-buffer hailocropper requires its
+    input format to equal the hailonet input format, so deriving it from the model
+    prevents the "Cropper Input and output caps have different formats" crash and
+    the silent format mismatches. Falls back to `default` if the HEF can't be read
+    (e.g. hailo_platform unavailable on a dev host)."""
+    try:
+        from hailo_platform import HEF
+        info = HEF(str(hef_path)).get_input_vstream_infos()[0]
+        order = getattr(info.format.order, 'name', str(info.format.order)).upper()
+        return 'NV12' if 'NV12' in order else 'RGB'
+    except Exception as e:
+        logger.warning("Could not read HEF input format from %s (%s); defaulting to %s",
+                       hef_path, e, default)
+        return default
+
+
+def _pop_flag(argv: list[str], flag: str) -> bool:
+    """Remove a boolean CLI flag from ``argv`` in place; return whether it was
+    present. These flags are parsed off sys.argv directly (before the argparser)
+    because they gate App() construction."""
+    if flag in argv:
+        argv.remove(flag)
+        return True
+    return False
+
+
+def _pop_value(argv: list[str], flag: str) -> str | None:
+    """Remove ``<flag> <value>`` from ``argv`` in place and return the value, or
+    None if the flag is absent. Exits with a clear message (not an IndexError) if
+    the flag is given with no value following it."""
+    if flag not in argv:
+        return None
+    i = argv.index(flag)
+    if i + 1 >= len(argv):
+        raise SystemExit(f"{flag} requires a value (e.g. {flag} 2x2)")
+    value = argv[i + 1]
+    del argv[i:i + 2]
+    return value
+
+
+def _peek_value(argv: list[str], flag: str) -> str | None:
+    """Read the value of ``<flag> <value>`` or ``<flag>=<value>`` from ``argv``
+    WITHOUT removing it (unlike ``_pop_value``): argparse still consumes ``--hef-path``
+    downstream, so this only needs to peek early to derive the capture format. Returns
+    None if the flag is absent; exits with a clear message if it has no value."""
+    for i, tok in enumerate(argv):
+        if tok == flag:
+            if i + 1 >= len(argv):
+                raise SystemExit(f"{flag} requires a value (e.g. {flag} /path/to/model.hef)")
+            return argv[i + 1]
+        if tok.startswith(flag + "="):
+            return tok[len(flag) + 1:]
+    return None
+
+
+def _parse_grid(spec: str) -> tuple[int, int]:
+    """Parse an ``NxM`` tile-grid spec (case-insensitive, e.g. ``2x2``) into
+    ``(nx, ny)``. Exits with a clear message (not an opaque ValueError/IndexError)
+    on anything that isn't two positive integers."""
+    nx_s, sep, ny_s = spec.lower().partition("x")
+    if not sep or not nx_s or not ny_s:
+        raise SystemExit(f"tile grid must look like NxM (e.g. 2x2), got {spec!r}")
+    try:
+        nx, ny = int(nx_s), int(ny_s)
+    except ValueError:
+        raise SystemExit(f"tile grid must be two integers NxM, got {spec!r}")
+    if nx < 1 or ny < 1:
+        raise SystemExit(f"tile grid values must be >= 1, got {nx}x{ny}")
+    return nx, ny
+
+
 def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -414,6 +576,33 @@ def main():
         i = sys.argv.index("--config")
         config_path = Path(sys.argv[i + 1])
         del sys.argv[i:i + 2]
+
+    # These flags are parsed off sys.argv directly (before the argparser) because
+    # they gate App() construction below. NxM grids go through _parse_grid, which
+    # validates them; a missing value or malformed grid exits with a clear message.
+
+    # --no-record: force RAW recording off regardless of config (frees ~1 CPU core
+    # for inference/tiling).
+    no_record_flag = _pop_flag(sys.argv, "--no-record")
+
+    # --tiles NxM: static inference tile grid (e.g. --tiles 2x2; 1x1 = whole-frame).
+    # None => use config.tiling.
+    tiles_spec = _pop_value(sys.argv, "--tiles")
+    tiles_override = _parse_grid(tiles_spec) if tiles_spec else None
+
+    # --switch-tiles NxM: runtime-switchable tiling with an NxM tile branch (whole-
+    # frame active at startup, hot-switchable). Forces switchable on.
+    switch_tiles_spec = _pop_value(sys.argv, "--switch-tiles")
+    switch_tiles_override = _parse_grid(switch_tiles_spec) if switch_tiles_spec else None
+
+    # --switch-test-s N: manual handover validation — toggle whole-frame<->tiling
+    # every N seconds (only meaningful with switchable tiling enabled).
+    switch_test_s_spec = _pop_value(sys.argv, "--switch-test-s")
+    switch_test_s = float(switch_test_s_spec) if switch_test_s_spec else None
+
+    # --plus-one: benchmark the "NxM + 1" load — open both branches so the tile grid
+    # AND a whole frame are inferred each frame (needs switchable tiling).
+    plus_one = _pop_flag(sys.argv, "--plus-one")
 
     if DEBUG:
         logger.error('')
@@ -463,6 +652,57 @@ def main():
     global USE_TRACKER
     USE_TRACKER = config.bytetrack is not None
 
+    # RAW recording: on by config unless --no-record forces it off.
+    record_videos = config.record_videos and not no_record_flag
+    logger.info("!!! RAW video recording: %s", "ENABLED" if record_videos else "DISABLED")
+
+    # Switchable tiling: CLI --switch-tiles wins, else config.tiling.switchable.
+    # When on, the tile-branch geometry is the --switch-tiles value (or config
+    # tiles_x/y), and the pipeline builds whole-frame + tile branches hot-switchable
+    # at runtime (whole-frame active at startup).
+    switchable = switch_tiles_override is not None or config.tiling.switchable or config.tiling.auto_switch or plus_one
+    if switchable:
+        tiles = switch_tiles_override if switch_tiles_override is not None \
+            else (config.tiling.tiles_x, config.tiling.tiles_y)
+        if tiles == (1, 1):
+            tiles = (2, 1)  # a 1x1 "tile branch" == whole-frame; default to 2x1
+        logger.info("!!! SWITCHABLE tiling: whole-frame <-> %dx%d (whole active at startup)",
+                    tiles[0], tiles[1])
+    else:
+        # Static tile grid: CLI --tiles wins, else config.tiling.
+        tiles = tiles_override if tiles_override is not None else (config.tiling.tiles_x, config.tiling.tiles_y)
+        logger.info("!!! Inference tiling: %dx%d (%s)", tiles[0], tiles[1],
+                    "whole-frame" if tiles == (1, 1) else f"{tiles[0]*tiles[1]} tiles/frame")
+    if not switchable and tiles != (1, 1):
+        logger.warning(
+            "!!! TILING %dx%d enabled (%d inferences/frame): capture->command LATENCY and CPU "
+            "will be SUB-PAR vs whole-frame. On this rig only ~2 tiles stay under the 200ms "
+            "budget (2x2 ~230ms e2e). Use tiling for small-object recall, not low-latency control.",
+            tiles[0], tiles[1], tiles[0] * tiles[1])
+
+    # Capture format follows the MODEL input: NV12-input hef -> capture NV12,
+    # RGB-input hef -> capture RGB. The hailocropper requires capture format ==
+    # hailonet input format, so deriving it from the model is the only correct
+    # choice (a mismatch crashes the cropper). CLI --hef-path wins over config;
+    # accept both `--hef-path X` and `--hef-path=X` (argparse consumes it later too).
+    cli_hef = _peek_value(sys.argv, '--hef-path')
+    effective_hef = cli_hef if cli_hef is not None else str(config.inference.hef_model_path)
+    video_format = detect_hef_video_format(effective_hef)
+    if video_format != config.camera.video_format:
+        logger.warning("!!! capture video_format: %s (from model input) overrides "
+                       "config.camera.video_format=%s", video_format, config.camera.video_format)
+    else:
+        logger.info("!!! capture video_format: %s (matches model input)", video_format)
+    if tiles != (1, 1) and video_format == 'NV12':
+        logger.warning("!!! NV12 capture + tiling together: extra format handling on the "
+                       "tile path may further raise latency/CPU — measure before relying on it.")
+
+    # Fold the model-derived capture format back into config.camera so it is the
+    # single source of truth: the appsrc caps (camera_settings.video_format), the
+    # producer (camera_switcher.video_format), and the pipeline (self.video_format)
+    # then all agree — the base app reads camera settings straight off Config.Camera.
+    config = replace(config, camera=replace(config.camera, video_format=video_format))
+
     bytetracker = BYTETracker(**config.bytetrack.tracker_kwargs()) if config.bytetrack is not None else None
 
     user_data = user_app_callback_class(detections_queue, bytetracker)
@@ -487,7 +727,7 @@ def main():
             width=config.camera.width,
             height=config.camera.height,
             fps=config.camera.fps,
-            video_format=config.camera.video_format,
+            video_format=config.camera.video_format,   # model-derived (folded into config.camera above)
             active_id=config.camera.active_id,
             switch_to_wide_size=config.camera.switch_to_wide_size,
             switch_to_zoom_size=config.camera.switch_to_zoom_size,
@@ -507,10 +747,27 @@ def main():
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True)
+        record_videos=record_videos,
+        video_format=video_format,
+        tiles=tiles,
+        tiling_overlap=config.tiling.overlap,
+        switchable_tiling=switchable)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
+
+    # Detection-state tiling policy: give the callback a handle to switch_tiling
+    # and the thresholds. Only active when switchable + auto_switch are on.
+    if switchable and config.tiling.auto_switch:
+        user_data.configure_switch_policy(
+            request_switch=app.switch_tiling,
+            switch_conf=config.tiling.switch_conf,
+            lost_frames_to_tile=config.tiling.lost_frames_to_tile,
+            locked_frames_to_whole=config.tiling.locked_frames_to_whole,
+        )
+        logger.info("!!! auto-switch tiling policy: lost>=%d -> tile, locked>=%d -> whole, conf>=%.2f",
+                    config.tiling.lost_frames_to_tile, config.tiling.locked_frames_to_whole,
+                    config.tiling.switch_conf)
 
     # Optional dual-camera switching verification harness. The thread drives
     # the same CameraSwitcher.toggle() that production policy will use, so a
@@ -530,6 +787,28 @@ def main():
                 )
         threading.Thread(target=_switch_test_thread, name="camera-switch-test", daemon=True).start()
         logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
+
+    # Manual hot-switch validation: toggle whole-frame <-> tiling every N seconds
+    # so the handover (valve + input-selector) can be confirmed glitch-free on the
+    # log (BRANCH SWITCH lines, DETS continuity, StageB stepping). Only meaningful
+    # with switchable tiling; the automatic policy will call the same switch_tiling().
+    if switch_test_s and switchable:
+        def _tiling_switch_test():
+            to_tiling = True
+            while True:
+                time.sleep(switch_test_s)
+                app.switch_tiling(to_tiling)
+                to_tiling = not to_tiling
+        threading.Thread(target=_tiling_switch_test, name="tiling-switch-test", daemon=True).start()
+        logger.info("!!! tiling-switch-test: toggling whole<->tiling every %.1fs", switch_test_s)
+
+    # --plus-one benchmark: once the pipeline is warm, open both branches so the
+    # device runs NxM + 1 inferences/frame; the measured path stays the tile branch.
+    if plus_one and switchable:
+        def _enable_plus_one():
+            time.sleep(6)
+            app.enable_plus_one()
+        threading.Thread(target=_enable_plus_one, name="plus-one-enable", daemon=True).start()
 
     logger.info("!!! Config: %s", config)
     if DEBUG:

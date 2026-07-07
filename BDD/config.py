@@ -140,6 +140,12 @@ class Config:
 
     follow_target_position_ned: bool = False
 
+    # Record the camera feed to ./_DEBUG/RAW_*.mkv (x264enc, software). Costs ~1
+    # CPU core; disable to free CPU for inference/tiling (the recorded video is a
+    # debug/analysis aid, not required for control). The --no-record CLI flag
+    # forces this off regardless of the config value.
+    record_videos: bool = True
+
     @dataclass(slots=True, kw_only=True, frozen=True)
     class Inference:
         hef_model_path:      ExistingFile
@@ -147,6 +153,32 @@ class Config:
         nms_iou_threshold:   Annotated[float, Range(0.0, 1.0)] = 0.45
         labels_json:         Optional[ExistingFile] = None
     inference: Inference
+
+    @dataclass(slots=True, kw_only=True, frozen=True)
+    class Tiling:
+        # Inference tile grid. 1×1 = whole-frame (default, lowest latency). >1
+        # enables hailotilecropper: tiles_x*tiles_y inferences/frame, raising
+        # small-object recall at the cost of latency (~N×15 ms on Hailo-8).
+        tiles_x: Annotated[int, Range(min=1)] = 1
+        tiles_y: Annotated[int, Range(min=1)] = 1
+        # Fractional tile overlap on both axes (0..1); 0 = abutting tiles.
+        overlap: Annotated[float, Range(0.0, 1.0)] = 0.0
+        # Runtime-switchable tiling: build BOTH a whole-frame branch and a
+        # tiles_x×tiles_y branch behind valves + an input-selector, and hot-switch
+        # between them at runtime (whole-frame active at startup). Lets a policy
+        # (e.g. tile-to-reacquire when the target is lost) trade latency for recall
+        # on demand. When false, tiling is static (whole-frame if 1×1, else fixed).
+        switchable: bool = False
+        # Automatic detection-state policy (implies switchable): switch to tiling
+        # after `lost_frames_to_tile` consecutive frames with no confident target
+        # (reacquire small/distant objects), and back to whole-frame after
+        # `locked_frames_to_whole` consecutive confident frames (restore low
+        # latency for control). A target counts as "confident" at >= switch_conf.
+        auto_switch: bool = False
+        lost_frames_to_tile:    Annotated[int, Range(min=1)] = 10
+        locked_frames_to_whole: Annotated[int, Range(min=1)] = 5
+        switch_conf: Annotated[float, Range(0.0, 1.0)] = 0.4
+    tiling: Tiling = field(default_factory=Tiling)
 
     @dataclass(slots=True, kw_only=True, frozen=True)
     class Thrust:

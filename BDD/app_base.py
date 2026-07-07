@@ -23,6 +23,7 @@ from hailo_apps.hailo_app_python.core.common.defines import DETECTION_APP_TITLE,
 # from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import DISPLAY_PIPELINE
 
 from pipelines import (
+    QUEUE,
     SOURCE_PIPELINE,
     INFERENCE_PIPELINE,
     INFERENCE_PIPELINE_WRAPPER,
@@ -184,6 +185,14 @@ class GStreamerApp:
         self.video_width = 1280
         self.video_height = 720
         self.video_format = HAILO_RGB_VIDEO_FORMAT
+        # Tile grid for the inference wrapper. 1×1 = whole-frame (default, lowest
+        # latency); >1 enables hailotilecropper (more small-object recall, more
+        # inference cost). Set from config/CLI by the App subclass.
+        self.tiles_x = 1
+        self.tiles_y = 1
+        # Fractional tile overlap (0..1) for the hailotilecropper; 0 = abutting tiles.
+        # Set from config.tiling.overlap by the App subclass; only the tiled path uses it.
+        self.tiling_overlap = 0.0
         self.hef_path = None
         self.app_callback = None
 
@@ -354,6 +363,85 @@ class GStreamerApp:
                 buf.add_reference_timestamp_meta(unix_ts_caps, time.monotonic_ns(), Gst.CLOCK_TIME_NONE)
             return Gst.PadProbeReturn.OK
         pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
+
+    def switch_tiling(self, to_tiling: bool, warmup_timeout_s: float = 1.0) -> bool:
+        """Hot-switch the active inference branch between whole-frame and tiling
+        (only valid when built with switchable_tiling). 4-step make-before-break
+        handover with zero command gap: open the incoming valve, wait for its first
+        output buffer, flip the input-selector's active-pad, then close the outgoing
+        valve. Same hef on both hailonets => no PCIe weight reload, only the steady
+        latency steps (whole ~100ms <-> tiled >200ms). Safe to call from any thread.
+
+        GRACEFUL DEGRADATION (never strand the pipeline): if the incoming branch
+        produces NO buffer within warmup_timeout_s, ABORT the switch — re-close the
+        incoming valve, leave the selector and the outgoing (currently-producing)
+        valve untouched, and keep running the branch that was already delivering
+        detections. A dead-branch switch would starve app_callback (DET FPS -> 0)
+        with no recovery, and on this rig a stalled control loop can wreck hardware.
+
+        Returns True if the active branch is the target after the call (including a
+        no-op when already there), False if the switch could not be performed."""
+        sel = self.pipeline.get_by_name("branch_selector")
+        v_whole = self.pipeline.get_by_name("valve_whole")
+        v_tile = self.pipeline.get_by_name("valve_tile")
+        if sel is None or v_whole is None or v_tile is None:
+            logger.warning("switch_tiling: switchable-tiling pipeline not present; ignoring")
+            return False
+        target_pad_name = "sink_1" if to_tiling else "sink_0"
+        cur = sel.get_property("active-pad")
+        if cur is not None and cur.get_name() == target_pad_name:
+            return True  # already there
+        incoming_valve = v_tile if to_tiling else v_whole
+        outgoing_valve = v_whole if to_tiling else v_tile
+        target_pad = sel.get_static_pad(target_pad_name)
+
+        incoming_valve.set_property("drop", False)        # 1. open incoming branch
+        ready = threading.Event()                         # 2. wait its first buffer
+        def _first_buf(pad, info, _u):
+            ready.set()
+            return Gst.PadProbeReturn.REMOVE
+        probe_id = target_pad.add_probe(Gst.PadProbeType.BUFFER, _first_buf, None)
+        if not ready.wait(warmup_timeout_s) and not ready.is_set():
+            # Incoming branch never produced -> REVERT: re-close the valve we opened,
+            # keep the selector + outgoing valve on the branch that IS producing.
+            logger.warning("switch_tiling: incoming %s branch gave no buffer in %.1fs; "
+                           "ABORTING switch, staying on %s",
+                           "TILING" if to_tiling else "WHOLE-FRAME", warmup_timeout_s,
+                           "WHOLE-FRAME" if to_tiling else "TILING")
+            incoming_valve.set_property("drop", True)      # undo step 1
+            try: target_pad.remove_probe(probe_id)
+            except Exception: pass
+            return False
+        sel.set_property("active-pad", target_pad)         # 3. flip selector (atomic)
+        outgoing_valve.set_property("drop", True)           # 4. idle the outgoing branch
+        self._tiling_active = to_tiling
+        logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
+        return True
+
+    def enable_plus_one(self):
+        """Benchmark aid (switchable pipeline only): open BOTH valves so the tile
+        branch AND the whole-frame branch feed the device every frame — i.e. the
+        "NxM + 1" load (NxM tiles + 1 whole frame = NxM+1 inferences/frame, two
+        net-groups round-robin). Keeps the input-selector on the tile branch so the
+        measured capture->detection path is the tiling path under whole-frame
+        contention (matches the bench 'NxM+1' latency)."""
+        sel = self.pipeline.get_by_name("branch_selector")
+        v_tile = self.pipeline.get_by_name("valve_tile")
+        if sel is None or v_tile is None:
+            logger.warning("enable_plus_one: switchable-tiling pipeline not present; ignoring")
+            return
+        v_tile.set_property("drop", False)   # tile branch now also feeds (whole stays open)
+        tile_pad = sel.get_static_pad("sink_1")
+        ready = threading.Event()
+        def _first(pad, info, _u):
+            ready.set()
+            return Gst.PadProbeReturn.REMOVE
+        pid = tile_pad.add_probe(Gst.PadProbeType.BUFFER, _first, None)
+        if not ready.wait(3.0):
+            try: tile_pad.remove_probe(pid)
+            except Exception: pass
+        sel.set_property("active-pad", tile_pad)
+        logger.warning("!!! PLUS-ONE active: whole-frame + tiles both feeding device (NxM+1)")
 
     def _log_pipeline_health(self):
         """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)
@@ -801,7 +889,14 @@ def picamera_thread(
             # pipeline depth (fewer frames in flight => lower worst-case capture
             # latency); each request is released immediately after copying. Configurable
             # via Config.Camera.buffer_count; see camera-stage-a-latency.md.
-            main = {'size': (capture_width, capture_height), 'format': 'RGB888'}
+            # NV12 capture (config video_format: NV12): picamera2 delivers the
+            # planar YUV buffer directly — half the bytes of RGB888 and NO per-frame
+            # cv2 BGR->RGB on the capture thread (see the conversion below). Any
+            # colour-space conversion the model needs is done downstream by the
+            # pipeline's videoconvert (off the capture thread). Otherwise capture
+            # RGB888 as before.
+            pic_format = 'NV12' if capture_video_format == 'NV12' else 'RGB888'
+            main = {'size': (capture_width, capture_height), 'format': pic_format}
             controls = {'FrameRate': capture_target_fps}
             logger.info("%s buffer_count=%d", log_prefix, buffer_count)
             config = picam2.create_preview_configuration(main=main, controls=controls, buffer_count=buffer_count)
@@ -994,7 +1089,14 @@ def picamera_thread(
                     frame_count += 1
                     processing_time_accum += time.monotonic() - proc_start_monotonic
                     continue
-                frame_data = request.make_array("main")
+                # NV12: picamera2's make_array cannot reshape planar YUV
+                # ("Format NV12 not supported"), so grab the raw packed buffer
+                # (1-D uint8, tightly packed at 1280-wide) and push it straight to
+                # the NV12 appsrc — no colour conversion. RGB888 keeps make_array.
+                if capture_video_format == 'NV12':
+                    frame_data = request.make_buffer("main")
+                else:
+                    frame_data = request.make_array("main")
                 frame_meta = request.get_metadata()
             finally:
                 request.release()
@@ -1024,9 +1126,16 @@ def picamera_thread(
                                     exposure_auto_pin_s, meas_exp, float(meas_gain or 0.0),
                                     pin_exp, pin_gain)
 
-            # Convert framontigue data if necessary
-            frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-            frame_bytes = frame.tobytes()
+            # Convert frame data if necessary. picamera2 'RGB888' actually delivers
+            # BGR byte order, so RGB needs a cv2 swap (~2.5 ms/frame on this thread).
+            # NV12 is pushed as-is: make_array("main") already returns the packed
+            # (H*3/2, W) NV12 planes that GStreamer expects for format=NV12 — no
+            # colour conversion here (the model/pipeline handles it downstream).
+            if capture_video_format == 'NV12':
+                frame_bytes = frame_data.tobytes()
+            else:
+                frame = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+                frame_bytes = frame.tobytes()
 
             # Drop one of the two buffer copies. The old new_wrapped(frame.tobytes())
             # copied the bytes a SECOND time into GstMemory; new_wrapped_full instead
@@ -1148,7 +1257,8 @@ def display_user_data_frame(user_data: app_callback_class):
     cv2.destroyAllWindows()
 
 class GStreamerDetectionApp(GStreamerApp):
-    def __init__(self, app_callback, user_data, inference : Config.Inference, camera_settings : Config.Camera, parser=None):
+    def __init__(self, app_callback, user_data, inference : Config.Inference, camera_settings : Config.Camera, parser=None,
+                 video_format=None, tiles=None, tiling_overlap=None, switchable_tiling=False):
         if parser == None:
             parser = get_default_parser()
 
@@ -1166,6 +1276,21 @@ class GStreamerDetectionApp(GStreamerApp):
         # present (the base __init__ defaults it to None as a backstop).
         self.camera_settings = camera_settings
         # Additional initialization code can be added here
+        # Pipeline pixel format (camera capture + appsrc caps). Defaults to RGB;
+        # config.camera.video_format (e.g. NV12) flows in here so SOURCE_PIPELINE's
+        # capsfilter matches what the picamera2 producer actually pushes.
+        if video_format is not None:
+            self.video_format = video_format
+        # Tile grid (tiles_x, tiles_y); 1×1 = whole-frame. From config.tiling / CLI.
+        if tiles is not None:
+            self.tiles_x, self.tiles_y = int(tiles[0]), int(tiles[1])
+        # Fractional tile overlap (0..1) for the hailotilecropper; only affects the
+        # tiled path (ignored for whole-frame). From config.tiling.overlap.
+        if tiling_overlap is not None:
+            self.tiling_overlap = float(tiling_overlap)
+        # Switchable tiling: build whole-frame + tile branches behind valves +
+        # input-selector, hot-switchable at runtime (whole-frame active at start).
+        self.switchable_tiling = bool(switchable_tiling)
         # Set Hailo parameters these parameters should be set based on the model used
         self.batch_size = 1
         # Model + NMS come from config.inference (config.yaml); CLI --hef-path /
@@ -1229,16 +1354,29 @@ class GStreamerDetectionApp(GStreamerApp):
                 video_height=self.video_height,
                 frame_rate=self.frame_rate,
                 sync=self.sync,
+                video_format=self.video_format,
                 # do_timestamp=True
         )
-        detection_pipeline = INFERENCE_PIPELINE(
-            hef_path=self.hef_path,
-            post_process_so=self.post_process_so,
-            post_function_name=self.post_function_name,
-            batch_size=self.batch_size,
-            config_json=self.labels_json,
-            additional_params=self.thresholds_str)
-        detection_pipeline_wrapper = INFERENCE_PIPELINE_WRAPPER(detection_pipeline)
+        def _inference_branch(branch_name, tx, ty, share_device):
+            # One cropper+hailonet+aggregator branch. share_device adds
+            # scheduling-algorithm=1 (round-robin) so two same-hef hailonets can
+            # share one vdevice (switchable mode); same hef => no weight reload on switch.
+            inner = INFERENCE_PIPELINE(
+                hef_path=self.hef_path,
+                post_process_so=self.post_process_so,
+                post_function_name=self.post_function_name,
+                batch_size=self.batch_size,
+                config_json=self.labels_json,
+                name=branch_name,
+                additional_params=self.thresholds_str + (' scheduling-algorithm=1 ' if share_device else ''))
+            return INFERENCE_PIPELINE_WRAPPER(inner, name=f'{branch_name}_wrapper',
+                                              tiles_x=tx, tiles_y=ty,
+                                              tiling_overlap=self.tiling_overlap)
+
+        # Single-branch path keeps the historic 'inference'/'inference_wrapper'
+        # element names (latency probes + health logs reference them).
+        detection_pipeline_wrapper = _inference_branch('inference', self.tiles_x, self.tiles_y,
+                                                       share_device=False)
 
         tracker_pipeline = ''
         if False:
@@ -1289,9 +1427,29 @@ class GStreamerDetectionApp(GStreamerApp):
             'max-size-buffers=120 max-size-bytes=0 max-size-time=0'
         )
 
+        if self.switchable_tiling:
+            # Two valve-gated branches share the source via a tee and merge at an
+            # input-selector. Whole-frame active at startup (valve_tile closed,
+            # selector defaults to the first-linked pad = sink_0 = whole). A runtime
+            # switch (switch_tiling) opens the other valve, waits for its first
+            # buffer, flips the selector, then closes the old valve — zero command
+            # gap. Same hef on both hailonets (shared vdevice) => no PCIe reload.
+            whole_branch = _inference_branch('whole', 1, 1, share_device=True)
+            tile_branch = _inference_branch('tile', self.tiles_x, self.tiles_y, share_device=True)
+            detection_section = (
+                f'tee name=branch_src_tee '
+                f'branch_src_tee. ! {QUEUE(name="whole_gate_q")} ! valve name=valve_whole drop=false ! '
+                f'{whole_branch} ! branch_selector.sink_0 '
+                f'branch_src_tee. ! {QUEUE(name="tile_gate_q")} ! valve name=valve_tile drop=true ! '
+                f'{tile_branch} ! branch_selector.sink_1 '
+                f'input-selector name=branch_selector sync-streams=false ! '
+            )
+        else:
+            detection_section = f'{detection_pipeline_wrapper} ! '
+
         pipeline_string = (
             f'{source_pipeline} ! '
-            f'{detection_pipeline_wrapper} ! '
+            f'{detection_section}'
             f'{tracker_pipeline} '
             f'tee name=output_tee '
             f'output_tee. ! {user_callback_pipeline} ! fakesink name=detection_sink sync=false async=false '

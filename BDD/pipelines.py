@@ -254,42 +254,81 @@ def INFERENCE_PIPELINE(
     return inference_pipeline
 
 
-def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='inference_wrapper'):
+def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='inference_wrapper',
+                               tiles_x=1, tiles_y=1, tiling_overlap=0.0):
     """
-    Creates a GStreamer pipeline string that wraps an inner pipeline with a hailocropper and hailoaggregator.
+    Creates a GStreamer pipeline string that wraps an inner pipeline with a cropper and aggregator.
     This allows to keep the original video resolution and color-space (format) of the input frame.
     The inner pipeline should be able to do the required conversions and rescale the detection to the original frame size.
+
+    Whole-frame (tiles_x == tiles_y == 1): whole-buffer ``hailocropper`` / ``hailoaggregator`` —
+    one inference per frame (the proven low-latency default).
+    Tiled (tiles_x * tiles_y > 1): ``hailotilecropper`` / ``hailotileaggregator`` splits each frame
+    into an ``tiles_x`` × ``tiles_y`` grid, runs ONE inference per tile (so N tiles = N serialized
+    inferences/frame), and the aggregator stitches the per-tile detections back into full-frame
+    coordinates. Tiling raises small-object recall at distance but multiplies inference cost — at the
+    Hailo-8 ~68 inf/s ceiling, per-frame latency ≈ N × ~15 ms, so it trades reaction time for range.
 
     Args:
         inner_pipeline (str): The inner pipeline string to be wrapped.
         bypass_max_size_buffers (int, optional): The maximum number of buffers for the bypass queue. Defaults to 1.
-            This queue MUST be non-leaky: hailoaggregator pairs sink_0 (bypass) with sink_1 (inference)
+            This queue MUST be non-leaky: the aggregator pairs sink_0 (bypass) with sink_1 (inference)
             by buffer; if a leaky queue drops the bypass buffer the aggregator is waiting for, the two
             streams desync and the aggregator stops emitting forever. With leaky=no, hitting the cap
             backpressures the cropper, which backpressures the input queue (which is leaky=downstream
             and sheds the oldest camera frame instead). Worst-case added latency is
             (bypass_max_size_buffers - 1) * frame_interval — keep this number small for low latency.
-            Trimmed 2→1: the second buffer was a holdover that added ~one
-            frame-interval (~33 ms at 30 fps) of latency on the bypass branch
-            without a corresponding throughput benefit; the inference branch
-            is per-frame paced anyway so a depth-1 bypass keeps the aggregator
-            in lockstep without extra buffering.
         name (str, optional): The prefix name for the pipeline elements. Defaults to 'inference_wrapper'.
+        tiles_x, tiles_y (int): tile grid. 1×1 = whole-frame (default). >1 enables hailotilecropper.
+        tiling_overlap (float): fractional tile overlap (0..1) on both axes; 0 = abutting tiles.
 
     Returns:
         str: A string representing the GStreamer pipeline for the inference wrapper.
     """
-    # Get the directory for post-processing shared objects
-    tappas_post_process_dir = os.environ.get(TAPPAS_POSTPROC_PATH_KEY, TAPPAS_POSTPROC_PATH_DEFAULT)
-    whole_buffer_crop_so = os.path.join(tappas_post_process_dir, 'cropping_algorithms/libwhole_buffer.so')
+    tiled = tiles_x > 1 or tiles_y > 1
+    if not tiled:
+        # Get the directory for post-processing shared objects
+        tappas_post_process_dir = os.environ.get(TAPPAS_POSTPROC_PATH_KEY, TAPPAS_POSTPROC_PATH_DEFAULT)
+        whole_buffer_crop_so = os.path.join(tappas_post_process_dir, 'cropping_algorithms/libwhole_buffer.so')
+        cropper = (
+            f'hailocropper name={name}_crop so-path={whole_buffer_crop_so} function-name=create_crops '
+            f'use-letterbox=true resize-method=inter-area internal-offset=true '
+        )
+        aggregator = f'hailoaggregator name={name}_agg '
+        # Whole-frame: one inference/frame, so the inference branch links STRAIGHT to
+        # the aggregator with no intermediate queue — the proven lowest-latency
+        # topology (an extra queue is a thread hand-off this hot path doesn't need).
+        tile_q = ''
+    else:
+        # hailotilecropper has built-in grid tiling (no so-path); single-scale =
+        # exactly tiles_x×tiles_y crops (multi-scale would emit a full pyramid).
+        overlap = (f'overlap-x-axis={tiling_overlap} overlap-y-axis={tiling_overlap} '
+                   if tiling_overlap else '')
+        cropper = (
+            f'hailotilecropper name={name}_crop tiling-mode=single-scale '
+            f'tiles-along-x-axis={tiles_x} tiles-along-y-axis={tiles_y} {overlap}'
+            f'internal-offset=true '
+        )
+        # flatten-detections=true is REQUIRED: without it the per-tile detections
+        # stay nested in tile sub-ROIs and `roi.get_objects_typed(HAILO_DETECTION)`
+        # in the callback finds NOTHING (silent n=0). flatten lifts them into the
+        # frame ROI (in global coords). iou-threshold dedups across tile seams.
+        aggregator = f'hailotileaggregator name={name}_agg flatten-detections=true iou-threshold=0.4 '
+        # N tiles flow per frame; hold a frame's worth in a queue so the cropper isn't
+        # blocked tile-by-tile waiting on the single shared hailonet. (Only the tiled
+        # path gets this queue; whole-frame links straight through — see above.)
+        tile_q_depth = tiles_x * tiles_y + 1
+        tile_q = f'{QUEUE(max_size_buffers=tile_q_depth, leaky="no", name=f"{name}_tile_q")} ! '
 
-    # Construct the inference wrapper pipeline string
+    # Construct the inference wrapper pipeline string. Two-pad fork:
+    #   crop.src_0 = bypass (original full frame) -> agg.sink_0
+    #   crop.src_1 = crops/tiles -> inner inference -> agg.sink_1
     inference_wrapper_pipeline = (
         f'{QUEUE(name=f"{name}_input_q")} ! '
-        f'hailocropper name={name}_crop so-path={whole_buffer_crop_so} function-name=create_crops use-letterbox=true resize-method=inter-area internal-offset=true '
-        f'hailoaggregator name={name}_agg '
+        f'{cropper}'
+        f'{aggregator}'
         f'{name}_crop. ! {QUEUE(max_size_buffers=bypass_max_size_buffers, leaky="no", name=f"{name}_bypass_q")} ! {name}_agg.sink_0 '
-        f'{name}_crop. ! {inner_pipeline} ! {name}_agg.sink_1 '
+        f'{name}_crop. ! {tile_q}{inner_pipeline} ! {name}_agg.sink_1 '
         f'{name}_agg. ! {QUEUE(name=f"{name}_output_q")} '
     )
 
