@@ -504,6 +504,21 @@ def _pop_value(argv: list[str], flag: str) -> str | None:
     return value
 
 
+def _peek_value(argv: list[str], flag: str) -> str | None:
+    """Read the value of ``<flag> <value>`` or ``<flag>=<value>`` from ``argv``
+    WITHOUT removing it (unlike ``_pop_value``): argparse still consumes ``--hef-path``
+    downstream, so this only needs to peek early to derive the capture format. Returns
+    None if the flag is absent; exits with a clear message if it has no value."""
+    for i, tok in enumerate(argv):
+        if tok == flag:
+            if i + 1 >= len(argv):
+                raise SystemExit(f"{flag} requires a value (e.g. {flag} /path/to/model.hef)")
+            return argv[i + 1]
+        if tok.startswith(flag + "="):
+            return tok[len(flag) + 1:]
+    return None
+
+
 def _parse_grid(spec: str) -> tuple[int, int]:
     """Parse an ``NxM`` tile-grid spec (case-insensitive, e.g. ``2x2``) into
     ``(nx, ny)``. Exits with a clear message (not an opaque ValueError/IndexError)
@@ -668,9 +683,10 @@ def main():
     # Capture format follows the MODEL input: NV12-input hef -> capture NV12,
     # RGB-input hef -> capture RGB. The hailocropper requires capture format ==
     # hailonet input format, so deriving it from the model is the only correct
-    # choice (a mismatch crashes the cropper). CLI --hef-path wins over config.
-    effective_hef = sys.argv[sys.argv.index('--hef-path') + 1] if '--hef-path' in sys.argv \
-        else str(config.inference.hef_model_path)
+    # choice (a mismatch crashes the cropper). CLI --hef-path wins over config;
+    # accept both `--hef-path X` and `--hef-path=X` (argparse consumes it later too).
+    cli_hef = _peek_value(sys.argv, '--hef-path')
+    effective_hef = cli_hef if cli_hef is not None else str(config.inference.hef_model_path)
     video_format = detect_hef_video_format(effective_hef)
     if video_format != config.camera.video_format:
         logger.warning("!!! capture video_format: %s (from model input) overrides "
