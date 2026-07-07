@@ -17,7 +17,7 @@ Tasks that are already done are marked as `+`.
 - !! UI for launches
 - !! figure out video capture without cropping (i.e. capture full frame)
 - ! right now probes are commented out, add CLI argument that enables them (default OFF)
-- ! rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — PR#9 review findings #3 (warmup-timeout can strand the pipeline on a dead branch) and #4 (--switch-test-s desyncs the policy + races the unlocked switch_tiling).
+- ! rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — PR#9 review #3 handover-abort DONE (switch_tiling now reverts to the working branch on a dead-branch timeout); still open: #4 (--switch-test-s desyncs the policy + races the unlocked switch_tiling) and the optional post-switch watchdog.
 - rotate camera 90 degrees (to maximize lead without leading visual)
 - consolidate the near-duplicate bench configs config.test-single-imx477.yaml / config.test-single-imx477-nv12.yaml (PR#9 review #8, low priority): they differ only by `video_format`, which main() now overrides from the model input via detect_hef_video_format(), so the two are functionally identical when pointed at the same HEF. Parametrize or drop one; also propagate new keys like `record_videos` into the remaining test config(s).
 
@@ -50,23 +50,16 @@ The runtime whole<->tile switching landed (branch `nv12_tiling`), but two rough
 edges to fix when we revisit the switch CONDITIONS (we'll rework them anyway, so
 deferred, not patched inline):
 
-- **#3 — warmup-timeout can strand the pipeline (app_base.py `switch_tiling`).**
-  Handover is: open incoming valve -> wait its first buffer (`warmup_timeout_s`,
-  default 1.0s) -> flip input-selector -> close outgoing valve. On TIMEOUT it logs
-  "switching anyway", flips the selector to the incoming branch that produced NO
-  buffer, and closes the working branch's valve. If the incoming (tile) branch is
-  merely slow under device contention, the healthy branch is idled while the
-  selector points at a stalled one -> app_callback stops firing, DET FPS -> 0,
-  control loop starves with no self-recovery. Options to weigh:
-    (a) On timeout, ABORT the switch: leave the selector + valves as they were
-        (stay on the working branch), log, and let the policy retry later. Safest.
-    (b) Keep BOTH valves open until the incoming branch has actually delivered a
-        buffer through the selector, then close the outgoing one (never idle a
-        branch we haven't confirmed live).
-    (c) Raise/adapt the warmup timeout and add a watchdog that flips back to
-        whole-frame if N callbacks are missed post-switch.
-  Leaning (a)+(c): abort-on-timeout is a one-line safety win; the watchdog covers
-  the case where a switch succeeds but the branch dies afterwards.
+- **#3 — warmup-timeout stranding the pipeline: FIXED via abort-and-revert.**
+  `switch_tiling` used to log "switching anyway" on timeout and flip the selector
+  onto the incoming branch that produced NO buffer while idling the working one ->
+  app_callback stops firing, DET FPS -> 0, control loop starves (which on this rig
+  can wreck hardware). Now (option a): on timeout it re-closes the incoming valve,
+  leaves the selector + outgoing valve on the branch that IS producing, returns
+  False; `_fire_switch` skips committed() and the policy backs off / retries. Still
+  OPTIONAL (option c, not done): a post-switch watchdog that flips back to
+  whole-frame if N callbacks are missed AFTER a switch that initially succeeded but
+  then the branch dies.
 
 - **#4 — manual `--switch-test-s` desyncs the policy and races switch_tiling.**
   The test thread calls `app.switch_tiling()` directly and never updates

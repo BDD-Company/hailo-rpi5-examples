@@ -100,14 +100,20 @@ class user_app_callback_class(app_callback_class):
                 return
             self._switch_pending = True
         def _run():
-            committed = False
+            switched = False
             try:
-                self.request_switch(to_tiling)
-                self._policy.committed(to_tiling)   # adopt new branch + reset streaks
-                committed = True
+                # request_switch (app.switch_tiling) returns True only if the incoming
+                # branch actually produced buffers and the selector flipped; on a
+                # graceful abort (dead incoming branch) it returns False and keeps the
+                # branch that was still delivering detections.
+                switched = bool(self.request_switch(to_tiling))
+                if switched:
+                    self._policy.committed(to_tiling)   # adopt new branch + reset streaks
             finally:
-                if not committed:
-                    self._policy.reset_streaks()    # switch failed: drop the streak, keep branch
+                if not switched:
+                    # aborted/failed: keep the current branch, drop the streak so the
+                    # policy backs off and retries after a fresh run rather than thrashing.
+                    self._policy.reset_streaks()
                 self._switch_pending = False
         threading.Thread(target=_run, name="tiling-policy-switch", daemon=True).start()
 

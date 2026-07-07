@@ -354,23 +354,33 @@ class GStreamerApp:
             return Gst.PadProbeReturn.OK
         pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
 
-    def switch_tiling(self, to_tiling: bool, warmup_timeout_s: float = 1.0):
+    def switch_tiling(self, to_tiling: bool, warmup_timeout_s: float = 1.0) -> bool:
         """Hot-switch the active inference branch between whole-frame and tiling
-        (only valid when built with switchable_tiling). 4-step handover with zero
-        command gap: open the incoming valve, wait for its first output buffer,
-        flip the input-selector's active-pad, then close the outgoing valve. Same
-        hef on both hailonets => no PCIe weight reload, only the steady latency
-        steps (whole ~100ms <-> tiled >200ms). Safe to call from any thread."""
+        (only valid when built with switchable_tiling). 4-step make-before-break
+        handover with zero command gap: open the incoming valve, wait for its first
+        output buffer, flip the input-selector's active-pad, then close the outgoing
+        valve. Same hef on both hailonets => no PCIe weight reload, only the steady
+        latency steps (whole ~100ms <-> tiled >200ms). Safe to call from any thread.
+
+        GRACEFUL DEGRADATION (never strand the pipeline): if the incoming branch
+        produces NO buffer within warmup_timeout_s, ABORT the switch — re-close the
+        incoming valve, leave the selector and the outgoing (currently-producing)
+        valve untouched, and keep running the branch that was already delivering
+        detections. A dead-branch switch would starve app_callback (DET FPS -> 0)
+        with no recovery, and on this rig a stalled control loop can wreck hardware.
+
+        Returns True if the active branch is the target after the call (including a
+        no-op when already there), False if the switch could not be performed."""
         sel = self.pipeline.get_by_name("branch_selector")
         v_whole = self.pipeline.get_by_name("valve_whole")
         v_tile = self.pipeline.get_by_name("valve_tile")
         if sel is None or v_whole is None or v_tile is None:
             logger.warning("switch_tiling: switchable-tiling pipeline not present; ignoring")
-            return
+            return False
         target_pad_name = "sink_1" if to_tiling else "sink_0"
         cur = sel.get_property("active-pad")
         if cur is not None and cur.get_name() == target_pad_name:
-            return  # already there
+            return True  # already there
         incoming_valve = v_tile if to_tiling else v_whole
         outgoing_valve = v_whole if to_tiling else v_tile
         target_pad = sel.get_static_pad(target_pad_name)
@@ -381,15 +391,22 @@ class GStreamerApp:
             ready.set()
             return Gst.PadProbeReturn.REMOVE
         probe_id = target_pad.add_probe(Gst.PadProbeType.BUFFER, _first_buf, None)
-        if not ready.wait(warmup_timeout_s):
-            logger.warning("switch_tiling: incoming branch gave no buffer in %.1fs; switching anyway",
-                           warmup_timeout_s)
+        if not ready.wait(warmup_timeout_s) and not ready.is_set():
+            # Incoming branch never produced -> REVERT: re-close the valve we opened,
+            # keep the selector + outgoing valve on the branch that IS producing.
+            logger.warning("switch_tiling: incoming %s branch gave no buffer in %.1fs; "
+                           "ABORTING switch, staying on %s",
+                           "TILING" if to_tiling else "WHOLE-FRAME", warmup_timeout_s,
+                           "WHOLE-FRAME" if to_tiling else "TILING")
+            incoming_valve.set_property("drop", True)      # undo step 1
             try: target_pad.remove_probe(probe_id)
             except Exception: pass
+            return False
         sel.set_property("active-pad", target_pad)         # 3. flip selector (atomic)
         outgoing_valve.set_property("drop", True)           # 4. idle the outgoing branch
         self._tiling_active = to_tiling
         logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
+        return True
 
     def enable_plus_one(self):
         """Benchmark aid (switchable pipeline only): open BOTH valves so the tile
