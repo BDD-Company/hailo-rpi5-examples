@@ -1220,7 +1220,7 @@ def display_user_data_frame(user_data: app_callback_class):
 
 class GStreamerDetectionApp(GStreamerApp):
     def __init__(self, app_callback, user_data, parser=None, inference=None, video_format=None,
-                 tiles=None, tiling_overlap=None, switchable_tiling=False, merge_tiles=False):
+                 tiles=None, tiling_overlap=None, switchable_tiling=False):
         if parser == None:
             parser = get_default_parser()
 
@@ -1242,15 +1242,12 @@ class GStreamerDetectionApp(GStreamerApp):
         if tiles is not None:
             self.tiles_x, self.tiles_y = int(tiles[0]), int(tiles[1])
         # Fractional tile overlap (0..1) for the hailotilecropper; only affects the
-        # tiled path (ignored for whole-frame and the merged .so). From config.tiling.overlap.
+        # tiled path (ignored for whole-frame). From config.tiling.overlap.
         if tiling_overlap is not None:
             self.tiling_overlap = float(tiling_overlap)
         # Switchable tiling: build whole-frame + tile branches behind valves +
         # input-selector, hot-switchable at runtime (whole-frame active at start).
         self.switchable_tiling = bool(switchable_tiling)
-        # Merged NxM+1 via custom crop .so (single net-group). Mutually exclusive
-        # with switchable_tiling (which is the two-branch round-robin approach).
-        self.merge_tiles = bool(merge_tiles)
         # Set Hailo parameters these parameters should be set based on the model used
         self.batch_size = 1
         # Model + NMS come from config.inference (config.yaml); CLI --hef-path /
@@ -1317,17 +1314,7 @@ class GStreamerDetectionApp(GStreamerApp):
                 video_format=self.video_format,
                 # do_timestamp=True
         )
-        # Merged "NxM + 1" uses a custom crop .so (built by BDD/cropper/build.sh)
-        # emitting the grid + a whole frame through ONE net-group. TILES_X/TILES_Y
-        # (read by the .so) are set from the tile grid.
-        merge_crop_so = None
-        if getattr(self, 'merge_tiles', False):
-            merge_crop_so = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                         'cropper', 'libtiles_and_whole.so')
-            os.environ['TILES_X'] = str(self.tiles_x)
-            os.environ['TILES_Y'] = str(self.tiles_y)
-
-        def _inference_branch(branch_name, tx, ty, share_device, crop_so=None):
+        def _inference_branch(branch_name, tx, ty, share_device):
             # One cropper+hailonet+aggregator branch. share_device adds
             # scheduling-algorithm=1 (round-robin) so two same-hef hailonets can
             # share one vdevice (switchable mode); same hef => no weight reload on switch.
@@ -1341,13 +1328,12 @@ class GStreamerDetectionApp(GStreamerApp):
                 additional_params=self.thresholds_str + (' scheduling-algorithm=1 ' if share_device else ''))
             return INFERENCE_PIPELINE_WRAPPER(inner, name=f'{branch_name}_wrapper',
                                               tiles_x=tx, tiles_y=ty,
-                                              tiling_overlap=self.tiling_overlap,
-                                              crop_so_path=crop_so)
+                                              tiling_overlap=self.tiling_overlap)
 
         # Single-branch path keeps the historic 'inference'/'inference_wrapper'
         # element names (latency probes + health logs reference them).
         detection_pipeline_wrapper = _inference_branch('inference', self.tiles_x, self.tiles_y,
-                                                       share_device=False, crop_so=merge_crop_so)
+                                                       share_device=False)
 
         tracker_pipeline = ''
         if False:
