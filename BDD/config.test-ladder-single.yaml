@@ -133,9 +133,10 @@ bytetrack:
   nms_thresh: 0.3
   nms_dist_thresh: 0.06
 
+# --- size-driven tiling ladder (manual-cycle validation) ---
 tiling:
-  auto_switch: true
   overlap: 0.10
+  auto_switch: false
   lost_to_2x1_s: 1.0
   lost_to_3x2_s: 10.0
   ladder:

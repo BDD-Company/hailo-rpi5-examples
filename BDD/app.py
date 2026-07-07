@@ -17,7 +17,7 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_p
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser
 from app_base import GStreamerDetectionApp
-from tiling_policy import TilingSwitchPolicy
+from tiling_policy import TilingLadderPolicy, build_ladder
 from drone_controller import drone_controlling_thread
 from platform_controller import platform_controlling_thread
 
@@ -60,60 +60,54 @@ class user_app_callback_class(app_callback_class):
         self.detections_queue = detections_queue
         self.tracker = tracker
 
-        # Detection-state tiling policy. The whole<->tile decision lives in the pure,
-        # unit-tested TilingSwitchPolicy; this class only fires the (blocking) switch
-        # on a worker thread. Enabled by main() via configure_switch_policy().
-        self.request_switch = None            # callable(bool) -> app.switch_tiling
+        # Size-driven tiling ladder policy. The tier decision lives in the pure,
+        # unit-tested TilingLadderPolicy; this class only fires the (blocking) switch
+        # on a worker thread. Enabled by main() via configure_tiling_policy().
+        self.request_switch = None            # callable(tier_i:int) -> app.switch_to_tier
         self.auto_switch = False
-        self._policy = TilingSwitchPolicy()   # thresholds replaced by configure_switch_policy()
+        self._policy = None                   # set by configure_tiling_policy
         self._switch_pending = False
         self._switch_lock = threading.Lock()
 
-    def configure_switch_policy(self, request_switch, switch_conf,
-                                lost_frames_to_tile, locked_frames_to_whole):
-        """Enable the auto-switch tiling policy. `request_switch(to_tiling: bool)`
-        performs the actual (blocking) branch handover; the thresholds tune when the
-        policy asks for a switch."""
+    def configure_tiling_policy(self, request_switch, tiers, lost_to_2x1_s, lost_to_3x2_s):
+        """Enable the size+loss ladder policy. `request_switch(tier_i)` performs the
+        actual (blocking) branch handover. `tiers` is the ordered LadderTier list
+        (index 0 = most tiles, last = whole); the pipeline starts on the whole tier."""
         self.request_switch = request_switch
         self.auto_switch = True
-        self._policy = TilingSwitchPolicy(
-            switch_conf=switch_conf,
-            lost_frames_to_tile=lost_frames_to_tile,
-            locked_frames_to_whole=locked_frames_to_whole,
+        self._policy = TilingLadderPolicy(
+            tiers, lost_to_2x1_s=lost_to_2x1_s, lost_to_3x2_s=lost_to_3x2_s,
+            current_i=len(tiers) - 1,          # whole-frame active at startup
         )
 
-    def note_detection(self, best_conf: float):
-        """Per-frame detection-state hot-switch policy. `best_conf` is the highest
-        target confidence this frame (0 if none). Delegates the whole<->tile decision
-        to TilingSwitchPolicy and fires the (blocking) switch on a worker thread so
-        the GStreamer streaming thread is never stalled. No-op unless auto_switch is
+    def note_tiling(self, side, now_s: float):
+        """Per-frame tier policy. `side` = max(bbox_w, bbox_h) of the primary tracked
+        target (0..1), or None if no target. Delegates the tier decision to
+        TilingLadderPolicy and fires the (blocking) switch on a worker thread so the
+        GStreamer streaming thread is never stalled. No-op unless auto_switch is
         configured."""
-        if not self.auto_switch or self.request_switch is None:
+        if not self.auto_switch or self._policy is None or self.request_switch is None:
             return
-        target = self._policy.note(best_conf)
+        target = self._policy.note(side, now_s)
         if target is not None:
             self._fire_switch(target)
 
-    def _fire_switch(self, to_tiling: bool):
+    def _fire_switch(self, target_i: int):
         with self._switch_lock:
-            if self._switch_pending or to_tiling == self._policy.tiling_on:
+            if self._switch_pending or target_i == self._policy.current_i:
                 return
             self._switch_pending = True
         def _run():
             switched = False
             try:
-                # request_switch (app.switch_tiling) returns True only if the incoming
+                # request_switch (app.switch_to_tier) returns True only if the incoming
                 # branch actually produced buffers and the selector flipped; on a
                 # graceful abort (dead incoming branch) it returns False and keeps the
-                # branch that was still delivering detections.
-                switched = bool(self.request_switch(to_tiling))
+                # tier that was still delivering detections.
+                switched = bool(self.request_switch(target_i))
                 if switched:
-                    self._policy.committed(to_tiling)   # adopt new branch + reset streaks
+                    self._policy.committed(target_i)    # adopt the new tier
             finally:
-                if not switched:
-                    # aborted/failed: keep the current branch, drop the streak so the
-                    # policy backs off and retries after a fresh run rather than thrashing.
-                    self._policy.reset_streaks()
                 self._switch_pending = False
         threading.Thread(target=_run, name="tiling-policy-switch", daemon=True).start()
 
@@ -252,7 +246,7 @@ def _match_track_to_detection(
         inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
         area_a = (x2 - x1) * (y2 - y1)
         area_b = b.width * b.height
-        union = area_a + area_b - inter
+        union = area_a + area_b - intervnc
         iou = inter / union if union > 0 else 0.0
         if iou > best_iou:
             best_iou = iou
@@ -343,8 +337,6 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         dets_array = np.empty((0, 5))
 
     _best_conf = max((c for _, c in raw_dets), default=0.0)
-    # Detection-state whole<->tile policy (no-op unless tiling.auto_switch is on).
-    user_data.note_detection(_best_conf)
 
     # Throttled detection summary — confirms the model is producing valid
     # detections from the current pixel format (e.g. NV12 fed correctly).
@@ -391,6 +383,17 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             [i for i in range(len(raw_dets)) if i not in track_id_map],
         )
 
+    # Size-driven tiling ladder: side = max(w,h) of the primary tracked target (the
+    # matched track with the largest max(w,h)), or None if no track matched. Fed after
+    # tracking so it uses stable track identity, not raw detections. No-op unless the
+    # auto-switch ladder policy is configured (main()).
+    primary_side = None
+    if USE_TRACKER and track_id_map:
+        matched_sides = [max(raw_dets[i][0].width, raw_dets[i][0].height)
+                         for i in track_id_map]      # track_id_map keys are det indices
+        primary_side = max(matched_sides) if matched_sides else None
+    user_data.note_tiling(primary_side, time.monotonic())
+
     # Construct immutable Detection objects with track_id set at creation time
     detections_list = [
         Detection(
@@ -419,14 +422,14 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, tiles=None, tiling_overlap=None, switchable_tiling=False):
+    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, ladder_grids=None, tiling_overlap=None, switchable_tiling=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
         self.camera_switcher = camera_switcher
         super().__init__(app_callback, user_data, inference=config.inference, camera_settings=config.camera, parser=parser,
-                         video_format=video_format, tiles=tiles, tiling_overlap=tiling_overlap, switchable_tiling=switchable_tiling)
+                         video_format=video_format, ladder_grids=ladder_grids, tiling_overlap=tiling_overlap, switchable_tiling=switchable_tiling)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -530,22 +533,6 @@ def _peek_value(argv: list[str], flag: str) -> str | None:
     return None
 
 
-def _parse_grid(spec: str) -> tuple[int, int]:
-    """Parse an ``NxM`` tile-grid spec (case-insensitive, e.g. ``2x2``) into
-    ``(nx, ny)``. Exits with a clear message (not an opaque ValueError/IndexError)
-    on anything that isn't two positive integers."""
-    nx_s, sep, ny_s = spec.lower().partition("x")
-    if not sep or not nx_s or not ny_s:
-        raise SystemExit(f"tile grid must look like NxM (e.g. 2x2), got {spec!r}")
-    try:
-        nx, ny = int(nx_s), int(ny_s)
-    except ValueError:
-        raise SystemExit(f"tile grid must be two integers NxM, got {spec!r}")
-    if nx < 1 or ny < 1:
-        raise SystemExit(f"tile grid values must be >= 1, got {nx}x{ny}")
-    return nx, ny
-
-
 def main():
     project_root = Path(__file__).resolve().parent.parent
     env_file     = project_root / ".env"
@@ -578,31 +565,16 @@ def main():
         del sys.argv[i:i + 2]
 
     # These flags are parsed off sys.argv directly (before the argparser) because
-    # they gate App() construction below. NxM grids go through _parse_grid, which
-    # validates them; a missing value or malformed grid exits with a clear message.
+    # they gate App() construction below.
 
     # --no-record: force RAW recording off regardless of config (frees ~1 CPU core
     # for inference/tiling).
     no_record_flag = _pop_flag(sys.argv, "--no-record")
 
-    # --tiles NxM: static inference tile grid (e.g. --tiles 2x2; 1x1 = whole-frame).
-    # None => use config.tiling.
-    tiles_spec = _pop_value(sys.argv, "--tiles")
-    tiles_override = _parse_grid(tiles_spec) if tiles_spec else None
-
-    # --switch-tiles NxM: runtime-switchable tiling with an NxM tile branch (whole-
-    # frame active at startup, hot-switchable). Forces switchable on.
-    switch_tiles_spec = _pop_value(sys.argv, "--switch-tiles")
-    switch_tiles_override = _parse_grid(switch_tiles_spec) if switch_tiles_spec else None
-
-    # --switch-test-s N: manual handover validation — toggle whole-frame<->tiling
-    # every N seconds (only meaningful with switchable tiling enabled).
+    # --switch-test-s N: manual handover validation — cycle tiers 0..N-1 every N
+    # seconds (only meaningful with a switchable ladder, i.e. >= 2 rungs).
     switch_test_s_spec = _pop_value(sys.argv, "--switch-test-s")
     switch_test_s = float(switch_test_s_spec) if switch_test_s_spec else None
-
-    # --plus-one: benchmark the "NxM + 1" load — open both branches so the tile grid
-    # AND a whole frame are inferred each frame (needs switchable tiling).
-    plus_one = _pop_flag(sys.argv, "--plus-one")
 
     if DEBUG:
         logger.error('')
@@ -656,29 +628,19 @@ def main():
     record_videos = config.record_videos and not no_record_flag
     logger.info("!!! RAW video recording: %s", "ENABLED" if record_videos else "DISABLED")
 
-    # Switchable tiling: CLI --switch-tiles wins, else config.tiling.switchable.
-    # When on, the tile-branch geometry is the --switch-tiles value (or config
-    # tiles_x/y), and the pipeline builds whole-frame + tile branches hot-switchable
-    # at runtime (whole-frame active at startup).
-    switchable = switch_tiles_override is not None or config.tiling.switchable or config.tiling.auto_switch or plus_one
+    # Tiling is LADDER-ONLY: build the ordered ladder from config.tiling.ladder.
+    # Empty ladder => whole-frame (not switchable). >= 2 rungs => build the N-branch
+    # hot-switch pipeline (whole-frame = last rung, active at startup).
+    ladder_tiers = build_ladder(config.tiling)
+    ladder_grids = [(t.tiles_x, t.tiles_y) for t in ladder_tiers]
+    switchable = len(ladder_grids) >= 2
     if switchable:
-        tiles = switch_tiles_override if switch_tiles_override is not None \
-            else (config.tiling.tiles_x, config.tiling.tiles_y)
-        if tiles == (1, 1):
-            tiles = (2, 1)  # a 1x1 "tile branch" == whole-frame; default to 2x1
-        logger.info("!!! SWITCHABLE tiling: whole-frame <-> %dx%d (whole active at startup)",
-                    tiles[0], tiles[1])
+        logger.info("!!! SWITCHABLE tiling ladder: %s (whole active at startup)", ladder_grids)
     else:
-        # Static tile grid: CLI --tiles wins, else config.tiling.
-        tiles = tiles_override if tiles_override is not None else (config.tiling.tiles_x, config.tiling.tiles_y)
-        logger.info("!!! Inference tiling: %dx%d (%s)", tiles[0], tiles[1],
-                    "whole-frame" if tiles == (1, 1) else f"{tiles[0]*tiles[1]} tiles/frame")
-    if not switchable and tiles != (1, 1):
-        logger.warning(
-            "!!! TILING %dx%d enabled (%d inferences/frame): capture->command LATENCY and CPU "
-            "will be SUB-PAR vs whole-frame. On this rig only ~2 tiles stay under the 200ms "
-            "budget (2x2 ~230ms e2e). Use tiling for small-object recall, not low-latency control.",
-            tiles[0], tiles[1], tiles[0] * tiles[1])
+        logger.info("!!! Inference: whole-frame (no tiling ladder configured)")
+    if config.tiling.auto_switch and (not switchable or not USE_TRACKER):
+        logger.warning("!!! tiling.auto_switch set but %s — policy will not run",
+                       "ladder has < 2 rungs" if not switchable else "bytetrack is disabled")
 
     # Capture format follows the MODEL input: NV12-input hef -> capture NV12,
     # RGB-input hef -> capture RGB. The hailocropper requires capture format ==
@@ -693,7 +655,7 @@ def main():
                        "config.camera.video_format=%s", video_format, config.camera.video_format)
     else:
         logger.info("!!! capture video_format: %s (matches model input)", video_format)
-    if tiles != (1, 1) and video_format == 'NV12':
+    if any(g != (1, 1) for g in ladder_grids) and video_format == 'NV12':
         logger.warning("!!! NV12 capture + tiling together: extra format handling on the "
                        "tile path may further raise latency/CPU — measure before relying on it.")
 
@@ -749,25 +711,24 @@ def main():
         video_filename_base=f"RAW_{start_time_str}",
         record_videos=record_videos,
         video_format=video_format,
-        tiles=tiles,
+        ladder_grids=ladder_grids,
         tiling_overlap=config.tiling.overlap,
         switchable_tiling=switchable)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
 
-    # Detection-state tiling policy: give the callback a handle to switch_tiling
-    # and the thresholds. Only active when switchable + auto_switch are on.
+    # Size-driven tiling ladder policy: give the callback a switch_to_tier handle and
+    # the ladder. Runs only when the pipeline is switchable AND auto_switch is on.
     if switchable and config.tiling.auto_switch:
-        user_data.configure_switch_policy(
-            request_switch=app.switch_tiling,
-            switch_conf=config.tiling.switch_conf,
-            lost_frames_to_tile=config.tiling.lost_frames_to_tile,
-            locked_frames_to_whole=config.tiling.locked_frames_to_whole,
+        user_data.configure_tiling_policy(
+            request_switch=app.switch_to_tier,
+            tiers=ladder_tiers,
+            lost_to_2x1_s=config.tiling.lost_to_2x1_s,
+            lost_to_3x2_s=config.tiling.lost_to_3x2_s,
         )
-        logger.info("!!! auto-switch tiling policy: lost>=%d -> tile, locked>=%d -> whole, conf>=%.2f",
-                    config.tiling.lost_frames_to_tile, config.tiling.locked_frames_to_whole,
-                    config.tiling.switch_conf)
+        logger.info("!!! auto-switch tiling ladder: %s, lost->2x1 @%.1fs, lost->3x2 @%.1fs",
+                    ladder_grids, config.tiling.lost_to_2x1_s, config.tiling.lost_to_3x2_s)
 
     # Optional dual-camera switching verification harness. The thread drives
     # the same CameraSwitcher.toggle() that production policy will use, so a
@@ -788,27 +749,20 @@ def main():
         threading.Thread(target=_switch_test_thread, name="camera-switch-test", daemon=True).start()
         logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
 
-    # Manual hot-switch validation: toggle whole-frame <-> tiling every N seconds
-    # so the handover (valve + input-selector) can be confirmed glitch-free on the
-    # log (BRANCH SWITCH lines, DETS continuity, StageB stepping). Only meaningful
-    # with switchable tiling; the automatic policy will call the same switch_tiling().
+    # Manual hot-switch validation: cycle tiers 0..N-1 every N seconds so the handover
+    # (valve + input-selector) can be confirmed glitch-free on the log (BRANCH SWITCH
+    # lines, DETS continuity, StageB stepping). Only meaningful with a switchable
+    # ladder; the automatic policy calls the same switch_to_tier().
     if switch_test_s and switchable:
+        n_tiers = len(ladder_grids)
         def _tiling_switch_test():
-            to_tiling = True
+            i = 0
             while True:
                 time.sleep(switch_test_s)
-                app.switch_tiling(to_tiling)
-                to_tiling = not to_tiling
+                app.switch_to_tier(i)
+                i = (i + 1) % n_tiers
         threading.Thread(target=_tiling_switch_test, name="tiling-switch-test", daemon=True).start()
-        logger.info("!!! tiling-switch-test: toggling whole<->tiling every %.1fs", switch_test_s)
-
-    # --plus-one benchmark: once the pipeline is warm, open both branches so the
-    # device runs NxM + 1 inferences/frame; the measured path stays the tile branch.
-    if plus_one and switchable:
-        def _enable_plus_one():
-            time.sleep(6)
-            app.enable_plus_one()
-        threading.Thread(target=_enable_plus_one, name="plus-one-enable", daemon=True).start()
+        logger.info("!!! tiling-switch-test: cycling tiers 0..%d every %.1fs", n_tiers - 1, switch_test_s)
 
     logger.info("!!! Config: %s", config)
     if DEBUG:

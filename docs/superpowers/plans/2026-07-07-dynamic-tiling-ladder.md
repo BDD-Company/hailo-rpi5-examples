@@ -843,6 +843,20 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
+## Execution deviations (recorded during implementation)
+
+- **Pure builder got its own module.** `build_switchable_detection_section` lives in a new
+  host-importable `BDD/tiling_pipeline.py` (test `BDD/test_tiling_pipeline.py`), NOT in `app_base.py` —
+  `app_base`/`pipelines` both import `hailo_apps` and can't be imported on the host. It takes a
+  `queue_factory` param (app_base passes `pipelines.QUEUE`) so the module has zero device deps.
+- **Config-schema:** Optional `Tier.up_side/down_side` (and `TestConfig.Rung.lo`) declare NO default —
+  `check_schema` forbids a default on Optional fields (parser auto-Nones on omission).
+- **Fixtures:** `config.test-autoswitch.yaml` migrated to the ladder schema; `config.test-ladder-single.yaml`
+  added (single imx477 + 3-tier ladder) — the config the on-rig manual-cycle gate validated against.
+- **Rig gate note:** the manual-cycle test needs a LIVE source — run `app.py -i rpi ...`. The default
+  `example.mp4` source hits EOS immediately, so tile branches (opened later) correctly abort with
+  "no buffer" (that path is the graceful-revert working, not a bug).
+
 ## Notes for the executor
 
 - **No legacy, no static:** the old `tiles_x/tiles_y/switchable/switch_conf/lost_frames_to_tile/locked_frames_to_whole` fields, the `--tiles`/`--switch-tiles`/`--plus-one` CLI flags, and the static single-grid tiling path are all REMOVED (Decision 5). The ladder is the sole tiling control; an empty ladder = whole-frame.
