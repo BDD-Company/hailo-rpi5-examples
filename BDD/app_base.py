@@ -70,6 +70,9 @@ try:
 except ImportError:
     pass # Available only on Pi OS
 
+from typing import Optional
+
+from config import Config
 
 import logging
 
@@ -164,6 +167,13 @@ class GStreamerApp:
         self.video_sink = GST_VIDEO_SINK
         self.pipeline = None
         self.loop = None
+        # Validated Config.Camera section; a subclass sets the real one from the
+        # loaded config. Defaulted here so self.camera_settings always exists.
+        self.camera_settings : Config.Camera = None
+        # Optional CameraSwitcher (multi-camera runtime active-camera state); set by
+        # the application. Defaulted so self.camera_switcher always exists; run()
+        # treats None as the legacy single-camera path.
+        self.camera_switcher = None
         self.threads = []
         self.shutdown_callbacks = []
         self.error_occurred = False
@@ -521,12 +531,19 @@ class GStreamerApp:
 
         if self.source_type == RPI_NAME_I:
             on_picam_failure = lambda: GLib.idle_add(self.shutdown)
+            # The picamera producer reads exposure/buffer_count off this; it must be
+            # the validated Config.Camera section. Fail loud on the rpi path rather
+            # than silently fall back to auto-exposure / default buffers.
+            if not isinstance(self.camera_settings, Config.Camera):
+                raise RuntimeError(
+                    f"camera_settings must be a Config.Camera on the rpi source path, "
+                    f"got {type(self.camera_settings).__name__}; pass camera_settings=config.camera to the app")
+
             # Multi-camera support: if the application supplied a CameraSwitcher,
             # spawn one capture thread per configured camera; otherwise fall back
             # to the legacy single-camera launch (the producer synthesizes a
             # default CameraConfig internally).
-            camera_switcher = getattr(self, 'camera_switcher', None)
-            if camera_switcher is not None:
+            if self.camera_switcher is not None:
                 # L4: set the shared appsrc caps ONCE, from the switcher's
                 # single source of truth, before any producer thread starts.
                 # Previously each picamera_thread set caps independently — fine
@@ -539,20 +556,21 @@ class GStreamerApp:
                     appsrc.set_property(
                         "caps",
                         Gst.Caps.from_string(
-                            f"video/x-raw, format={camera_switcher.video_format}, "
-                            f"width={camera_switcher.width}, height={camera_switcher.height}, "
-                            f"framerate={camera_switcher.fps}/1, pixel-aspect-ratio=1/1"
+                            f"video/x-raw, format={self.camera_settings.video_format}, "
+                            f"width={self.camera_settings.width}, height={self.camera_settings.height}, "
+                            f"framerate={self.camera_settings.fps}/1, pixel-aspect-ratio=1/1"
                         ),
                     )
                 else:
                     logger.warning("camera_switcher provided but 'app_source' appsrc not found; producer will fall back")
-                for cam_cfg in camera_switcher.configs():
+                for cam_cfg in self.camera_switcher.configs():
                     t = threading.Thread(
                         target=picamera_thread,
                         args=(self.pipeline, self.video_width, self.video_height, self.video_format),
                         kwargs={
                             'camera_config': cam_cfg,
-                            'camera_switcher': camera_switcher,
+                            'camera_switcher': self.camera_switcher,
+                            'camera_settings': self.camera_settings,
                             'on_failure': on_picam_failure,
                         },
                         name=f"picam-{cam_cfg.camera_id}-{cam_cfg.name or 'cam'}",
@@ -563,7 +581,10 @@ class GStreamerApp:
                 picam_thread = threading.Thread(
                     target=picamera_thread,
                     args=(self.pipeline, self.video_width, self.video_height, self.video_format),
-                    kwargs={'on_failure': on_picam_failure},
+                    kwargs={
+                        'camera_settings': self.camera_settings,
+                        'on_failure': on_picam_failure,
+                    },
                     name="picam",
                 )
                 self.threads.append(picam_thread)
@@ -638,6 +659,7 @@ def picamera_thread(
         video_format,
         camera_config=None,
         camera_switcher=None,
+        camera_settings : Optional[Config.Camera] = None,
         picamera_config=None,
         target_fps = 30,  # aligns appsrc caps with the pipeline's 30/1 -> no videorate duplication
         picamera_controls_initial = None,
@@ -675,36 +697,35 @@ def picamera_thread(
     # when a CameraSwitcher is provided, everyone reads from there so all
     # producers and the shared appsrc agree on caps. Without a switcher we
     # fall back to the args passed into the function (legacy single-cam).
+    # Shared caps (resolution/fps/format) come from the CameraSwitcher — it is the
+    # single source of truth for the one appsrc all producers share (L4).
     if camera_switcher is not None:
         capture_width = camera_switcher.width
         capture_height = camera_switcher.height
         capture_target_fps = camera_switcher.fps
         capture_video_format = camera_switcher.video_format
-        # Exposure/gain knobs live in an optional values object (Config.Camera.
-        # AutoExposure) or None when disabled. Duck-typed: getattr(None, x, d)->d,
-        # so a missing section degrades to plain auto-exposure. Config durations are
-        # in MILLISECONDS; convert here to picamera2's native microseconds (and to
-        # seconds for the warmup timer) so the logic below stays in those units.
-        ae = getattr(camera_switcher, 'autoexposure', None)
-        exposure_time_us = getattr(ae, 'exposure_time_ms', 0) * 1000
-        analogue_gain = getattr(ae, 'analogue_gain', 0.0)
-        exposure_auto_pin_s = getattr(ae, 'exposure_auto_pin_ms', 0) / 1000.0
-        exposure_min_us = getattr(ae, 'exposure_min_ms', 0) * 1000
-        exposure_max_us = getattr(ae, 'exposure_max_ms', 0) * 1000
-        gain_max = getattr(ae, 'gain_max', 0.0)
-        buffer_count = getattr(camera_switcher, 'buffer_count', 2)
     else:
         capture_width = video_width
         capture_height = video_height
         capture_target_fps = target_fps
         capture_video_format = video_format
-        exposure_time_us = 0
-        analogue_gain = 0.0
-        exposure_auto_pin_s = 0.0
-        exposure_min_us = 0
-        exposure_max_us = 0
-        gain_max = 0.0
-        buffer_count = 2
+
+    # Exposure/gain + DMA pool depth come from the validated Config.Camera object
+    # (`camera_settings`) — NOT the CameraSwitcher, which holds only runtime
+    # active-camera state + the shared caps above. Duck-typed + None-safe
+    # (getattr(None, x, d) -> d), so an absent section/object degrades to plain
+    # auto-exposure with the default pool depth. `autoexposure` is itself optional
+    # (Config.Camera.AutoExposure or None). Config durations are in MILLISECONDS;
+    # convert here to picamera2's native microseconds (and to seconds for the
+    # warmup timer) so the logic below stays in those units.
+    ae = getattr(camera_settings, 'autoexposure', None)
+    exposure_time_us = getattr(ae, 'exposure_time_ms', 0) * 1000
+    analogue_gain = getattr(ae, 'analogue_gain', 0.0)
+    exposure_auto_pin_s = getattr(ae, 'exposure_auto_pin_ms', 0) / 1000.0
+    exposure_min_us = getattr(ae, 'exposure_min_ms', 0) * 1000
+    exposure_max_us = getattr(ae, 'exposure_max_ms', 0) * 1000
+    gain_max = getattr(ae, 'gain_max', 0.0)
+    buffer_count = getattr(camera_settings, 'buffer_count', 2)
 
     # Stage-A latency: pin the shutter (disable AE) so it is short and
     # deterministic. Three modes (priority order):
@@ -1127,7 +1148,7 @@ def display_user_data_frame(user_data: app_callback_class):
     cv2.destroyAllWindows()
 
 class GStreamerDetectionApp(GStreamerApp):
-    def __init__(self, app_callback, user_data, parser=None, inference=None):
+    def __init__(self, app_callback, user_data, inference : Config.Inference, camera_settings : Config.Camera, parser=None):
         if parser == None:
             parser = get_default_parser()
 
@@ -1139,6 +1160,11 @@ class GStreamerDetectionApp(GStreamerApp):
 
         # Call the parent class constructor
         super().__init__(parser, user_data)
+        # The validated Config.Camera section (resolution/fps + autoexposure +
+        # buffer_count). The picamera producer reads exposure/buffer straight off
+        # this in run(); set here at construction so self.camera_settings is always
+        # present (the base __init__ defaults it to None as a backstop).
+        self.camera_settings = camera_settings
         # Additional initialization code can be added here
         # Set Hailo parameters these parameters should be set based on the model used
         self.batch_size = 1

@@ -332,12 +332,13 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, inference=None):
+    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
         self.record_videos = record_videos
-        super().__init__(app_callback, user_data, parser, inference=inference)
+        self.camera_switcher = camera_switcher
+        super().__init__(app_callback, user_data, inference=config.inference, camera_settings=config.camera, parser=parser)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -469,9 +470,9 @@ def main():
 
     # Build CameraSwitcher from the validated 'camera' section. Each CameraEntry
     # maps onto a CameraConfig; the shared caps come from the section itself.
-    camera_section = config.camera
+
     camera_switcher = None
-    if camera_section.cameras:
+    if config.camera.cameras:
         camera_configs = [
             CameraConfig(
                 camera_id=c.camera_id,
@@ -479,19 +480,17 @@ def main():
                 sensor_index=c.sensor_index,
                 frame_angular_size_deg=c.frame_angular_size_deg,
             )
-            for c in camera_section.cameras
+            for c in config.camera.cameras
         ]
         camera_switcher = CameraSwitcher(
             camera_configs,
-            width=camera_section.width,
-            height=camera_section.height,
-            fps=camera_section.fps,
-            video_format=camera_section.video_format,
-            active_id=camera_section.active_id,
-            switch_to_wide_size=camera_section.switch_to_wide_size,
-            switch_to_zoom_size=camera_section.switch_to_zoom_size,
-            autoexposure=camera_section.autoexposure,
-            buffer_count=camera_section.buffer_count,
+            width=config.camera.width,
+            height=config.camera.height,
+            fps=config.camera.fps,
+            video_format=config.camera.video_format,
+            active_id=config.camera.active_id,
+            switch_to_wide_size=config.camera.switch_to_wide_size,
+            switch_to_zoom_size=config.camera.switch_to_zoom_size,
         )
         logger.info("!!! Cameras configured: %s, active=%d, shared caps: %dx%d@%dfps %s, thresholds: wide>=%.3f zoom<=%.3f",
                     [(c.camera_id, c.name) for c in camera_configs],
@@ -503,12 +502,12 @@ def main():
     app = App(
         app_callback,
         user_data,
+        config = config,
         parser=arg_parser,
         video_output_chunk_length_s=10,
         video_output_path='./_DEBUG',
         video_filename_base=f"RAW_{start_time_str}",
-        record_videos=True,
-        inference=config.inference)
+        record_videos=True)
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
