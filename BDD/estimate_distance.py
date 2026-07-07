@@ -8,29 +8,17 @@ import cv2
 import numpy as np
 
 from helpers import XY, Rect
+from frame_utils import to_gray
 
 
-def _frame_to_gray(frame) -> 'np.ndarray | None':
-    """Return a 2-D grayscale view of a captured frame.
+def _extract_largest_object_contour(frame, bbox: Rect) -> tuple[np.ndarray, int, int, int, int] | None:
+    """Extract largest segmented contour inside bbox using inverted Otsu threshold.
 
-    Handles both capture formats:
-      - RGB ndarray (H, W, 3): converted with RGB2GRAY.
-      - NV12 planar (Y, UV) tuple, as get_numpy_from_buffer returns under NV12
-        capture: the full-res Y plane already IS the luma/grayscale image, so we
-        use it directly — no colour conversion (zero cost).
+    frame may be a Frame, an RGB ndarray, or an NV12 (Y, UV) tuple; to_gray()
+    normalizes all three (NV12 uses the Y plane directly — the segmentation only
+    ever wanted grayscale anyway).
     """
-    if frame is None:
-        return None
-    if isinstance(frame, tuple):
-        return frame[0]  # NV12 luma plane
-    if frame.ndim == 3:
-        return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-    return frame
-
-
-def _extract_largest_object_contour(frame: np.ndarray, bbox: Rect) -> tuple[np.ndarray, int, int, int, int] | None:
-    """Extract largest segmented contour inside bbox using inverted Otsu threshold."""
-    gray = _frame_to_gray(frame)
+    gray = to_gray(frame)
     if gray is None:
         return None
 

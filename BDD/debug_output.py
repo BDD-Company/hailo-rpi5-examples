@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from helpers import Detections, Detection, XY, MoveCommand, Rect
+from frame_utils import to_rgb
 from interfaces import FrameSinkInterface
 
 import logging
@@ -272,10 +273,16 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     move_goal : XY | None = detection_dict.get('move_goal', None)
     aim_point : XY = detection_dict.get('aim_point', XY(0.5, 0.5))
 
-    frame = detections.frame if detections else None
+    # Materialize an RGB canvas to draw on: NV12 frames are reconstructed, RGB is
+    # returned as-is (to_rgb(None) -> None). Frame.shape and ndarray.shape agree, so
+    # the code below is unchanged.
+    frame = to_rgb(detections.frame) if detections else None
 
     if frame is None:
         return None
+
+    # Copy so annotation never mutates the shared/cached frame buffer.
+    frame = frame.copy()
 
     # telemetry['_frame'] = {
     #     'id' : detections.frame_id,

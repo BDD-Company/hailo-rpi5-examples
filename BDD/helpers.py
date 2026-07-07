@@ -11,6 +11,8 @@ import threading
 
 import numpy as np
 
+from frame_utils import Frame
+
 import logging
 import logging.handlers
 import queue
@@ -523,7 +525,9 @@ class CameraConfig:
 @dataclass(slots=True, frozen=True)
 class Detections:
     frame_id : int
-    frame : np.ndarray | None = None
+    # A Frame (frame_utils) — wraps RGB ndarray or NV12 (Y, UV) planes. Consumers
+    # use frame.to_gray()/to_rgb(); legacy raw ndarrays still work via Frame.coerce.
+    frame : "Frame | None" = None
     detections : list[Detection] = field(default_factory=list)
     meta : FrameMetadata = field(default_factory=FrameMetadata)
     # Identifies which physical camera produced this frame. Consumers must use

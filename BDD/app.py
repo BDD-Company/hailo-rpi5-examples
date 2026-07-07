@@ -31,6 +31,7 @@ from bytetrack import BYTETracker
 
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
 from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
+from frame_utils import Frame
 from config import Config
 from dataclasses import asdict, replace
 from OverwriteQueue import OverwriteQueue
@@ -307,10 +308,10 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     seen_frames.append(frame_id)
 
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
-    frame = None
-    # if user_data.use_frame and format is not None and width is not None and height is not None:
-    #     # Get video frame
-    frame = get_numpy_from_buffer(buffer, format, width, height)
+    # Wrap in a Frame so downstream consumers handle NV12 (a planar (Y, UV) tuple from
+    # get_numpy_from_buffer) and RGB uniformly — control path uses to_gray() (free for
+    # NV12), rendering paths use to_rgb(). Frame.coerce(None) stays None.
+    frame = Frame.coerce(get_numpy_from_buffer(buffer, format, width, height))
 
     # Get the detections from the buffer
     roi = hailo.get_roi_from_buffer(buffer)
