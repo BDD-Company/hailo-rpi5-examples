@@ -108,6 +108,15 @@ class TestConfig:
         toggle:   bool = False
     defaults_section: DefaultsSection = dataclasses.field(default_factory=DefaultsSection)
 
+    @dataclasses.dataclass(slots=True, kw_only=True, frozen=True)
+    class Rung:
+        # Mirrors Config.Tiling.Tier: a nested dataclass used as a LIST element where
+        # every field is defaulted (incl. an Optional), so the list may be omitted
+        # entirely (default_factory=list) — the exact shape `ladder` uses.
+        a: Annotated[int, Range(min=1)] = 1
+        lo: Optional[Annotated[float, Range(0.0, 1.0)]]   # omit -> None (no default)
+    rungs: list[Rung] = dataclasses.field(default_factory=list)
+
     # runtime-only: never read from the file (providing it is an unknown key)
     DEBUG: bool = dataclasses.field(default=False, metadata={'runtime': True})
 
@@ -119,6 +128,7 @@ OptionA = TestConfig.OptionA
 OptionB = TestConfig.OptionB
 Item = TestConfig.Item
 DefaultsSection = TestConfig.DefaultsSection
+Rung = TestConfig.Rung
 
 # Path to THIS test file: a file guaranteed to exist while the tests run, used as
 # a valid value for the required ExistingFile field (which coerces a config string
@@ -1062,3 +1072,53 @@ def test_consumers_gate_on_presence_not_enabled():
 def test_app_gates_tracker_on_bytetrack_presence():
     app_code = _strip_comments((CONFIG_YAML.parent / 'app.py').read_text())
     assert "config.bytetrack is not None" in app_code
+
+
+# ---------------------------------------------------------------------------
+# Config.Tiling: size-driven ladder fields (Task 1). Constructed directly — the
+# real Config needs many sections + a present HEF (absent on host); the parser
+# machinery for a list-of-nested-tiers is pinned separately via TestConfig.Rung.
+# ---------------------------------------------------------------------------
+def test_tiling_tier_and_ladder_fields():
+    Tier = Config.Tiling.Tier
+    t = Config.Tiling(
+        auto_switch=True, overlap=0.10,
+        lost_to_2x1_s=1.0, lost_to_3x2_s=10.0,
+        ladder=[
+            Tier(tiles_x=3, tiles_y=2, up_side=0.05, down_side=None),
+            Tier(tiles_x=2, tiles_y=1, up_side=0.10, down_side=0.02),
+            Tier(tiles_x=1, tiles_y=1, up_side=None, down_side=0.05),
+        ],
+    )
+    assert len(t.ladder) == 3
+    assert (t.ladder[0].tiles_x, t.ladder[0].tiles_y) == (3, 2)
+    assert t.ladder[0].up_side == 0.05 and t.ladder[0].down_side is None
+    assert t.ladder[2].down_side == 0.05 and t.ladder[2].up_side is None
+    assert t.lost_to_2x1_s == 1.0 and t.lost_to_3x2_s == 10.0
+
+
+def test_tiling_defaults_empty_ladder():
+    d = Config.Tiling()                     # all-defaults (built by the field factory)
+    assert d.ladder == []
+    assert d.lost_to_2x1_s == 1.0 and d.lost_to_3x2_s == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Parser feature mirror (repo rule config-testconfig-mirror): a list of
+# defaulted nested dataclasses with an Optional field — the exact shape `ladder`
+# uses — must parse through the real loader.
+# ---------------------------------------------------------------------------
+def test_optional_list_of_defaulted_nested_dataclasses_parses():
+    cfg = covert_to_config(tvalid_with(rungs=[{'a': 2, 'lo': 0.3}, {'a': 1}]))
+    assert len(cfg.rungs) == 2
+    assert (cfg.rungs[0].a, cfg.rungs[0].lo) == (2, 0.3)
+    assert cfg.rungs[1].lo is None            # Optional defaults to None
+
+
+def test_omitted_list_of_nested_dataclasses_defaults_empty():
+    assert covert_to_config(tvalid()).rungs == []
+
+
+def test_nested_list_element_range_is_validated():
+    with pytest.raises(ConfigError):
+        covert_to_config(tvalid_with(rungs=[{'a': 0}]))   # a has Range(min=1)

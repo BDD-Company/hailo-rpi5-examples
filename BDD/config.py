@@ -156,28 +156,38 @@ class Config:
 
     @dataclass(slots=True, kw_only=True, frozen=True)
     class Tiling:
-        # Inference tile grid. 1×1 = whole-frame (default, lowest latency). >1
-        # enables hailotilecropper: tiles_x*tiles_y inferences/frame, raising
-        # small-object recall at the cost of latency (~N×15 ms on Hailo-8).
-        tiles_x: Annotated[int, Range(min=1)] = 1
-        tiles_y: Annotated[int, Range(min=1)] = 1
-        # Fractional tile overlap on both axes (0..1); 0 = abutting tiles.
+        # Ladder-only tiling control: the size-driven ladder is the sole tiling
+        # mechanism. Legacy fields (tiles_x, tiles_y, switchable, switch_conf,
+        # lost_frames_to_tile, locked_frames_to_whole) and the static --tiles path are
+        # REMOVED. "Switchable" is derived at runtime as len(ladder) >= 2.
+
+        @dataclass(slots=True, kw_only=True, frozen=True)
+        class Tier:
+            # One rung of the ladder. tiles_x×tiles_y = the grid this rung runs
+            # (1×1 = whole-frame). up_side/down_side are the max(bw,bh) linear-fraction
+            # thresholds for leaving this rung: climb toward whole when side >= up_side,
+            # descend toward more tiles when side < down_side. End rungs omit the
+            # threshold that runs off the ladder (tier 0 = most tiles has no down_side;
+            # the whole-frame rung has no up_side).
+            tiles_x: Annotated[int, Range(min=1)] = 1
+            tiles_y: Annotated[int, Range(min=1)] = 1
+            # Optional: omit the key -> None (parser auto-Nones; no explicit default).
+            up_side:   Optional[Annotated[float, Range(0.0, 1.0)]]
+            down_side: Optional[Annotated[float, Range(0.0, 1.0)]]
+
+        # Ordered ladder (index 0 = MOST tiles -> last = whole-frame). Empty/absent =
+        # plain whole-frame (no tiling, not switchable). Structural validation lives in
+        # tiling_policy.build_ladder (last rung 1×1, strictly-decreasing tile counts).
+        ladder: list[Tier] = field(default_factory=list)
+        # Fractional tile overlap on both axes (0..1); applied to every tiled branch.
         overlap: Annotated[float, Range(0.0, 1.0)] = 0.0
-        # Runtime-switchable tiling: build BOTH a whole-frame branch and a
-        # tiles_x×tiles_y branch behind valves + an input-selector, and hot-switch
-        # between them at runtime (whole-frame active at startup). Lets a policy
-        # (e.g. tile-to-reacquire when the target is lost) trade latency for recall
-        # on demand. When false, tiling is static (whole-frame if 1×1, else fixed).
-        switchable: bool = False
-        # Automatic detection-state policy (implies switchable): switch to tiling
-        # after `lost_frames_to_tile` consecutive frames with no confident target
-        # (reacquire small/distant objects), and back to whole-frame after
-        # `locked_frames_to_whole` consecutive confident frames (restore low
-        # latency for control). A target counts as "confident" at >= switch_conf.
+        # Run the size+loss policy automatically. When false the ladder pipeline is
+        # still built (if len(ladder)>=2) but only --switch-test-s drives switching.
         auto_switch: bool = False
-        lost_frames_to_tile:    Annotated[int, Range(min=1)] = 10
-        locked_frames_to_whole: Annotated[int, Range(min=1)] = 5
-        switch_conf: Annotated[float, Range(0.0, 1.0)] = 0.4
+        # Target-lost escalation: drop to the rung above whole after lost_to_2x1_s of
+        # no matched track, then to tier 0 (most tiles) after lost_to_3x2_s. Seconds.
+        lost_to_2x1_s: Annotated[float, Range(min=0.0)] = 1.0
+        lost_to_3x2_s: Annotated[float, Range(min=0.0)] = 10.0
     tiling: Tiling = field(default_factory=Tiling)
 
     @dataclass(slots=True, kw_only=True, frozen=True)

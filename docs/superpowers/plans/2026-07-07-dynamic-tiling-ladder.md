@@ -60,9 +60,9 @@ def test_tiling_tier_and_ladder_fields():
         auto_switch=True, overlap=0.10,
         lost_to_2x1_s=1.0, lost_to_3x2_s=10.0,
         ladder=[
-            Tier(tiles_x=3, tiles_y=2, up_side=0.05),
+            Tier(tiles_x=3, tiles_y=2, up_side=0.05, down_side=None),
             Tier(tiles_x=2, tiles_y=1, up_side=0.10, down_side=0.02),
-            Tier(tiles_x=1, tiles_y=1, down_side=0.05),
+            Tier(tiles_x=1, tiles_y=1, up_side=None, down_side=0.05),
         ],
     )
     assert len(t.ladder) == 3
@@ -104,8 +104,10 @@ Expected: FAIL (`Config.Tiling` has no attribute `Tier` / `ladder`).
             # the whole-frame rung has no up_side).
             tiles_x: Annotated[int, Range(min=1)] = 1
             tiles_y: Annotated[int, Range(min=1)] = 1
-            up_side:   Optional[Annotated[float, Range(0.0, 1.0)]] = None
-            down_side: Optional[Annotated[float, Range(0.0, 1.0)]] = None
+            # Optional fields must NOT declare a default (check_schema rule — the parser
+            # auto-Nones on omission). So no `= None`; direct construction passes them.
+            up_side:   Optional[Annotated[float, Range(0.0, 1.0)]]
+            down_side: Optional[Annotated[float, Range(0.0, 1.0)]]
 
         # Ordered ladder (index 0 = MOST tiles -> last = whole-frame). Empty/absent =
         # plain whole-frame (no tiling, not switchable). Structural validation lives in
@@ -141,7 +143,7 @@ Expected: PASS.
             # where every field is defaulted (incl. an Optional), so the list may be
             # omitted entirely (default_factory=list) — the exact shape `ladder` uses.
             a: Annotated[int, Range(min=1)] = 1
-            lo: Optional[Annotated[float, Range(0.0, 1.0)]] = None
+            lo: Optional[Annotated[float, Range(0.0, 1.0)]]   # no default (check_schema rule)
         rungs: list[Rung] = dataclasses.field(default_factory=list)
 ```
 
