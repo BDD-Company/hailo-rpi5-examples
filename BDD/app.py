@@ -450,11 +450,20 @@ class App(GStreamerDetectionApp):
         # by the 2-frame queue play back at the true ~fps cadence instead of flashing
         # by on arrival — that jitter, not any reordering, is what made the preview
         # look jagged. Frame ORDER is identical either way.
+        #
+        # Sink choice matters on this deployment: the Pi runs a Wayland compositor
+        # (labwc) mirrored over the network by wayvnc. autovideosink there falls back
+        # to kmssink (direct DRM scanout), which paints a hardware plane the compositor
+        # doesn't own — wayvnc never captures it, so over VNC the preview looks like a
+        # slideshow. waylandsink renders into a compositor surface that labwc composites
+        # and wayvnc streams, giving a smooth remote preview. Fall back to autovideosink
+        # off Wayland (X11 / local monitor).
+        preview_sink = 'waylandsink' if os.environ.get('WAYLAND_DISPLAY') else 'autovideosink'
         preview_branch = (
             'queue name=preview_queue leaky=downstream max-size-buffers=2 '
             '    max-size-bytes=0 max-size-time=0 '
             '! videoconvert '
-            '! autovideosink name=preview_sink sync=true'
+            f'! {preview_sink} name=preview_sink sync=true'
         )
 
         if not self.record_videos:

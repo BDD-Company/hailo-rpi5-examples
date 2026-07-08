@@ -74,7 +74,14 @@ fi
 export GST_DEBUG=3
 export LIBCAMERA_LOG_LEVELS=1
 
+# Display for --preview. This Pi runs a Wayland compositor (labwc) mirrored over the
+# network by wayvnc, so point GStreamer's waylandsink at the compositor socket. Without
+# these, autovideosink falls back to kmssink (direct DRM scanout) which wayvnc can't
+# capture -> the remote preview looks like a slideshow. DISPLAY=:0 kept as an X11
+# fallback for a locally-attached monitor / non-Wayland host.
 export DISPLAY=:0
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 
 python \
     ./BDD/app.py \
