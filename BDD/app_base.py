@@ -722,22 +722,38 @@ class GStreamerApp:
 _buffer_keepalive_noop = lambda *_: None
 
 
-# Process-wide PTS baseline shared across every picam thread. Each thread used
-# to relativize buffer.pts against its OWN first sensor timestamp, so when the
-# active camera switched, the new stream's PTS jumped backward and splitmuxsink
-# crashed with "Queued GOP time is negative". With one shared monotonic baseline
-# the PTS is monotonic across cameras by construction.
+# Process-wide PTS baseline + high-water mark, shared across every picam thread.
+# Each thread used to relativize buffer.pts against its OWN first sensor timestamp,
+# so when the active camera switched, the new stream's PTS jumped backward and
+# splitmuxsink crashed with "Queued GOP time is negative". One shared baseline keeps
+# PTS monotonic across cameras by construction; the shared high-water mark clamps it
+# strictly monotonic even if a switch ever presents a slightly-earlier timestamp.
 _pts_baseline_lock = threading.Lock()
 _pts_baseline_ns : int | None = None
+_pts_last_ns : int = -1
 
 
-def _shared_pts_ns(now_ns : int) -> int:
-    """Return a monotonic, shared-across-all-cameras PTS in nanoseconds."""
-    global _pts_baseline_ns
+def _shared_pts_ns(source_ns : int) -> int:
+    """Return an EVEN, strictly-monotonic, shared-across-all-cameras PTS in ns.
+
+    ``source_ns`` is the HARDWARE sensor-exposure timestamp (libcamera
+    SensorTimestamp, CLOCK_BOOTTIME) when available — one clock for every camera on
+    the Pi, so a single shared baseline stays monotonic across camera switches AND
+    preserves the sensor's even ~fps cadence. Previously this used time.monotonic_ns()
+    at PUSH time: under GIL contention the capture thread stalls, the camera buffers a
+    few frames in DMA, then the thread flushes them back-to-back, so push-time PTS
+    jittered 16–128 ms and recorded/preview motion looked jagged — even though frame
+    ORDER was always correct. The clamp guarantees strict monotonicity regardless of
+    source, so splitmuxsink never sees a negative-GOP jump."""
+    global _pts_baseline_ns, _pts_last_ns
     with _pts_baseline_lock:
         if _pts_baseline_ns is None:
-            _pts_baseline_ns = now_ns
-        return now_ns - _pts_baseline_ns
+            _pts_baseline_ns = source_ns
+        pts = source_ns - _pts_baseline_ns
+        if pts <= _pts_last_ns:
+            pts = _pts_last_ns + 1
+        _pts_last_ns = pts
+        return pts
 
 
 def picamera_thread(
@@ -1156,13 +1172,17 @@ def picamera_thread(
 
             if frame_meta is not None:
                 sensor_timestamp_ns = frame_meta.get("SensorTimestamp", None)
-                # Multi-camera correctness: derive buffer.pts from a process-
-                # wide monotonic clock instead of per-camera sensor TS so the
-                # pipeline sees a single monotonic stream even when the active
-                # camera switches. The original sensor TS is still attached
-                # as ref-meta so downstream sensor-latency math is unchanged.
+                # buffer.pts comes from the HARDWARE sensor timestamp (even ~fps
+                # cadence), relativized to a process-wide baseline shared across
+                # cameras and clamped strictly monotonic (see _shared_pts_ns). This
+                # replaces wall-clock push time, whose GIL-induced jitter made
+                # recorded/preview motion jagged even though frame order was correct.
+                # Falls back to push-time monotonic only if the sensor ts is ever
+                # absent. now_monotonic_ns is still recorded as the unix ref-meta
+                # below so the Stage-B (appsrc->callback) latency math is unchanged.
                 now_monotonic_ns = time.monotonic_ns()
-                frame_timestamp_ns = _shared_pts_ns(now_monotonic_ns)
+                pts_source_ns = sensor_timestamp_ns if sensor_timestamp_ns is not None else now_monotonic_ns
+                frame_timestamp_ns = _shared_pts_ns(pts_source_ns)
                 if sensor_timestamp_ns is not None and first_sensor_timestamp_ns == 0:
                     first_sensor_timestamp_ns = sensor_timestamp_ns
 
