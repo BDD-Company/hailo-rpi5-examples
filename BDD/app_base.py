@@ -199,6 +199,14 @@ class GStreamerApp:
         # stamp goes. Branch names differ between the single-branch and switchable
         # pipelines, so get_pipeline_string() sets this to whichever it built.
         self.detection_start_probe_element = 'inference_wrapper_input_q'
+        # Guards the valve/selector handover in switch_tiling. Held across the blocking
+        # first-buffer wait, so NEVER acquire a policy lock while holding it (see
+        # tiling_policy.TilingSwitchCoordinator for the ordering).
+        self._switch_lock = threading.RLock()
+        # Branch the pipeline is actually on. Whole-frame is active at startup: the
+        # input-selector defaults to its first-linked pad (sink_0) and valve_tile is
+        # built with drop=true.
+        self._tiling_active = False
         self.hef_path = None
         self.app_callback = None
 
@@ -386,43 +394,57 @@ class GStreamerApp:
         with no recovery, and on this rig a stalled control loop can wreck hardware.
 
         Returns True if the active branch is the target after the call (including a
-        no-op when already there), False if the switch could not be performed."""
-        sel = self.pipeline.get_by_name("branch_selector")
-        v_whole = self.pipeline.get_by_name("valve_whole")
-        v_tile = self.pipeline.get_by_name("valve_tile")
-        if sel is None or v_whole is None or v_tile is None:
-            logger.warning("switch_tiling: switchable-tiling pipeline not present; ignoring")
-            return False
-        target_pad_name = "sink_1" if to_tiling else "sink_0"
-        cur = sel.get_property("active-pad")
-        if cur is not None and cur.get_name() == target_pad_name:
-            return True  # already there
-        incoming_valve = v_tile if to_tiling else v_whole
-        outgoing_valve = v_whole if to_tiling else v_tile
-        target_pad = sel.get_static_pad(target_pad_name)
+        no-op when already there), False if the switch could not be performed.
 
-        incoming_valve.set_property("drop", False)        # 1. open incoming branch
-        ready = threading.Event()                         # 2. wait its first buffer
-        def _first_buf(pad, info, _u):
-            ready.set()
-            return Gst.PadProbeReturn.REMOVE
-        probe_id = target_pad.add_probe(Gst.PadProbeType.BUFFER, _first_buf, None)
-        if not ready.wait(warmup_timeout_s) and not ready.is_set():
-            # Incoming branch never produced -> REVERT: re-close the valve we opened,
-            # keep the selector + outgoing valve on the branch that IS producing.
-            logger.warning("switch_tiling: incoming %s branch gave no buffer in %.1fs; "
-                           "ABORTING switch, staying on %s",
-                           "TILING" if to_tiling else "WHOLE-FRAME", warmup_timeout_s,
-                           "WHOLE-FRAME" if to_tiling else "TILING")
-            incoming_valve.set_property("drop", True)      # undo step 1
-            try: target_pad.remove_probe(probe_id)
-            except Exception: pass
-            return False
-        sel.set_property("active-pad", target_pad)         # 3. flip selector (atomic)
-        outgoing_valve.set_property("drop", True)           # 4. idle the outgoing branch
-        self._tiling_active = to_tiling
-        logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
-        return True
+        Serialized by self._switch_lock: two callers interleaving their valve/selector
+        set_property calls could leave the selector pointing at a shut-valve branch (a
+        stall). Do NOT call this directly from application code — go through
+        tiling_policy.TilingSwitchCoordinator.request(), which also keeps the policy's
+        view of the active branch in sync. The lock here is defense-in-depth."""
+        with self._switch_lock:
+            sel = self.pipeline.get_by_name("branch_selector")
+            v_whole = self.pipeline.get_by_name("valve_whole")
+            v_tile = self.pipeline.get_by_name("valve_tile")
+            if sel is None or v_whole is None or v_tile is None:
+                logger.warning("switch_tiling: switchable-tiling pipeline not present; ignoring")
+                return False
+            target_pad_name = "sink_1" if to_tiling else "sink_0"
+            cur = sel.get_property("active-pad")
+            if cur is not None and cur.get_name() == target_pad_name:
+                self._tiling_active = to_tiling
+                return True  # already there
+            incoming_valve = v_tile if to_tiling else v_whole
+            outgoing_valve = v_whole if to_tiling else v_tile
+            target_pad = sel.get_static_pad(target_pad_name)
+
+            incoming_valve.set_property("drop", False)        # 1. open incoming branch
+            ready = threading.Event()                         # 2. wait its first buffer
+            def _first_buf(pad, info, _u):
+                ready.set()
+                return Gst.PadProbeReturn.REMOVE
+            probe_id = target_pad.add_probe(Gst.PadProbeType.BUFFER, _first_buf, None)
+            if not ready.wait(warmup_timeout_s) and not ready.is_set():
+                # Incoming branch never produced -> REVERT: re-close the valve we opened,
+                # keep the selector + outgoing valve on the branch that IS producing.
+                logger.warning("switch_tiling: incoming %s branch gave no buffer in %.1fs; "
+                               "ABORTING switch, staying on %s",
+                               "TILING" if to_tiling else "WHOLE-FRAME", warmup_timeout_s,
+                               "WHOLE-FRAME" if to_tiling else "TILING")
+                incoming_valve.set_property("drop", True)      # undo step 1
+                try: target_pad.remove_probe(probe_id)
+                except Exception: pass
+                return False
+            sel.set_property("active-pad", target_pad)         # 3. flip selector (atomic)
+            outgoing_valve.set_property("drop", True)           # 4. idle the outgoing branch
+            self._tiling_active = to_tiling
+            logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
+            return True
+
+    @property
+    def tiling_active(self) -> bool:
+        """Branch the pipeline is actually on (False = whole-frame)."""
+        with self._switch_lock:
+            return self._tiling_active
 
     def _log_pipeline_health(self):
         """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)

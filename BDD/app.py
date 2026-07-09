@@ -16,7 +16,7 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_p
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser
 from app_base import GStreamerDetectionApp
-from tiling_policy import TilingSwitchPolicy
+from tiling_policy import TilingSwitchPolicy, TilingSwitchCoordinator
 from drone_controller import drone_controlling_thread
 from platform_controller import platform_controlling_thread
 
@@ -61,68 +61,47 @@ class user_app_callback_class(app_callback_class):
         self.detections_queue = detections_queue
         self.tracker = tracker
 
-        # Detection-state tiling policy. The whole<->tile decision lives in the pure,
-        # unit-tested TilingSwitchPolicy; this class only fires the (blocking) switch
-        # on a worker thread. Enabled by main() via configure_switch_policy().
-        self.request_switch = None            # callable(bool) -> app.switch_tiling
+        # Runtime whole<->tile switching. The decision lives in the pure, unit-tested
+        # TilingSwitchPolicy; the serialization in TilingSwitchCoordinator. This class
+        # only decides WHEN to hand the (blocking) switch to a worker thread, because
+        # the GStreamer streaming thread must never wait on a handover. Wired by main()
+        # via attach_tiling_switch(); None until then.
+        self._coordinator = None
         self.auto_switch = False
-        self._policy = TilingSwitchPolicy()   # thresholds replaced by configure_switch_policy()
-        self._switch_pending = False
-        self._switch_lock = threading.Lock()
 
-    def configure_switch_policy(self, request_switch, switch_conf,
-                                lost_frames_to_tile, locked_frames_to_whole):
-        """Enable the auto-switch tiling policy. `request_switch(to_tiling: bool)`
-        performs the actual (blocking) branch handover; the thresholds tune when the
-        policy asks for a switch."""
-        self.request_switch = request_switch
-        self.auto_switch = True
-        self._policy = TilingSwitchPolicy(
-            switch_conf=switch_conf,
-            lost_frames_to_tile=lost_frames_to_tile,
-            locked_frames_to_whole=locked_frames_to_whole,
-        )
+    def attach_tiling_switch(self, switch_fn, policy: TilingSwitchPolicy,
+                             auto_switch: bool = False):
+        """Route every branch switch through one serialized coordinator.
+
+        `switch_fn(to_tiling) -> bool` is the blocking GStreamer handover
+        (app.switch_tiling). `auto_switch` enables the per-frame detection-state policy;
+        even with it off the coordinator is installed, so the --test-switch-s harness
+        goes through the same serialized path and keeps `policy.tiling_on` truthful."""
+        self._coordinator = TilingSwitchCoordinator(policy, switch_fn)
+        self.auto_switch = auto_switch
+
+    def request_tiling(self, to_tiling: bool) -> bool:
+        """Blocking, thread-safe branch switch. The ONLY entry point — used by the
+        policy worker and by the --test-switch-s harness alike."""
+        if self._coordinator is None:
+            logger.warning("request_tiling: switchable tiling is not configured; ignoring")
+            return False
+        return self._coordinator.request(to_tiling)
 
     def note_detection(self, best_conf: float):
-        """Per-frame detection-state hot-switch policy. `best_conf` is the highest
-        target confidence this frame (0 if none). Delegates the whole<->tile decision
-        to TilingSwitchPolicy and fires the (blocking) switch on a worker thread so
-        the GStreamer streaming thread is never stalled. No-op unless auto_switch is
-        configured."""
-        if not self.auto_switch or self.request_switch is None:
+        """Per-frame detection-state hot-switch policy, on the GStreamer streaming
+        thread. `best_conf` is the highest target confidence this frame (0 if none).
+        The coordinator returns a target only when a switch should START (never while
+        one is in flight), so at most one worker thread exists at a time. No-op unless
+        auto_switch is on."""
+        if not self.auto_switch or self._coordinator is None:
             return
-        target = self._policy.note(best_conf)
+        target = self._coordinator.note(best_conf)
         if target is not None:
-            self._fire_switch(target)
-
-    def _fire_switch(self, to_tiling: bool):
-        with self._switch_lock:
-            if self._switch_pending or to_tiling == self._policy.tiling_on:
-                return
-            self._switch_pending = True
-        def _run():
-            switched = False
-            try:
-                # request_switch (app.switch_tiling) returns True only if the incoming
-                # branch actually produced buffers and the selector flipped; on a
-                # graceful abort (dead incoming branch) it returns False and keeps the
-                # branch that was still delivering detections.
-                switched = bool(self.request_switch(to_tiling))
-                if switched:
-                    self._policy.committed(to_tiling)   # adopt new branch + reset streaks
-            except Exception:
-                # Never let this daemon thread die with a bare stderr traceback: the
-                # log is the only forensic record of a run. Treat it as a failed switch
-                # (below) so the policy backs off and the working branch keeps running.
-                logger.exception("tiling switch to %s failed",
-                                 "TILING" if to_tiling else "WHOLE-FRAME")
-            finally:
-                if not switched:
-                    # aborted/failed: keep the current branch, drop the streak so the
-                    # policy backs off and retries after a fresh run rather than thrashing.
-                    self._policy.reset_streaks()
-                self._switch_pending = False
-        threading.Thread(target=_run, name="tiling-policy-switch", daemon=True).start()
+            # Never block the streaming thread: the handover waits up to ~1s for the
+            # incoming branch's first buffer.
+            threading.Thread(target=self._coordinator.request, args=(target,),
+                             name="tiling-policy-switch", daemon=True).start()
 
 
 # -----------------------------------------------------------------------------------------------
@@ -906,18 +885,25 @@ def main():
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
 
-    # Detection-state tiling policy: give the callback a handle to switch_tiling
-    # and the thresholds. Only active when switchable + auto_switch are on.
-    if switchable and config.tiling.auto_switch:
-        user_data.configure_switch_policy(
-            request_switch=app.switch_tiling,
-            switch_conf=config.tiling.switch_conf,
-            lost_frames_to_tile=config.tiling.lost_frames_to_tile,
-            locked_frames_to_whole=config.tiling.locked_frames_to_whole,
+    # Install the switch coordinator whenever the pipeline HAS two branches, even if
+    # the automatic policy is off: the --test-switch-s harness must go through the same
+    # serialized path, or it desyncs the policy and races the handover.
+    # tiling_on=False matches the pipeline at startup (selector on sink_0, valve_tile shut).
+    if switchable:
+        user_data.attach_tiling_switch(
+            switch_fn=app.switch_tiling,
+            policy=TilingSwitchPolicy(
+                switch_conf=config.tiling.switch_conf,
+                lost_frames_to_tile=config.tiling.lost_frames_to_tile,
+                locked_frames_to_whole=config.tiling.locked_frames_to_whole,
+                tiling_on=False,
+            ),
+            auto_switch=config.tiling.auto_switch,
         )
-        logger.info("!!! auto-switch tiling policy: lost>=%d -> tile, locked>=%d -> whole, conf>=%.2f",
-                    config.tiling.lost_frames_to_tile, config.tiling.locked_frames_to_whole,
-                    config.tiling.switch_conf)
+        if config.tiling.auto_switch:
+            logger.info("!!! auto-switch tiling policy: lost>=%d -> tile, locked>=%d -> whole, conf>=%.2f",
+                        config.tiling.lost_frames_to_tile, config.tiling.locked_frames_to_whole,
+                        config.tiling.switch_conf)
 
     # Optional dual-camera switching verification harness. The thread drives
     # the same CameraSwitcher.toggle() that production policy will use, so a
@@ -943,11 +929,17 @@ def main():
     # log (BRANCH SWITCH lines, DETS continuity, StageB stepping). Only meaningful
     # with switchable tiling; the automatic policy will call the same switch_tiling().
     if switch_test_s:
+        # Routed through user_data.request_tiling (the coordinator), NOT app.switch_tiling
+        # directly: that is what keeps the policy's belief in sync with the pipeline and
+        # stops this thread from racing the policy worker over the valves/selector.
         def _tiling_switch_test():
             to_tiling = True
             while True:
                 time.sleep(switch_test_s)
-                app.switch_tiling(to_tiling)
+                ok = user_data.request_tiling(to_tiling)
+                logger.info("!!! --test-switch-s: requested %s -> %s",
+                            "TILING" if to_tiling else "WHOLE-FRAME",
+                            "ok" if ok else "ABORTED (branch kept)")
                 to_tiling = not to_tiling
         threading.Thread(target=_tiling_switch_test, name="tiling-switch-test", daemon=True).start()
         logger.info("!!! --test-switch-s: toggling whole<->tiling every %.1fs", switch_test_s)

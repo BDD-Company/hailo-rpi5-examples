@@ -19,7 +19,7 @@ Tasks that are already done are marked as `+`.
 - !! UI for launches
 - !! figure out video capture without cropping (i.e. capture full frame)
 - ! right now probes are commented out, add CLI argument that enables them (default OFF)
-- ! rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — PR#9 review #3 handover-abort DONE (switch_tiling now reverts to the working branch on a dead-branch timeout); still open: #4 (--test-switch-s desyncs the policy + races the unlocked switch_tiling) and the optional post-switch watchdog. `--plus-one` / `enable_plus_one()` are GONE (2026-07-09), which removed one of the three unlocked switch_tiling callers.
+- ! rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — PR#9 review #3 handover-abort DONE (switch_tiling reverts to the working branch on a dead-branch timeout); #4 serialization DONE 2026-07-09 (all switches go through tiling_policy.TilingSwitchCoordinator; `--plus-one`/`enable_plus_one()` deleted). STILL OPEN: #4c, the post-switch watchdog for a branch that warms up and then dies.
 - ! CONTROL-PATH FRAME TRUST (robustness review 2026-07, item #1, deferred): is `Detections.frame` — the image `OpticalObjectInfo` segments in drone_controller.py — stale w.r.t. its own detections? Commit 3bc99a6's stated root cause ("the aggregator reorders the bypass image stream while the metadata stays in order") cannot be literally true: back then ONE tee fed both the recorder and the callback, and a tee fans buffers to all src pads synchronously and in order. Leading theory is pooled bypass memory recycled under the then-120-deep recording queue, which the callback never saw because get_numpy_from_buffer copies synchronously inside the pad probe — that would mean the control path was always fine. Until settled, `optical_refinement` (ON by default) is on unverified pixels. Step 0 costs nothing: watch an existing `_DEBUG/debug_*.mkv` and see whether the bbox tracks the ball or lags it, and grep a run log for `Dropping out-of-order/duplicate frame`. Full context + the decisive experiment: memory `handoff-aggregator-bypass-image`.
 - ! SIGINT does not stop the app. `shutdown()` (app_base.py:141) runs its callbacks, but the GLib main loop never quits, so `app.run()` never returns, `main()` never reaches `Done !!!`, and the operator must `kill -TERM` then `-9`. Re-confirmed on-rig 2026-07-09. Consequences: (a) the main pipeline's `splitmuxsink` cannot finalize the **last** `RAW_*.mkv` segment; (b) `main()`'s bounded `output_thread.join()` is unreachable in practice. Since 2026-07-09 the `debug_*.mkv` overlay recorder DOES finalize at SIGINT (its thread takes a sentinel from a shutdown callback, exits, and runs `sink.stop()` -> EOS -> NULL; verified: last segment ffprobes clean and decodes while the process still hangs). Fix: make `shutdown()` actually quit the GLib loop, then verify `Done !!!` prints and the last RAW segment ffprobes clean. NOTE for debugging: during teardown the process releases /dev/hailo0 and /dev/video0 while still alive, so `fuser /dev/hailo0` reports "free" for a live process — use `kill -0 <pid>`.
 - rotate camera 90 degrees (to maximize lead without leading visual)
@@ -69,39 +69,35 @@ deferred, not patched inline):
   whole-frame if N callbacks are missed AFTER a switch that initially succeeded but
   then the branch dies.
 
-- **#4 — manual `--test-switch-s` desyncs the policy and races switch_tiling.** STILL OPEN.
-  The test thread calls `app.switch_tiling()` directly and never updates
-  `policy.tiling_on`, so with `auto_switch` ALSO on the policy's belief goes stale
-  and it can't command the reverse switch. `switch_tiling` also holds no lock, so
-  the test thread and the policy worker can interleave valve/selector set_property
-  calls -> selector can land on a closed-valve branch (stall). When reworking:
-  route ALL switches (manual + policy) through ONE serialized entry point that
-  updates policy.committed() and holds a lock.
++ **#4 — manual `--test-switch-s` desynced the policy and raced switch_tiling.** DONE 2026-07-09.
+  Was: the harness thread called `app.switch_tiling()` directly and never updated
+  `policy.tiling_on`, so with `auto_switch` ALSO on, the policy's belief went stale and
+  it could never command the reverse switch (the rig latches onto the >200 ms tiling
+  branch). And `switch_tiling` held no lock, so two callers could interleave their
+  valve/selector `set_property` calls and leave the selector on a shut-valve branch.
 
-  Progress 2026-07-09: `enable_plus_one()` is deleted, so only TWO unlocked callers
-  remain (the policy worker and the `--test-switch-s` thread), and main() now warns
-  when `--test-switch-s` is combined with `auto_switch`.
+  Fix, as designed and reviewed:
+    * New `tiling_policy.TilingSwitchCoordinator` — the ONE entry point. `request()`
+      is serialized, and updates the policy (`committed()` / `reset_streaks()`) on the
+      way out. `note()` is the streaming-thread hot path and returns a target only when
+      a switch should START, never while one is in flight (so no worker-per-frame).
+    * TWO locks, never nested. `switch_tiling` blocks up to `warmup_timeout_s` (1 s) in
+      `ready.wait()`, so one shared lock would stall the streaming thread ~30 frames per
+      switch — worse than the desync. `GStreamerApp._switch_lock` (RLock) guards only the
+      valve/selector handover; the coordinator's lock guards only policy state and is
+      never held while `switch_fn` runs. Deadlock-free by construction.
+    * `_tiling_active` is initialized and exposed as `GStreamerApp.tiling_active`.
+    * Both drivers — the policy worker and the `--test-switch-s` thread — call
+      `user_data.request_tiling()`. Nothing calls `app.switch_tiling()` directly anymore.
+  Covered by 10 tests in `test_tiling_policy.py`, mutation-checked: reverting the lock,
+  the `committed()` call, or the lock-scope each makes the intended tests fail.
+  `--plus-one` / `enable_plus_one()` were deleted earlier the same day, removing a third
+  unlocked caller.
 
-  Reviewed design (NOT yet implemented — needs sign-off):
-  TWO locks, never nested. `switch_tiling` blocks up to `warmup_timeout_s` (1 s) in
-  `ready.wait()`, so a single shared lock would stall the GStreamer streaming thread
-  (which calls `note_detection()` every frame) for ~30 frames — worse than the desync
-  it fixes.
-    * `GStreamerApp._switch_lock` (RLock) guards ONLY the valve/selector handover;
-      held across the blocking wait. Also initialize `self._tiling_active = False`
-      (today it is assigned in switch_tiling, never initialized, never read).
-    * `user_app_callback_class._policy_lock` guards ONLY policy state; short-held,
-      NEVER held while `switch_fn` runs. `note_detection()` takes it too.
-    * New `user_app_callback_class.request_tiling(to_tiling) -> bool`: the single
-      entry point. Checks `_switch_in_flight` / `policy.tiling_on` under
-      `_policy_lock`, releases it, calls `switch_fn` (which takes `_switch_lock`),
-      then re-takes `_policy_lock` to run `committed()` or `reset_streaks()`.
-    * `_fire_switch` still spawns its daemon thread (the streaming thread must never
-      block) but the thread calls `request_tiling`. The `--test-switch-s` thread calls
-      `request_tiling` too — which is what actually fixes the desync.
-  Deadlock-free by construction: `_policy_lock` is never held while acquiring
-  `_switch_lock`, and `switch_tiling` never reaches back for `_policy_lock`.
-
-  Open question: fold in option (c), the post-switch watchdog (flip back to
-  whole-frame if N callbacks are missed after a switch that initially succeeded and
-  then died), or keep it separate?
+- ! **#4c — post-switch watchdog (still open, the remaining piece of handover robustness).**
+  `switch_tiling` reverts when the incoming branch produces no buffer within the warmup
+  timeout, but nothing recovers from a branch that warms up fine and dies *afterwards*:
+  app_callback stops firing, DET FPS -> 0, the control loop starves. Add a watchdog that
+  flips back to whole-frame if N callbacks are missed after a switch that initially
+  succeeded. Deferred deliberately — it is a new failure-detection mechanism, not part of
+  the serialization fix.
