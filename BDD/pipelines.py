@@ -255,7 +255,7 @@ def INFERENCE_PIPELINE(
 
 
 def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='inference_wrapper',
-                               tiles_x=1, tiles_y=1, tiling_overlap=0.0):
+                               tiles_x=1, tiles_y=1, tiling_overlap=0.0, tile_iou_threshold=0.4):
     """
     Creates a GStreamer pipeline string that wraps an inner pipeline with a cropper and aggregator.
     This allows to keep the original video resolution and color-space (format) of the input frame.
@@ -281,6 +281,8 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
         name (str, optional): The prefix name for the pipeline elements. Defaults to 'inference_wrapper'.
         tiles_x, tiles_y (int): tile grid. 1×1 = whole-frame (default). >1 enables hailotilecropper.
         tiling_overlap (float): fractional tile overlap (0..1) on both axes; 0 = abutting tiles.
+        tile_iou_threshold (float): IoU above which the tile aggregator merges two detections
+            coming from adjacent tiles (seam dedup). Tiled path only.
 
     Returns:
         str: A string representing the GStreamer pipeline for the inference wrapper.
@@ -313,7 +315,8 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
         # stay nested in tile sub-ROIs and `roi.get_objects_typed(HAILO_DETECTION)`
         # in the callback finds NOTHING (silent n=0). flatten lifts them into the
         # frame ROI (in global coords). iou-threshold dedups across tile seams.
-        aggregator = f'hailotileaggregator name={name}_agg flatten-detections=true iou-threshold=0.4 '
+        aggregator = (f'hailotileaggregator name={name}_agg flatten-detections=true '
+                      f'iou-threshold={tile_iou_threshold} ')
         # N tiles flow per frame; hold a frame's worth in a queue so the cropper isn't
         # blocked tile-by-tile waiting on the single shared hailonet. (Only the tiled
         # path gets this queue; whole-frame links straight through — see above.)

@@ -35,7 +35,7 @@ from frame_order import FrameOrderGuard
 from config import Config
 from dataclasses import asdict, replace
 from OverwriteQueue import OverwriteQueue
-from debug_output import debug_output_thread
+from debug_output import debug_output_thread, DEBUG_OUTPUT_STOP
 from video_sink_gstreamer import RecorderSink
 from video_sink_multi import MultiSink
 from opencv_show_image_sink import OpenCVShowImageSink
@@ -110,6 +110,12 @@ class user_app_callback_class(app_callback_class):
                 switched = bool(self.request_switch(to_tiling))
                 if switched:
                     self._policy.committed(to_tiling)   # adopt new branch + reset streaks
+            except Exception:
+                # Never let this daemon thread die with a bare stderr traceback: the
+                # log is the only forensic record of a run. Treat it as a failed switch
+                # (below) so the policy backs off and the working branch keeps running.
+                logger.exception("tiling switch to %s failed",
+                                 "TILING" if to_tiling else "WHOLE-FRAME")
             finally:
                 if not switched:
                     # aborted/failed: keep the current branch, drop the streak so the
@@ -349,9 +355,11 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     # Detection-state whole<->tile policy (no-op unless tiling.auto_switch is on).
     user_data.note_detection(_best_conf)
 
-    # Throttled detection summary — confirms the model is producing valid
-    # detections from the current pixel format (e.g. NV12 fed correctly).
-    if frame_id % 30 == 0:
+    # Throttled detection summary — confirms the model is producing valid detections
+    # from the current pixel format (e.g. NV12 fed correctly). Throttle on the callback
+    # counter, NOT frame_id: normalized_frame_id falls back to time.monotonic_ns() when
+    # no frame-id meta is present, which makes `frame_id % 30` fire pseudo-randomly.
+    if user_data.get_count() % 30 == 0:
         logger.info("!!! DETS frame=#%d n=%d maxconf=%.3f", frame_id, len(raw_dets), _best_conf)
 
     # logger.debug(
@@ -422,7 +430,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, tiles=None, tiling_overlap=None, switchable_tiling=False, preview=False):
+    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, tiles=None, tiling_overlap=None, tile_iou_threshold=None, switchable_tiling=False, preview=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
@@ -435,7 +443,8 @@ class App(GStreamerDetectionApp):
         self.preview = bool(preview)
         self.camera_switcher = camera_switcher
         super().__init__(app_callback, user_data, inference=config.inference, camera_settings=config.camera, parser=parser,
-                         video_format=video_format, tiles=tiles, tiling_overlap=tiling_overlap, switchable_tiling=switchable_tiling)
+                         video_format=video_format, tiles=tiles, tiling_overlap=tiling_overlap,
+                         tile_iou_threshold=tile_iou_threshold, switchable_tiling=switchable_tiling)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -458,7 +467,7 @@ class App(GStreamerDetectionApp):
         # slideshow. waylandsink renders into a compositor surface that labwc composites
         # and wayvnc streams, giving a smooth remote preview. Fall back to autovideosink
         # off Wayland (X11 / local monitor).
-        preview_sink = 'waylandsink' if os.environ.get('WAYLAND_DISPLAY') else 'autovideosink'
+        preview_sink = preview_sink_name()
         preview_branch = (
             'queue name=preview_queue leaky=downstream max-size-buffers=2 '
             '    max-size-bytes=0 max-size-time=0 '
@@ -517,23 +526,43 @@ class App(GStreamerDetectionApp):
         super().run()
 
 
+def preview_sink_name() -> str:
+    """GStreamer sink element for the --preview window. See get_output_pipeline_string
+    for why Wayland must not get autovideosink. Shared with main() so the startup log
+    names the sink that will actually be built."""
+    return 'waylandsink' if os.environ.get('WAYLAND_DISPLAY') else 'autovideosink'
+
+
 def detect_hef_video_format(hef_path, default='RGB'):
     """Read the model's input format from the HEF and map it to a capture video
     format: 'NV12' when the input vstream order is NV12, else 'RGB'. The capture
     format MUST match the model input — the whole-buffer hailocropper requires its
     input format to equal the hailonet input format, so deriving it from the model
     prevents the "Cropper Input and output caps have different formats" crash and
-    the silent format mismatches. Falls back to `default` if the HEF can't be read
-    (e.g. hailo_platform unavailable on a dev host)."""
+    the silent format mismatches.
+
+    Only a MISSING hailo_platform (dev host, no Hailo SDK) falls back to `default`.
+    On a box that HAS the SDK, an unreadable HEF is fatal: guessing the format would
+    crash the cropper mid-run. This runs in main() long before the control thread
+    starts and before anything is armed, so exiting here is safe."""
     try:
         from hailo_platform import HEF
-        info = HEF(str(hef_path)).get_input_vstream_infos()[0]
-        order = getattr(info.format.order, 'name', str(info.format.order)).upper()
-        return 'NV12' if 'NV12' in order else 'RGB'
-    except Exception as e:
-        logger.warning("Could not read HEF input format from %s (%s); defaulting to %s",
-                       hef_path, e, default)
+    except ImportError:
+        logger.warning("hailo_platform unavailable (dev host?); assuming %s input for %s",
+                       default, hef_path)
         return default
+
+    try:
+        info = HEF(str(hef_path)).get_input_vstream_infos()[0]
+    except Exception as e:
+        raise SystemExit(
+            f"FATAL: cannot read the input format of HEF {str(hef_path)!r}: {e}\n"
+            f"The capture format must match the model input; guessing it would crash the "
+            f"hailocropper once frames flow. Fix --hef-path / config.inference.hef_model_path."
+        ) from e
+
+    order = getattr(info.format.order, 'name', str(info.format.order)).upper()
+    return 'NV12' if 'NV12' in order else 'RGB'
 
 
 def _pop_flag(argv: list[str], flag: str) -> bool:
@@ -546,18 +575,48 @@ def _pop_flag(argv: list[str], flag: str) -> bool:
     return False
 
 
-def _pop_value(argv: list[str], flag: str) -> str | None:
-    """Remove ``<flag> <value>`` from ``argv`` in place and return the value, or
-    None if the flag is absent. Exits with a clear message (not an IndexError) if
-    the flag is given with no value following it."""
-    if flag not in argv:
-        return None
-    i = argv.index(flag)
-    if i + 1 >= len(argv):
-        raise SystemExit(f"{flag} requires a value (e.g. {flag} 2x2)")
-    value = argv[i + 1]
-    del argv[i:i + 2]
+def _pop_value(argv: list[str], flag: str, example: str = 'VALUE') -> str | None:
+    """Remove ``<flag> <value>`` or ``<flag>=<value>`` from ``argv`` in place and
+    return the value, or None if the flag is absent. Exits with a clear message (not
+    an IndexError) if the flag is given with no value following it.
+
+    Both spellings are accepted because argparse accepts both, and a flag popped here
+    never reaches argparse — so ``--tiles=2x2`` would otherwise sail past this function
+    and die downstream as an opaque "unrecognized arguments"."""
+    for i, tok in enumerate(argv):
+        if tok == flag:
+            if i + 1 >= len(argv):
+                raise SystemExit(f"{flag} requires a value (e.g. {flag} {example})")
+            value = argv[i + 1]
+            del argv[i:i + 2]
+            return value
+        if tok.startswith(flag + "="):
+            value = tok[len(flag) + 1:]
+            if not value:
+                raise SystemExit(f"{flag} requires a value (e.g. {flag}={example})")
+            del argv[i]
+            return value
+    return None
+
+
+def _pop_deprecated_value(argv: list[str], old_flag: str, new_flag: str,
+                          removal_date: str, example: str = 'VALUE') -> str | None:
+    """Pop a renamed flag by its OLD name, warning loudly. Kept so scripts, runbooks
+    and skills pinned to an older checkout keep working through the transition."""
+    value = _pop_value(argv, old_flag, example)
+    if value is not None:
+        logger.warning("!!! DEPRECATED: %s is now %s; the old name stops working after %s",
+                       old_flag, new_flag, removal_date)
     return value
+
+
+def _parse_float(spec: str, flag: str) -> float:
+    """Parse a float CLI value, exiting with a clear message (not a raw ValueError
+    traceback) — matching how _parse_grid reports malformed input."""
+    try:
+        return float(spec)
+    except ValueError:
+        raise SystemExit(f"{flag} expects a number of seconds, got {spec!r}") from None
 
 
 def _peek_value(argv: list[str], flag: str) -> str | None:
@@ -625,34 +684,43 @@ def main():
     # These flags are parsed off sys.argv directly (before the argparser) because
     # they gate App() construction below. NxM grids go through _parse_grid, which
     # validates them; a missing value or malformed grid exits with a clear message.
+    # Test/verification-harness flags are prefixed --test-* (see --test-camera-switch-s).
 
     # --no-record: force RAW recording off regardless of config (frees ~1 CPU core
     # for inference/tiling).
     no_record_flag = _pop_flag(sys.argv, "--no-record")
 
-    # --preview: also show the incoming camera video in a live window
-    # (autovideosink). Opt-in because it needs a display; on a headless bench run
-    # without it (see the "app.py --preview (DISPLAY=:0)" launch config).
+    # --preview: also show the incoming camera video in a live window. Opt-in because
+    # it needs a display; on a headless bench run without it (see the
+    # "app.py --preview (DISPLAY=:0)" launch config).
     preview_flag = _pop_flag(sys.argv, "--preview")
 
     # --tiles NxM: static inference tile grid (e.g. --tiles 2x2; 1x1 = whole-frame).
     # None => use config.tiling.
-    tiles_spec = _pop_value(sys.argv, "--tiles")
+    tiles_spec = _pop_value(sys.argv, "--tiles", example="2x2")
     tiles_override = _parse_grid(tiles_spec) if tiles_spec else None
 
     # --switch-tiles NxM: runtime-switchable tiling with an NxM tile branch (whole-
     # frame active at startup, hot-switchable). Forces switchable on.
-    switch_tiles_spec = _pop_value(sys.argv, "--switch-tiles")
+    switch_tiles_spec = _pop_value(sys.argv, "--switch-tiles", example="2x1")
     switch_tiles_override = _parse_grid(switch_tiles_spec) if switch_tiles_spec else None
 
-    # --switch-test-s N: manual handover validation — toggle whole-frame<->tiling
-    # every N seconds (only meaningful with switchable tiling enabled).
-    switch_test_s_spec = _pop_value(sys.argv, "--switch-test-s")
-    switch_test_s = float(switch_test_s_spec) if switch_test_s_spec else None
+    if tiles_override is not None and switch_tiles_override is not None:
+        raise SystemExit("--tiles and --switch-tiles are mutually exclusive: --tiles sets a "
+                         "STATIC grid, --switch-tiles builds a hot-switchable tile branch. "
+                         "Pass only one.")
 
-    # --plus-one: benchmark the "NxM + 1" load — open both branches so the tile grid
-    # AND a whole frame are inferred each frame (needs switchable tiling).
-    plus_one = _pop_flag(sys.argv, "--plus-one")
+    # --test-switch-s N: manual handover validation — toggle whole-frame<->tiling every
+    # N seconds. Harness only; needs switchable tiling. Old name --switch-test-s still
+    # works (deprecated) so runbooks/skills on older checkouts keep running.
+    _TEST_SWITCH_S_REMOVAL = "2026-09-30"
+    switch_test_s_spec = _pop_value(sys.argv, "--test-switch-s", example="10")
+    if switch_test_s_spec is None:
+        switch_test_s_spec = _pop_deprecated_value(
+            sys.argv, "--switch-test-s", "--test-switch-s", _TEST_SWITCH_S_REMOVAL, example="10")
+    switch_test_s = _parse_float(switch_test_s_spec, "--test-switch-s") if switch_test_s_spec else None
+    if switch_test_s is not None and switch_test_s <= 0:
+        raise SystemExit("--test-switch-s expects a positive number of seconds")
 
     if DEBUG:
         logger.error('')
@@ -710,7 +778,15 @@ def main():
     # When on, the tile-branch geometry is the --switch-tiles value (or config
     # tiles_x/y), and the pipeline builds whole-frame + tile branches hot-switchable
     # at runtime (whole-frame active at startup).
-    switchable = switch_tiles_override is not None or config.tiling.switchable or config.tiling.auto_switch or plus_one
+    switchable = switch_tiles_override is not None or config.tiling.switchable or config.tiling.auto_switch
+    if switch_test_s and not switchable:
+        raise SystemExit("--test-switch-s toggles the whole-frame<->tiling handover, which only "
+                         "exists with switchable tiling. Pass --switch-tiles NxM, or set "
+                         "tiling.switchable / tiling.auto_switch in the config.")
+    if switch_test_s and config.tiling.auto_switch:
+        logger.warning("!!! --test-switch-s together with tiling.auto_switch: the harness and the "
+                       "detection policy will both drive the branch and fight each other. "
+                       "Both switches are serialized, but the run is not representative.")
     if switchable:
         tiles = switch_tiles_override if switch_tiles_override is not None \
             else (config.tiling.tiles_x, config.tiling.tiles_y)
@@ -735,7 +811,12 @@ def main():
     # hailonet input format, so deriving it from the model is the only correct
     # choice (a mismatch crashes the cropper). CLI --hef-path wins over config;
     # accept both `--hef-path X` and `--hef-path=X` (argparse consumes it later too).
+    # config.inference.hef_model_path is an ExistingFile (validated on load); a CLI
+    # override bypasses that check, so validate it here rather than let it surface as
+    # an opaque HEF-read failure.
     cli_hef = _peek_value(sys.argv, '--hef-path')
+    if cli_hef is not None and not Path(cli_hef).is_file():
+        raise SystemExit(f"--hef-path {cli_hef!r} does not exist (or is not a file)")
     effective_hef = cli_hef if cli_hef is not None else str(config.inference.hef_model_path)
     video_format = detect_hef_video_format(effective_hef)
     if video_format != config.camera.video_format:
@@ -801,10 +882,12 @@ def main():
         video_format=video_format,
         tiles=tiles,
         tiling_overlap=config.tiling.overlap,
+        tile_iou_threshold=config.tiling.tile_iou_threshold,
         switchable_tiling=switchable,
         preview=preview_flag)
     if preview_flag:
-        logger.info("!!! PREVIEW window enabled (autovideosink); needs a display (DISPLAY set)")
+        logger.info("!!! PREVIEW window enabled (%s); needs a display (DISPLAY/WAYLAND_DISPLAY set)",
+                    preview_sink_name())
     if camera_switcher is not None:
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
@@ -845,7 +928,7 @@ def main():
     # so the handover (valve + input-selector) can be confirmed glitch-free on the
     # log (BRANCH SWITCH lines, DETS continuity, StageB stepping). Only meaningful
     # with switchable tiling; the automatic policy will call the same switch_tiling().
-    if switch_test_s and switchable:
+    if switch_test_s:
         def _tiling_switch_test():
             to_tiling = True
             while True:
@@ -853,15 +936,7 @@ def main():
                 app.switch_tiling(to_tiling)
                 to_tiling = not to_tiling
         threading.Thread(target=_tiling_switch_test, name="tiling-switch-test", daemon=True).start()
-        logger.info("!!! tiling-switch-test: toggling whole<->tiling every %.1fs", switch_test_s)
-
-    # --plus-one benchmark: once the pipeline is warm, open both branches so the
-    # device runs NxM + 1 inferences/frame; the measured path stays the tile branch.
-    if plus_one and switchable:
-        def _enable_plus_one():
-            time.sleep(6)
-            app.enable_plus_one()
-        threading.Thread(target=_enable_plus_one, name="plus-one-enable", daemon=True).start()
+        logger.info("!!! --test-switch-s: toggling whole<->tiling every %.1fs", switch_test_s)
 
     logger.info("!!! Config: %s", config)
     if DEBUG:
@@ -967,6 +1042,11 @@ def main():
             name="DEBUG"
         )
         output_thread.start()
+        # The thread is non-daemon and blocks in output_queue.get(); without a sentinel
+        # the interpreter hangs joining it at exit and RecorderSink's splitmuxsink never
+        # finalizes -> truncated debug_*.mkv. A non-dict item raises inside the loop,
+        # which breaks it and runs `finally: sink.stop()`.
+        app.add_shutdown_callback(lambda: output_queue.put(DEBUG_OUTPUT_STOP))
 
     # if DEBUG:
     #     for i in range(3):
@@ -998,6 +1078,16 @@ def main():
     detections_queue.put(STOP)
     if action_thread is not None:
         action_thread.join()
+
+    # Drain the overlay recorder last: the control thread is done, so nothing can
+    # overwrite the sentinel in the bounded OverwriteQueue. Bounded join — a stuck
+    # encoder must not wedge the exit, but say so instead of hanging silently.
+    if output_thread is not None:
+        output_queue.put(DEBUG_OUTPUT_STOP)
+        output_thread.join(timeout=5)
+        if output_thread.is_alive():
+            logger.warning("debug output thread still running after 5s; "
+                           "the last debug_*.mkv segment may be truncated")
 
     # Re-raise a control-thread crash captured by the excepthook so the
     # process exits non-zero (caller scripts / systemd / CI must be able

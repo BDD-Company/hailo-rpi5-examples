@@ -193,6 +193,12 @@ class GStreamerApp:
         # Fractional tile overlap (0..1) for the hailotilecropper; 0 = abutting tiles.
         # Set from config.tiling.overlap by the App subclass; only the tiled path uses it.
         self.tiling_overlap = 0.0
+        # Seam-dedup IoU for the hailotileaggregator; tiled path only.
+        self.tile_iou_threshold = 0.4
+        # Queue at the head of the ACTIVE inference branch — where the detection-start
+        # stamp goes. Branch names differ between the single-branch and switchable
+        # pipelines, so get_pipeline_string() sets this to whichever it built.
+        self.detection_start_probe_element = 'inference_wrapper_input_q'
         self.hef_path = None
         self.app_callback = None
 
@@ -418,31 +424,6 @@ class GStreamerApp:
         logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
         return True
 
-    def enable_plus_one(self):
-        """Benchmark aid (switchable pipeline only): open BOTH valves so the tile
-        branch AND the whole-frame branch feed the device every frame — i.e. the
-        "NxM + 1" load (NxM tiles + 1 whole frame = NxM+1 inferences/frame, two
-        net-groups round-robin). Keeps the input-selector on the tile branch so the
-        measured capture->detection path is the tiling path under whole-frame
-        contention (matches the bench 'NxM+1' latency)."""
-        sel = self.pipeline.get_by_name("branch_selector")
-        v_tile = self.pipeline.get_by_name("valve_tile")
-        if sel is None or v_tile is None:
-            logger.warning("enable_plus_one: switchable-tiling pipeline not present; ignoring")
-            return
-        v_tile.set_property("drop", False)   # tile branch now also feeds (whole stays open)
-        tile_pad = sel.get_static_pad("sink_1")
-        ready = threading.Event()
-        def _first(pad, info, _u):
-            ready.set()
-            return Gst.PadProbeReturn.REMOVE
-        pid = tile_pad.add_probe(Gst.PadProbeType.BUFFER, _first, None)
-        if not ready.wait(3.0):
-            try: tile_pad.remove_probe(pid)
-            except Exception: pass
-        sel.set_property("active-pad", tile_pad)
-        logger.warning("!!! PLUS-ONE active: whole-frame + tiles both feeding device (NxM+1)")
-
     def _log_pipeline_health(self):
         """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)
         and current-level-buffers for every named GstQueue. If the deepest probe (last
@@ -611,8 +592,10 @@ class GStreamerApp:
 
         if self.source_type == 'libcamera':
             # Stamp detection-start timestamp on buffers entering the inference wrapper.
-            # libcamerasrc path has nobody to attach this upstream; picamera2 path already does.
-            self._install_detection_start_probe()
+            # libcamerasrc path has nobody to attach this upstream; picamera2 path already
+            # does, which is why production (-i rpi) never installs this. The element name
+            # depends on which pipeline shape was built (switchable tiling renames it).
+            self._install_detection_start_probe(self.detection_start_probe_element)
 
         # Periodic pipeline health snapshot (buffer counts, queue levels, stall detection).
         # GLib.timeout_add_seconds(2, self._log_pipeline_health)
@@ -732,6 +715,10 @@ _pts_baseline_lock = threading.Lock()
 _pts_baseline_ns : int | None = None
 _pts_last_ns : int = -1
 
+# A backward step in the source clock larger than this is a DIFFERENT clock, not jitter
+# (inter-frame wobble is milliseconds). Anything smaller is absorbed by the +1ns clamp.
+_PTS_BACKWARD_REBASE_NS = 1_000_000_000  # 1 s
+
 
 def _shared_pts_ns(source_ns : int) -> int:
     """Return an EVEN, strictly-monotonic, shared-across-all-cameras PTS in ns.
@@ -751,6 +738,17 @@ def _shared_pts_ns(source_ns : int) -> int:
             _pts_baseline_ns = source_ns
         pts = source_ns - _pts_baseline_ns
         if pts <= _pts_last_ns:
+            if (_pts_last_ns - pts) > _PTS_BACKWARD_REBASE_NS:
+                # A SUSTAINED backward shift means the source switched clock domain (a
+                # camera whose SensorTimestamp is not CLOCK_BOOTTIME, or the push-time
+                # fallback below). Clamping through it would pin PTS at +1ns/frame
+                # forever: splitmuxsink's max-size-time would never fire, so one
+                # RAW_*.mkv segment would grow until the SD card filled, and the muxed
+                # timestamps would be meaningless. Re-baseline onto the new clock —
+                # a one-frame cadence glitch beats an unbounded file.
+                logger.warning("PTS source clock jumped back %.3fs; re-baselining "
+                               "(one frame of cadence lost)", (_pts_last_ns - pts) / 1e9)
+                _pts_baseline_ns = source_ns - (_pts_last_ns + 1)
             pts = _pts_last_ns + 1
         _pts_last_ns = pts
         return pts
@@ -1278,7 +1276,8 @@ def display_user_data_frame(user_data: app_callback_class):
 
 class GStreamerDetectionApp(GStreamerApp):
     def __init__(self, app_callback, user_data, inference : Config.Inference, camera_settings : Config.Camera, parser=None,
-                 video_format=None, tiles=None, tiling_overlap=None, switchable_tiling=False):
+                 video_format=None, tiles=None, tiling_overlap=None, tile_iou_threshold=None,
+                 switchable_tiling=False):
         if parser == None:
             parser = get_default_parser()
 
@@ -1308,6 +1307,9 @@ class GStreamerDetectionApp(GStreamerApp):
         # tiled path (ignored for whole-frame). From config.tiling.overlap.
         if tiling_overlap is not None:
             self.tiling_overlap = float(tiling_overlap)
+        # Seam dedup IoU for the hailotileaggregator; tiled path only.
+        if tile_iou_threshold is not None:
+            self.tile_iou_threshold = float(tile_iou_threshold)
         # Switchable tiling: build whole-frame + tile branches behind valves +
         # input-selector, hot-switchable at runtime (whole-frame active at start).
         self.switchable_tiling = bool(switchable_tiling)
@@ -1391,12 +1393,8 @@ class GStreamerDetectionApp(GStreamerApp):
                 additional_params=self.thresholds_str + (' scheduling-algorithm=1 ' if share_device else ''))
             return INFERENCE_PIPELINE_WRAPPER(inner, name=f'{branch_name}_wrapper',
                                               tiles_x=tx, tiles_y=ty,
-                                              tiling_overlap=self.tiling_overlap)
-
-        # Single-branch path keeps the historic 'inference'/'inference_wrapper'
-        # element names (latency probes + health logs reference them).
-        detection_pipeline_wrapper = _inference_branch('inference', self.tiles_x, self.tiles_y,
-                                                       share_device=False)
+                                              tiling_overlap=self.tiling_overlap,
+                                              tile_iou_threshold=self.tile_iou_threshold)
 
         tracker_pipeline = ''
         if False:
@@ -1456,17 +1454,34 @@ class GStreamerDetectionApp(GStreamerApp):
                 f'{tile_branch} ! branch_selector.sink_1 '
                 f'input-selector name=branch_selector sync-streams=false ! '
             )
+            # Whole-frame is the branch active at startup, so that is where a
+            # detection-start stamp belongs (libcamera source path only — see
+            # _install_detection_start_probe).
+            self.detection_start_probe_element = 'whole_wrapper_input_q'
         else:
+            # Single-branch path keeps the historic 'inference'/'inference_wrapper'
+            # element names (latency probes + health logs reference them).
+            detection_pipeline_wrapper = _inference_branch('inference', self.tiles_x, self.tiles_y,
+                                                           share_device=False)
             detection_section = f'{detection_pipeline_wrapper} ! '
+            self.detection_start_probe_element = 'inference_wrapper_input_q'
 
         # Tee the RAW source BEFORE inference. The recording taps the source directly;
         # the detection/control branch runs inference->tracker->callback separately.
-        # Why: the hailocropper/hailoaggregator reorders the bypass IMAGE stream it
-        # emits (recorded frames "jump" back and forth ~17-29%), even though the
-        # detection METADATA the callback/control path reads stays in strict order
-        # (verified: callback frame_id + ball position are monotonic; only the recorded
-        # image jumps). Recording the pre-inference source keeps the video in capture
-        # order without touching the control path or detection.
+        #
+        # Why: tapping AFTER the inference wrapper produced recorded frames that stepped
+        # backward (~17% by the ball-interleave metric) while the callback's frame_id and
+        # detections stayed strictly monotonic. Recording the pre-inference source removed
+        # it. The exact mechanism is NOT settled — the commit that made this change
+        # (3bc99a6) blamed "the aggregator reorders the bypass image stream", but that
+        # cannot be literally true: back then one `tee` fed both branches, and a tee fans
+        # each buffer to every src pad synchronously and in order, so the callback saw the
+        # same buffers in the same sequence and FrameOrderGuard never fired. The leading
+        # theory is pooled bypass memory being reused underneath the (then 120-deep)
+        # recording queue, which the callback never saw because get_numpy_from_buffer
+        # copies synchronously inside the pad probe. Until that is confirmed, do not use
+        # this comment to reason about whether the control path's image is trustworthy —
+        # see the open investigation before touching Detections.frame or optical_refinement.
         pipeline_string = (
             f'{source_pipeline} ! '
             f'tee name=output_tee '

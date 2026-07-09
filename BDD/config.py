@@ -161,8 +161,13 @@ class Config:
         # small-object recall at the cost of latency (~N×15 ms on Hailo-8).
         tiles_x: Annotated[int, Range(min=1)] = 1
         tiles_y: Annotated[int, Range(min=1)] = 1
-        # Fractional tile overlap on both axes (0..1); 0 = abutting tiles.
-        overlap: Annotated[float, Range(0.0, 1.0)] = 0.0
+        # Fractional tile overlap on both axes; 0 = abutting tiles. Strictly < 1:
+        # at 1.0 every tile would cover the whole frame (degenerate grid).
+        overlap: Annotated[float, Range(0.0, 1.0, max_inclusive=False)] = 0.0
+        # IoU above which the hailotileaggregator merges two detections coming from
+        # different tiles — i.e. how aggressively objects straddling a tile seam get
+        # deduped. Only used on the tiled path. Lower = merge more eagerly.
+        tile_iou_threshold: Annotated[float, Range(0.0, 1.0)] = 0.4
         # Runtime-switchable tiling: build BOTH a whole-frame branch and a
         # tiles_x×tiles_y branch behind valves + an input-selector, and hot-switch
         # between them at runtime (whole-frame active at startup). Lets a policy

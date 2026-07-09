@@ -32,15 +32,18 @@ inference:
 # Inference tiling. Whole-frame (1×1) is the default and the lowest-latency path;
 # tiling splits each frame into a tiles_x×tiles_y grid (one inference per tile) for
 # better small-object recall at distance, at the cost of latency (~N×15 ms on
-# Hailo-8 — only ~2 tiles stay under the ~200 ms control budget). CLI --tiles /
-# --switch-tiles / --merge-tiles override these. Omit the whole block for defaults.
+# Hailo-8 — only ~2 tiles stay under the ~200 ms control budget). CLI --tiles and
+# --switch-tiles override these (mutually exclusive). Omit the whole block for defaults.
 tiling:
   # Static tile grid. 1×1 = whole-frame; >1 enables the hailotilecropper.
   tiles_x: 1
   tiles_y: 1
-  # Fractional tile overlap on both axes (0..1); 0 = abutting tiles. >0 recovers
-  # objects straddling a tile seam. Only applied when tiling is active.
+  # Fractional tile overlap on both axes (0 <= overlap < 1); 0 = abutting tiles. >0
+  # recovers objects straddling a tile seam. Only applied when tiling is active.
   overlap: 0.0
+  # IoU above which the tile aggregator merges two detections from adjacent tiles.
+  # Lower = dedup seam-straddling objects more eagerly. Tiled path only.
+  tile_iou_threshold: 0.4
 
   # Runtime-switchable tiling: build BOTH a whole-frame branch and a tiles_x×tiles_y
   # branch behind valves + an input-selector, hot-switchable at runtime (whole-frame

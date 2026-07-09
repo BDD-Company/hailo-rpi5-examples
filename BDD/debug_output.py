@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from helpers import Detections, Detection, XY, MoveCommand, Rect
-from frame_utils import to_rgb
+from frame_utils import Frame, to_rgb
 from interfaces import FrameSinkInterface
 
 import logging
@@ -424,24 +424,39 @@ def annotate_frame_with_detection_info(detection_dict) -> np.ndarray:
     return frame
 
 
+# Put this on the output queue to stop debug_output_thread cleanly. Without it the
+# thread blocks in frame_queue.get() forever: it is non-daemon, so the interpreter
+# hangs joining it at exit and RecorderSink never finalizes the last debug_*.mkv
+# segment. An explicit sentinel keeps that exit quiet — any other non-dict item would
+# also break the loop, but only by raising a traceback into the log.
+DEBUG_OUTPUT_STOP = object()
+
+
 def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
 
     frame = None
+    sink_started = False
     try:
         # Get the first frame and figure out image dimensions
         detection_dict = None
         while frame is None:
             detection_dict = frame_queue.get()
-            frame : np.ndarray = detection_dict['detections'].frame
+            if detection_dict is DEBUG_OUTPUT_STOP:
+                return
+            frame : Frame = detection_dict['detections'].frame
         frame_h, frame_w, _ = frame.shape
         logger.debug("Got first frame of size W:%u, H:%u", frame_w, frame_h)
 
         sink.start((frame_w, frame_h))
+        sink_started = True
 
         while True:
             try:
                 if detection_dict is None:
                     detection_dict = frame_queue.get()
+                if detection_dict is DEBUG_OUTPUT_STOP:
+                    logger.debug("debug output thread: stop requested")
+                    break
                 annotated_frame = annotate_frame_with_detection_info(detection_dict)
 
                 if annotated_frame is not None:
@@ -457,7 +472,10 @@ def debug_output_thread(frame_queue : Queue, sink : FrameSinkInterface = None):
     except Exception as e:
         logger.exception("!!! frame: %s", frame, exc_info=True, stack_info=True)
     finally:
-        sink.stop()
+        # Only stop what we started: RecorderSink.stop() -> _FrameQueuePusher.stop()
+        # joins a thread that start() never started, which raises RuntimeError.
+        if sink_started:
+            sink.stop()
 
 
 if __name__ == '__main__':

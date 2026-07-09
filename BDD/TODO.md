@@ -17,8 +17,13 @@ Tasks that are already done are marked as `+`.
 - !! UI for launches
 - !! figure out video capture without cropping (i.e. capture full frame)
 - ! right now probes are commented out, add CLI argument that enables them (default OFF)
-- ! rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — PR#9 review #3 handover-abort DONE (switch_tiling now reverts to the working branch on a dead-branch timeout); still open: #4 (--switch-test-s desyncs the policy + races the unlocked switch_tiling) and the optional post-switch watchdog.
+- ! rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — PR#9 review #3 handover-abort DONE (switch_tiling now reverts to the working branch on a dead-branch timeout); still open: #4 (--test-switch-s desyncs the policy + races the unlocked switch_tiling) and the optional post-switch watchdog. `--plus-one` / `enable_plus_one()` are GONE (2026-07-09), which removed one of the three unlocked switch_tiling callers.
+- ! CONTROL-PATH FRAME TRUST (robustness review 2026-07, item #1, deferred): is `Detections.frame` — the image `OpticalObjectInfo` segments in drone_controller.py — stale w.r.t. its own detections? Commit 3bc99a6's stated root cause ("the aggregator reorders the bypass image stream while the metadata stays in order") cannot be literally true: back then ONE tee fed both the recorder and the callback, and a tee fans buffers to all src pads synchronously and in order. Leading theory is pooled bypass memory recycled under the then-120-deep recording queue, which the callback never saw because get_numpy_from_buffer copies synchronously inside the pad probe — that would mean the control path was always fine. Until settled, `optical_refinement` (ON by default) is on unverified pixels. Step 0 costs nothing: watch an existing `_DEBUG/debug_*.mkv` and see whether the bbox tracks the ball or lags it, and grep a run log for `Dropping out-of-order/duplicate frame`. Full context + the decisive experiment: memory `handoff-aggregator-bypass-image`.
 - rotate camera 90 degrees (to maximize lead without leading visual)
+- deprecated CLI alias `--switch-test-s` (renamed to `--test-switch-s` on 2026-07-09): DELETE the alias and `_pop_deprecated_value()` after **2026-09-30**. Kept so runbooks/skills pinned to older checkouts keep running. Test/verification-harness flags are `--test-*`; run-mode flags (`--DEBUG`, `--no-record`, `--preview`, `--tiles`, `--switch-tiles`, `--vision-only`) are not.
+- NV12 capture assumes `stride == width` (low priority — unreachable on the current rig). `picamera_thread` takes the NV12 path via `request.make_buffer("main")`, which returns the raw ISP buffer INCLUDING row padding; picamera2 aligns stride (typically 32/64 B). At imx477 @ 1280 wide the stride IS 1280, so it is correct today, and we now only use imx477. Any width that is not stride-aligned (e.g. an imx708 1296-wide mode) would push padded rows into an appsrc declaring `width=W` -> sheared image and `len(frame_bytes) != W*H*3/2`. Fix when a new sensor/mode lands: read `config['main']['stride']` and either assert equality at startup (fail fast, it is pre-launch) or de-pad. The comment above the `make_buffer` call still describes `make_array` and is wrong.
+- `platform_controller.py` is STALE — mark for removal. It reads the same `Detections` queue as `drone_controller` but never got the `FrameOrderGuard` defense-in-depth added in 2b0d457, and line ~298 binds `frame` and never uses it (a trap now that `.frame` is a `Frame`, not an ndarray). Do not add features to it; delete once nothing imports `platform_controlling_thread`.
+- `test_OverwriteQueue.py::test_fifo_when_not_overwritten` fails in the FULL suite and passes in isolation — pre-existing on `origin/main` (verified 2026-07-09), not a regression. It asserts strict FIFO with `maxsize=128` while a producer races a consumer; leaked daemon threads from earlier tests starve the consumer, the deque overwrites the oldest, and `len(out) == N` fails (~8700-9100 of 10000). Either bound the producer (semaphore) or assert "no reorder among what survived" instead of "nothing dropped".
 - consolidate the near-duplicate bench configs config.test-single-imx477.yaml / config.test-single-imx477-nv12.yaml (PR#9 review #8, low priority): they differ only by `video_format`, which main() now overrides from the model input via detect_hef_video_format(), so the two are functionally identical when pointed at the same HEF. Parametrize or drop one; also propagate new keys like `record_videos` into the remaining test config(s).
 
 ## Experiments
@@ -61,12 +66,39 @@ deferred, not patched inline):
   whole-frame if N callbacks are missed AFTER a switch that initially succeeded but
   then the branch dies.
 
-- **#4 — manual `--switch-test-s` desyncs the policy and races switch_tiling.**
+- **#4 — manual `--test-switch-s` desyncs the policy and races switch_tiling.** STILL OPEN.
   The test thread calls `app.switch_tiling()` directly and never updates
   `policy.tiling_on`, so with `auto_switch` ALSO on the policy's belief goes stale
   and it can't command the reverse switch. `switch_tiling` also holds no lock, so
   the test thread and the policy worker can interleave valve/selector set_property
   calls -> selector can land on a closed-valve branch (stall). When reworking:
   route ALL switches (manual + policy) through ONE serialized entry point that
-  updates policy.committed() and holds a lock; or simply forbid `--switch-test-s`
-  together with `auto_switch`.
+  updates policy.committed() and holds a lock.
+
+  Progress 2026-07-09: `enable_plus_one()` is deleted, so only TWO unlocked callers
+  remain (the policy worker and the `--test-switch-s` thread), and main() now warns
+  when `--test-switch-s` is combined with `auto_switch`.
+
+  Reviewed design (NOT yet implemented — needs sign-off):
+  TWO locks, never nested. `switch_tiling` blocks up to `warmup_timeout_s` (1 s) in
+  `ready.wait()`, so a single shared lock would stall the GStreamer streaming thread
+  (which calls `note_detection()` every frame) for ~30 frames — worse than the desync
+  it fixes.
+    * `GStreamerApp._switch_lock` (RLock) guards ONLY the valve/selector handover;
+      held across the blocking wait. Also initialize `self._tiling_active = False`
+      (today it is assigned in switch_tiling, never initialized, never read).
+    * `user_app_callback_class._policy_lock` guards ONLY policy state; short-held,
+      NEVER held while `switch_fn` runs. `note_detection()` takes it too.
+    * New `user_app_callback_class.request_tiling(to_tiling) -> bool`: the single
+      entry point. Checks `_switch_in_flight` / `policy.tiling_on` under
+      `_policy_lock`, releases it, calls `switch_fn` (which takes `_switch_lock`),
+      then re-takes `_policy_lock` to run `committed()` or `reset_streaks()`.
+    * `_fire_switch` still spawns its daemon thread (the streaming thread must never
+      block) but the thread calls `request_tiling`. The `--test-switch-s` thread calls
+      `request_tiling` too — which is what actually fixes the desync.
+  Deadlock-free by construction: `_policy_lock` is never held while acquiring
+  `_switch_lock`, and `switch_tiling` never reaches back for `_policy_lock`.
+
+  Open question: fold in option (c), the post-switch watchdog (flip back to
+  whole-frame if N callbacks are missed after a switch that initially succeeded and
+  then died), or keep it separate?

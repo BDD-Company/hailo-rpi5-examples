@@ -105,6 +105,10 @@ class TestConfig:
         size_x:   Annotated[int, Range(min=1)] = 1
         size_y:   Annotated[int, Range(min=1)] = 1
         fraction: Annotated[float, Range(0.0, 1.0)] = 0.0
+        # Exclusive upper bound on a plain scalar (mirrors Config.Tiling.overlap,
+        # where 1.0 would collapse every tile onto the whole frame). The XY field
+        # `Item.angle` covers exclusive-MIN; this covers exclusive-MAX.
+        exclusive_fraction: Annotated[float, Range(0.0, 1.0, max_inclusive=False)] = 0.0
         toggle:   bool = False
     defaults_section: DefaultsSection = dataclasses.field(default_factory=DefaultsSection)
 
@@ -283,6 +287,23 @@ def test_bound_error_reported():
     probs = ei.value.problems
     assert any('ratio' in p and 'maximum' in p for p in probs)
     assert any('count' in p and 'minimum' in p for p in probs)
+
+
+def test_exclusive_max_bound_rejects_the_endpoint():
+    """Range(max_inclusive=False) must reject the endpoint itself but accept just under."""
+    with pytest.raises(ConfigError) as ei:
+        covert_to_config(tvalid_section('defaults_section', exclusive_fraction=1.0))
+    assert any('exclusive_fraction' in p and 'must be less than 1.0' in p
+               for p in ei.value.problems), ei.value.problems
+
+    cfg = covert_to_config(tvalid_section('defaults_section', exclusive_fraction=0.999))
+    assert cfg.defaults_section.exclusive_fraction == 0.999
+
+
+def test_inclusive_max_bound_accepts_the_endpoint():
+    """Guards the asymmetry: the default (inclusive) bound must still allow 1.0."""
+    cfg = covert_to_config(tvalid_section('defaults_section', fraction=1.0))
+    assert cfg.defaults_section.fraction == 1.0
 
 
 def test_choices_validation():
