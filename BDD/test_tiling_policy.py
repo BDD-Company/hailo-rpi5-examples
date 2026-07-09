@@ -469,3 +469,26 @@ def test_whole_frame_stall_is_logged_once_not_every_poll(caplog):
         wd.poll()
     stalls = [r for r in caplog.records if "WHOLE-FRAME branch" in r.getMessage()]
     assert len(stalls) == 2
+
+
+def test_watchdog_stays_disarmed_until_the_first_frame_ever_arrives(caplog):
+    """Regression: on the rig the watchdog screamed
+    "STALL: no callbacks for 2.0s on the WHOLE-FRAME branch" ~2s into every launch, while
+    the camera and the Hailo device were still coming up. A watchdog for "warmed up and
+    then died" must first observe "warmed up"."""
+    wd, coord, pipe, clock = make_watchdog(stall_timeout_s=1.0)
+    assert pipe.frames == 0
+
+    with caplog.at_level("ERROR"):
+        for _ in range(10):                      # 10s of startup, no callbacks yet
+            clock.advance(1.0)
+            assert wd.poll() is False
+    assert not [r for r in caplog.records if "STALL" in r.getMessage()], \
+        [r.getMessage() for r in caplog.records]
+
+    # Once the pipeline has proven it can deliver, a later freeze IS a stall.
+    pipe.tick(); wd.poll()
+    clock.advance(2.0)
+    with caplog.at_level("ERROR"):
+        wd.poll()
+    assert [r for r in caplog.records if "STALL" in r.getMessage()]

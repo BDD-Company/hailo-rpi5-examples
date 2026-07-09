@@ -218,6 +218,9 @@ class BranchStallWatchdog:
     inferring on the same hailonet) cannot help — it would just thrash while the operator
     needs a clean error in the log.
 
+    Stays disarmed until the pipeline has delivered its first callback, so it does not
+    mistake startup (camera + device coming up) for a stall.
+
     Pure logic: `frame_count_fn` and `now` are injected, so this is unit-testable without
     GStreamer. The polling thread lives in app.py.
     """
@@ -240,6 +243,13 @@ class BranchStallWatchdog:
         count = self._frame_count()
 
         if self._last_count is None:            # first call: start the clock
+            self._last_count, self._last_progress = count, now
+            return False
+
+        if count == 0:
+            # Nothing has EVER been delivered — the camera and the device are still coming
+            # up. A watchdog for "warmed up and then died" must first observe "warmed up",
+            # otherwise it screams STALL a couple of seconds into every launch (it did).
             self._last_count, self._last_progress = count, now
             return False
 
