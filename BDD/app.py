@@ -942,22 +942,31 @@ def main():
         action_thread.start()
     app.add_shutdown_callback(lambda: detections_queue.put(STOP))
 
-    sink = MultiSink([
-        # RtspStreamerSink(30, 8554),
-        RecorderSink(30,
-            "./_DEBUG",
-            segment_seconds=10,
-            filename_base=f"debug_{start_time_str}",
-        ),
-        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
-    ])
-
-    output_thread = threading.Thread(
-        target = debug_output_thread,
-        args = (output_queue, sink),
-        name="DEBUG"
-    )
-    output_thread.start()
+    # Debug overlay recorder (debug_*.mkv): draws detection annotations
+    # (annotate_frame_with_detection_info) AND runs a SECOND software x264enc — a full
+    # Cortex-A76 core on Pi5 (no HW H264 encoder), on EVERY control-loop frame. Gate it
+    # on record_videos so --no-record / record_videos=False frees BOTH encoders. It was
+    # previously always-on, which defeated --no-record's "free a core" purpose and added
+    # e2e latency by pinning the core the GIL-bound control loop needs. output_queue is a
+    # bounded OverwriteQueue, so with the drain thread off the control thread's puts just
+    # overwrite (no leak); the queue put itself is a cheap dict of references.
+    output_thread = None
+    if record_videos:
+        sink = MultiSink([
+            # RtspStreamerSink(30, 8554),
+            RecorderSink(30,
+                "./_DEBUG",
+                segment_seconds=10,
+                filename_base=f"debug_{start_time_str}",
+            ),
+            # OpenCVShowImageSink(window_title='DEBUG IMAGE')
+        ])
+        output_thread = threading.Thread(
+            target = debug_output_thread,
+            args = (output_queue, sink),
+            name="DEBUG"
+        )
+        output_thread.start()
 
     # if DEBUG:
     #     for i in range(3):
