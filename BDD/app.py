@@ -4,7 +4,6 @@ from math import nan
 from pathlib import Path
 
 from dataclasses import dataclass, field
-from collections import deque
 import threading
 
 import os
@@ -32,6 +31,7 @@ from bytetrack import BYTETracker
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
 from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
 from frame_utils import Frame
+from frame_order import FrameOrderGuard
 from config import Config
 from dataclasses import asdict, replace
 from OverwriteQueue import OverwriteQueue
@@ -161,10 +161,13 @@ def normalized_frame_id(buffer: Gst.Buffer, frame_meta) -> int:
     return time.monotonic_ns()
 
 
-# Per-camera dedup buffer: frame_id only needs to be unique per producing camera,
-# and two cameras can legitimately emit the same offset/PTS. Indexing by camera_id
-# keeps a wide-camera buffer from masking a tele-camera frame as "already seen".
-seen_frames_by_camera: dict[int, deque] = {}
+# Strict per-camera frame-order invariant for the inference/tracker path. Frames
+# MUST reach ByteTracker (and, via the queue, the control loop) in monotonically
+# increasing per-camera order. This guard drops any stale/reordered/duplicate
+# frame (id <= last accepted for that camera) while letting forward skips through
+# — so a smoothly-moving object can never step backward in time. It supersedes
+# the old last-10 dedup: a duplicate is just id == last, which it also rejects.
+frame_order_guard = FrameOrderGuard()
 
 
 def _read_camera_id(buffer: Gst.Buffer) -> int:
@@ -297,15 +300,14 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     if sensor_timestamp_ns == 0:
         sensor_timestamp_ns = detection_start_timestamp_ns
 
-    seen_frames = seen_frames_by_camera.get(camera_id)
-    if seen_frames is None:
-        seen_frames = deque(maxlen=10)
-        seen_frames_by_camera[camera_id] = seen_frames
-    if frame_id in seen_frames:
-        logger.warning("!!!!!!!!!!!! Skipped duplicated frame %s (camera %s)", frame_id, camera_id)
+    # Strict-order invariant: drop any frame that is not strictly newer than the
+    # last one we handed to the tracker for this camera (a reorder or duplicate).
+    # Forward skips pass through. This should never fire in normal operation — the
+    # pipeline delivers frames in capture order — so a hit means an upstream regression.
+    if not frame_order_guard.accept(camera_id, frame_id):
+        logger.warning("!!!!!!!!!!!! Dropping out-of-order/duplicate frame %s (camera %s, last=%s)",
+                       frame_id, camera_id, frame_order_guard.last(camera_id))
         return Gst.PadProbeReturn.OK
-
-    seen_frames.append(frame_id)
 
     # If the user_data.use_frame is set to True, we can get the video frame from the buffer
     # Wrap in a Frame so downstream consumers handle NV12 (a planar (Y, UV) tuple from
@@ -441,13 +443,27 @@ class App(GStreamerDetectionApp):
 
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
         # Live preview branch (--preview): its own leaky, tiny queue gives it a
-        # separate streaming thread and sync=false so a slow/stalled window sink
-        # can neither back-pressure the recorder nor add capture latency.
+        # separate streaming thread; the leaky=downstream queue means a slow/stalled
+        # window sink can never back-pressure the recorder or add capture latency
+        # (it sheds the oldest frame instead). sync=true presents each frame on its
+        # (now even, sensor-derived) PTS, so the small capture-thread bursts absorbed
+        # by the 2-frame queue play back at the true ~fps cadence instead of flashing
+        # by on arrival — that jitter, not any reordering, is what made the preview
+        # look jagged. Frame ORDER is identical either way.
+        #
+        # Sink choice matters on this deployment: the Pi runs a Wayland compositor
+        # (labwc) mirrored over the network by wayvnc. autovideosink there falls back
+        # to kmssink (direct DRM scanout), which paints a hardware plane the compositor
+        # doesn't own — wayvnc never captures it, so over VNC the preview looks like a
+        # slideshow. waylandsink renders into a compositor surface that labwc composites
+        # and wayvnc streams, giving a smooth remote preview. Fall back to autovideosink
+        # off Wayland (X11 / local monitor).
+        preview_sink = 'waylandsink' if os.environ.get('WAYLAND_DISPLAY') else 'autovideosink'
         preview_branch = (
             'queue name=preview_queue leaky=downstream max-size-buffers=2 '
             '    max-size-bytes=0 max-size-time=0 '
             '! videoconvert '
-            '! autovideosink name=preview_sink sync=false'
+            f'! {preview_sink} name=preview_sink sync=true'
         )
 
         if not self.record_videos:
@@ -926,22 +942,31 @@ def main():
         action_thread.start()
     app.add_shutdown_callback(lambda: detections_queue.put(STOP))
 
-    sink = MultiSink([
-        # RtspStreamerSink(30, 8554),
-        RecorderSink(30,
-            "./_DEBUG",
-            segment_seconds=10,
-            filename_base=f"debug_{start_time_str}",
-        ),
-        # OpenCVShowImageSink(window_title='DEBUG IMAGE')
-    ])
-
-    output_thread = threading.Thread(
-        target = debug_output_thread,
-        args = (output_queue, sink),
-        name="DEBUG"
-    )
-    output_thread.start()
+    # Debug overlay recorder (debug_*.mkv): draws detection annotations
+    # (annotate_frame_with_detection_info) AND runs a SECOND software x264enc — a full
+    # Cortex-A76 core on Pi5 (no HW H264 encoder), on EVERY control-loop frame. Gate it
+    # on record_videos so --no-record / record_videos=False frees BOTH encoders. It was
+    # previously always-on, which defeated --no-record's "free a core" purpose and added
+    # e2e latency by pinning the core the GIL-bound control loop needs. output_queue is a
+    # bounded OverwriteQueue, so with the drain thread off the control thread's puts just
+    # overwrite (no leak); the queue put itself is a cheap dict of references.
+    output_thread = None
+    if record_videos:
+        sink = MultiSink([
+            # RtspStreamerSink(30, 8554),
+            RecorderSink(30,
+                "./_DEBUG",
+                segment_seconds=10,
+                filename_base=f"debug_{start_time_str}",
+            ),
+            # OpenCVShowImageSink(window_title='DEBUG IMAGE')
+        ])
+        output_thread = threading.Thread(
+            target = debug_output_thread,
+            args = (output_queue, sink),
+            name="DEBUG"
+        )
+        output_thread.start()
 
     # if DEBUG:
     #     for i in range(3):

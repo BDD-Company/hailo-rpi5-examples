@@ -722,22 +722,38 @@ class GStreamerApp:
 _buffer_keepalive_noop = lambda *_: None
 
 
-# Process-wide PTS baseline shared across every picam thread. Each thread used
-# to relativize buffer.pts against its OWN first sensor timestamp, so when the
-# active camera switched, the new stream's PTS jumped backward and splitmuxsink
-# crashed with "Queued GOP time is negative". With one shared monotonic baseline
-# the PTS is monotonic across cameras by construction.
+# Process-wide PTS baseline + high-water mark, shared across every picam thread.
+# Each thread used to relativize buffer.pts against its OWN first sensor timestamp,
+# so when the active camera switched, the new stream's PTS jumped backward and
+# splitmuxsink crashed with "Queued GOP time is negative". One shared baseline keeps
+# PTS monotonic across cameras by construction; the shared high-water mark clamps it
+# strictly monotonic even if a switch ever presents a slightly-earlier timestamp.
 _pts_baseline_lock = threading.Lock()
 _pts_baseline_ns : int | None = None
+_pts_last_ns : int = -1
 
 
-def _shared_pts_ns(now_ns : int) -> int:
-    """Return a monotonic, shared-across-all-cameras PTS in nanoseconds."""
-    global _pts_baseline_ns
+def _shared_pts_ns(source_ns : int) -> int:
+    """Return an EVEN, strictly-monotonic, shared-across-all-cameras PTS in ns.
+
+    ``source_ns`` is the HARDWARE sensor-exposure timestamp (libcamera
+    SensorTimestamp, CLOCK_BOOTTIME) when available — one clock for every camera on
+    the Pi, so a single shared baseline stays monotonic across camera switches AND
+    preserves the sensor's even ~fps cadence. Previously this used time.monotonic_ns()
+    at PUSH time: under GIL contention the capture thread stalls, the camera buffers a
+    few frames in DMA, then the thread flushes them back-to-back, so push-time PTS
+    jittered 16–128 ms and recorded/preview motion looked jagged — even though frame
+    ORDER was always correct. The clamp guarantees strict monotonicity regardless of
+    source, so splitmuxsink never sees a negative-GOP jump."""
+    global _pts_baseline_ns, _pts_last_ns
     with _pts_baseline_lock:
         if _pts_baseline_ns is None:
-            _pts_baseline_ns = now_ns
-        return now_ns - _pts_baseline_ns
+            _pts_baseline_ns = source_ns
+        pts = source_ns - _pts_baseline_ns
+        if pts <= _pts_last_ns:
+            pts = _pts_last_ns + 1
+        _pts_last_ns = pts
+        return pts
 
 
 def picamera_thread(
@@ -1156,13 +1172,17 @@ def picamera_thread(
 
             if frame_meta is not None:
                 sensor_timestamp_ns = frame_meta.get("SensorTimestamp", None)
-                # Multi-camera correctness: derive buffer.pts from a process-
-                # wide monotonic clock instead of per-camera sensor TS so the
-                # pipeline sees a single monotonic stream even when the active
-                # camera switches. The original sensor TS is still attached
-                # as ref-meta so downstream sensor-latency math is unchanged.
+                # buffer.pts comes from the HARDWARE sensor timestamp (even ~fps
+                # cadence), relativized to a process-wide baseline shared across
+                # cameras and clamped strictly monotonic (see _shared_pts_ns). This
+                # replaces wall-clock push time, whose GIL-induced jitter made
+                # recorded/preview motion jagged even though frame order was correct.
+                # Falls back to push-time monotonic only if the sensor ts is ever
+                # absent. now_monotonic_ns is still recorded as the unix ref-meta
+                # below so the Stage-B (appsrc->callback) latency math is unchanged.
                 now_monotonic_ns = time.monotonic_ns()
-                frame_timestamp_ns = _shared_pts_ns(now_monotonic_ns)
+                pts_source_ns = sensor_timestamp_ns if sensor_timestamp_ns is not None else now_monotonic_ns
+                frame_timestamp_ns = _shared_pts_ns(pts_source_ns)
                 if sensor_timestamp_ns is not None and first_sensor_timestamp_ns == 0:
                     first_sensor_timestamp_ns = sensor_timestamp_ns
 
@@ -1401,30 +1421,22 @@ class GStreamerDetectionApp(GStreamerApp):
             # here custom pipeline might break rewinding of initial source, use default display pipeline
             display_pipeline = DISPLAY_PIPELINE(video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps)
 
-        # Split the post-inference stream with a tee so the (software, CPU-heavy)
-        # video recorder can never back-pressure the detection path.
+        # Isolating queue for the recording branch (see the source tee below). The tee
+        # fans every buffer out to all src pads *synchronously, on the pushing thread*,
+        # so the recorder gets its own streaming thread here: leaky=downstream means the
+        # tee's push returns immediately (dropping the oldest raw frame when full) and
+        # detection never waits on the software encoder.
         #
-        # Why the isolating queue goes AFTER the tee, not before it:
-        # a tee fans every buffer out to all of its src pads *synchronously, on the
-        # thread that pushed the buffer in*. A queue placed BEFORE the tee would only
-        # decouple the tee from its upstream — both branches would still run on that one
-        # post-queue thread, so a slow encoder would still stall detection. Placing the
-        # large leaky queue AFTER the tee, on the recording branch, gives the encoder its
-        # own streaming thread; the tee's push into a leaky queue returns immediately
-        # (dropping the oldest frame when full), so detection never waits on the encoder.
-        #
-        #   output_tee
-        #     ├─ detection branch:  identity (probe) -> fakesink   (terminates ASAP)
-        #     └─ recording branch:  BIG leaky queue -> encoder -> splitmuxsink
-        #
-        # The recording queue is leaky=downstream so a lagging encoder drops the oldest
-        # *raw* frame instead of blocking the tee. Sized in buffers (raw RGB ~2.6 MB each
-        # at 1280x720) to bound RAM (~30 buffers ≈ 80 MB); raise it to ride out longer
-        # encoder stalls without dropping recorded frames, at the cost of RAM only — it
-        # adds no detection latency because it is leaky.
+        # Depth is SHALLOW on purpose. This is Pi5 (no HW H264 encoder — x264enc is
+        # software, CPU-heavy). A DEEP queue (e.g. 120) lets a lagging encoder build a
+        # backlog it then grinds through, pinning the CPU and starving the Python control
+        # loop — measured e2e latency ~doubled (260 -> ~490 ms). A shallow queue bounds
+        # the encoder's in-flight work, keeping latency at baseline. Dropped *recorded*
+        # frames under load are fine (in-order skips, never reorders); the control path
+        # is unaffected (it's the other tee branch).
         recording_input_queue = (
             'queue name=recording_input_q leaky=downstream '
-            'max-size-buffers=120 max-size-bytes=0 max-size-time=0'
+            'max-size-buffers=4 max-size-bytes=0 max-size-time=0'
         )
 
         if self.switchable_tiling:
@@ -1447,13 +1459,21 @@ class GStreamerDetectionApp(GStreamerApp):
         else:
             detection_section = f'{detection_pipeline_wrapper} ! '
 
+        # Tee the RAW source BEFORE inference. The recording taps the source directly;
+        # the detection/control branch runs inference->tracker->callback separately.
+        # Why: the hailocropper/hailoaggregator reorders the bypass IMAGE stream it
+        # emits (recorded frames "jump" back and forth ~17-29%), even though the
+        # detection METADATA the callback/control path reads stays in strict order
+        # (verified: callback frame_id + ball position are monotonic; only the recorded
+        # image jumps). Recording the pre-inference source keeps the video in capture
+        # order without touching the control path or detection.
         pipeline_string = (
             f'{source_pipeline} ! '
-            f'{detection_section}'
-            f'{tracker_pipeline} '
             f'tee name=output_tee '
-            f'output_tee. ! {user_callback_pipeline} ! fakesink name=detection_sink sync=false async=false '
-            f'output_tee. ! {recording_input_queue} ! {display_pipeline}'
+            f'output_tee. ! {recording_input_queue} ! {display_pipeline} '
+            f'output_tee. ! {detection_section}'
+            f'{tracker_pipeline} '
+            f'{user_callback_pipeline} ! fakesink name=detection_sink sync=false async=false'
         )
 
         logger.debug(pipeline_string)

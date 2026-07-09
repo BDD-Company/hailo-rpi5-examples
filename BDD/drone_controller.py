@@ -23,6 +23,7 @@ from telemetry_position import (
 )
 # from drone_killswitch import kill_on_rc_switch_on_channel
 from helpers import Detection, Detections, MoveCommand, STOP, CameraSwitcher, DEFAULT_CAMERA_ID, CameraConfig
+from frame_order import FrameOrderGuard
 
 try:
     from gpiozero import CPUTemperature
@@ -634,6 +635,12 @@ async def drone_controlling_thread_async(
 
 
     command_regulator = CommandRegulator(Pk = PD_COEFF_P, Dk = PD_COEFF_D)
+    # Strict-order invariant on the control path (defense-in-depth). The callback
+    # already hands frames to the FIFO queue in monotonic per-camera order, so this
+    # should never fire — but a stale/out-of-order frame here would corrupt the 2D
+    # velocity estimate and PD history, so we drop it rather than act on it. Dropping
+    # is safe: the loop already tolerates missing frames.
+    control_order_guard = FrameOrderGuard()
     while True:
         extra = ''
         try:
@@ -694,6 +701,18 @@ async def drone_controlling_thread_async(
             frame_id += 1
             logger = LoggerWithPrefix(logger, prefix=f'frame=#{frame_id:04}')
             logger.debug(f"frame cam{detections_obj.camera_id}#{detections_obj.frame_id:04}")
+
+            # Strict-order invariant: never act on a stale/out-of-order frame (per
+            # camera). Placed before the camera-switch + geometry work so a stale
+            # frame neither purges caches nor perturbs the estimator. Skipping is
+            # safe; the loop tolerates gaps.
+            if not control_order_guard.accept(detections_obj.camera_id, detections_obj.frame_id):
+                logger.warning(
+                    "!!! control dropping out-of-order/duplicate frame cam%s#%s (last=%s)",
+                    detections_obj.camera_id, detections_obj.frame_id,
+                    control_order_guard.last(detections_obj.camera_id),
+                )
+                continue
 
             # Camera switch detection. On switch, refresh the per-frame FOV
             # used for all geometry below AND drop the camera-frame caches:
