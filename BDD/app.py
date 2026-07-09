@@ -526,6 +526,20 @@ class App(GStreamerDetectionApp):
         super().run()
 
 
+def _stop_debug_output(output_queue):
+    """Stop the debug-overlay recorder thread promptly.
+
+    The sentinel is FIFO, so signalling alone is not enough: with a backlogged
+    200-deep OverwriteQueue the thread first annotates and x264-encodes every
+    pending frame before it even sees the stop. Measured on-device: 10.2 s from
+    SIGINT to the thread reacting, writing ~10 s of video nobody will watch and
+    blowing past the join timeout below. Those overlay frames are a debug aid, not
+    control data — drop them and finalize the file instead.
+    """
+    output_queue.clear()
+    output_queue.put(DEBUG_OUTPUT_STOP)
+
+
 def preview_sink_name() -> str:
     """GStreamer sink element for the --preview window. See get_output_pipeline_string
     for why Wayland must not get autovideosink. Shared with main() so the startup log
@@ -1044,9 +1058,8 @@ def main():
         output_thread.start()
         # The thread is non-daemon and blocks in output_queue.get(); without a sentinel
         # the interpreter hangs joining it at exit and RecorderSink's splitmuxsink never
-        # finalizes -> truncated debug_*.mkv. A non-dict item raises inside the loop,
-        # which breaks it and runs `finally: sink.stop()`.
-        app.add_shutdown_callback(lambda: output_queue.put(DEBUG_OUTPUT_STOP))
+        # finalizes -> truncated debug_*.mkv.
+        app.add_shutdown_callback(lambda: _stop_debug_output(output_queue))
 
     # if DEBUG:
     #     for i in range(3):
@@ -1079,11 +1092,10 @@ def main():
     if action_thread is not None:
         action_thread.join()
 
-    # Drain the overlay recorder last: the control thread is done, so nothing can
-    # overwrite the sentinel in the bounded OverwriteQueue. Bounded join — a stuck
-    # encoder must not wedge the exit, but say so instead of hanging silently.
+    # Stop the overlay recorder last. Bounded join — a stuck encoder must not wedge
+    # the exit, but say so instead of hanging silently.
     if output_thread is not None:
-        output_queue.put(DEBUG_OUTPUT_STOP)
+        _stop_debug_output(output_queue)
         output_thread.join(timeout=5)
         if output_thread.is_alive():
             logger.warning("debug output thread still running after 5s; "
