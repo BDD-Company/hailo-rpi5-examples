@@ -456,6 +456,30 @@ class GStreamerApp:
         with self._switch_lock:
             return self._tiling_active
 
+    def kill_tile_branch_for_test(self) -> bool:
+        """FAULT INJECTION, harness only (--test-kill-tile-after-s).
+
+        Shut valve_tile while the input-selector is still pointing at it. The tile branch
+        has warmed up and been accepted, and now stops delivering — the exact failure the
+        warmup timeout cannot catch and BranchStallWatchdog exists to recover from. There
+        is no other way to produce it on demand: a real branch death needs the hailonet or
+        the cropper to wedge.
+
+        Returns False (and does nothing) unless tiling is the active branch."""
+        with self._switch_lock:
+            sel = self.pipeline.get_by_name("branch_selector")
+            v_tile = self.pipeline.get_by_name("valve_tile")
+            if sel is None or v_tile is None:
+                logger.warning("kill_tile_branch_for_test: switchable-tiling pipeline not present")
+                return False
+            cur = sel.get_property("active-pad")
+            if cur is None or cur.get_name() != "sink_1":
+                return False        # not on tiling; nothing to kill
+            v_tile.set_property("drop", True)
+            logger.error("!!! TEST FAULT INJECTION: shut valve_tile while the selector is on it. "
+                         "The tile branch is now dead; the watchdog should revert to whole-frame.")
+            return True
+
     def _log_pipeline_health(self):
         """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)
         and current-level-buffers for every named GstQueue. If the deepest probe (last

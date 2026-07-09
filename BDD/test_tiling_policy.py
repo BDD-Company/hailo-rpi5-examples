@@ -8,12 +8,17 @@ Contract mirrored from app.py: each frame's best target confidence is fed to
 (blocking) switch on a worker thread and calls ``committed`` once it lands.
 
 The second half of this file covers TilingSwitchCoordinator, which serializes every
-switch (policy worker + --test-switch-s harness) through one entry point.
+switch (policy worker + --test-switch-s harness) through one entry point, and
+BranchStallWatchdog, which reverts to whole-frame when an accepted branch later dies.
 """
 import threading
 import time
 
-from tiling_policy import TilingSwitchPolicy, TilingSwitchCoordinator
+from tiling_policy import (
+    BranchStallWatchdog,
+    TilingSwitchCoordinator,
+    TilingSwitchPolicy,
+)
 
 
 def feed(policy, confs):
@@ -295,3 +300,172 @@ def test_policy_and_harness_do_not_leave_pipeline_and_policy_diverged():
     assert coord.tiling_on == pipeline_branch['tiling'], (
         f"policy believes tiling={coord.tiling_on} but pipeline is on "
         f"tiling={pipeline_branch['tiling']}")
+
+
+# ===========================================================================
+# BranchStallWatchdog — recovers from a branch that warmed up and then DIED.
+# ===========================================================================
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+    def __call__(self):
+        return self.t
+    def advance(self, dt):
+        self.t += dt
+
+
+class FakePipeline:
+    """A switchable pipeline whose tile branch can be 'killed' (stops delivering)."""
+    def __init__(self):
+        self.tiling = False
+        self.tile_dead = False
+        self.frames = 0
+        self.switch_calls = []
+
+    def switch(self, to_tiling):
+        self.switch_calls.append(to_tiling)
+        self.tiling = to_tiling
+        return True
+
+    def tick(self):
+        """One source frame. A dead tile branch delivers nothing to the callback."""
+        if self.tiling and self.tile_dead:
+            return
+        self.frames += 1
+
+
+def make_watchdog(stall_timeout_s=2.0, cooldown_s=30.0, lost_frames_to_tile=3):
+    clock = FakeClock()
+    pipe = FakePipeline()
+    policy = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=lost_frames_to_tile,
+                                locked_frames_to_whole=2, tiling_on=False)
+    coord = TilingSwitchCoordinator(policy, pipe.switch, now=clock)
+    wd = BranchStallWatchdog(coord, lambda: pipe.frames, stall_timeout_s=stall_timeout_s,
+                             cooldown_s=cooldown_s, now=clock)
+    return wd, coord, pipe, clock
+
+
+def test_watchdog_is_quiet_while_frames_flow():
+    wd, coord, pipe, clock = make_watchdog()
+    coord.request(True)
+    for _ in range(20):
+        pipe.tick()
+        clock.advance(0.25)
+        assert wd.poll() is False
+    assert coord.tiling_on is True          # never touched a healthy branch
+
+
+def test_watchdog_reverts_a_tile_branch_that_died_after_warming_up():
+    wd, coord, pipe, clock = make_watchdog(stall_timeout_s=2.0)
+    coord.request(True)
+    pipe.tick(); wd.poll()                  # establish progress
+    pipe.tile_dead = True                   # branch dies AFTER being accepted
+
+    clock.advance(1.0); assert wd.poll() is False   # inside the stall window
+    clock.advance(1.5)                              # now past stall_timeout_s
+    assert wd.poll() is True
+
+    assert coord.tiling_on is False
+    assert pipe.tiling is False
+    assert pipe.switch_calls == [True, False]
+
+
+def test_watchdog_never_switches_when_whole_frame_is_the_stalled_branch():
+    """Whole-frame is fed by the same source tee and the same hailonet: if it is starved,
+    tiling cannot help. Log, do not thrash."""
+    wd, coord, pipe, clock = make_watchdog()
+    # never switched to tiling; simply stop delivering frames
+    pipe.tick(); wd.poll()
+    clock.advance(10.0)
+    assert wd.poll() is False
+    assert pipe.switch_calls == []          # pipeline untouched
+
+
+def test_a_handover_in_flight_is_not_mistaken_for_a_stall(caplog):
+    """A switch legitimately pauses delivery for up to warmup_timeout_s. Asserting only
+    `poll() is False` is not enough: the coordinator's own in-flight guard would make a
+    spurious revert a no-op and still return False. Assert nothing was even attempted."""
+    wd, coord, pipe, clock = make_watchdog(stall_timeout_s=1.0)
+    coord.request(True)
+    pipe.tick(); wd.poll()
+
+    with coord._lock:
+        coord._in_flight = True
+    clock.advance(5.0)                          # frames pause for the whole handover
+    with caplog.at_level("ERROR"):
+        assert wd.poll() is False
+    assert not [r for r in caplog.records if "STALL" in r.getMessage()]
+    assert coord.tiling_blocked is False        # no cooldown armed
+    assert pipe.switch_calls == [True]          # pipeline untouched
+
+    with coord._lock:
+        coord._in_flight = False
+    # The stall clock was RESET by the handover, not disabled: a fresh timeout is needed...
+    assert wd.poll() is False
+    clock.advance(1.5)
+    assert wd.poll() is True                    # ...and then it does fire
+
+
+def test_cooldown_blocks_re_entering_the_dead_branch():
+    """Without this the policy rebuilds its lost-streak in ~0.7s and dives straight back
+    into the branch the watchdog just proved dead."""
+    wd, coord, pipe, clock = make_watchdog(stall_timeout_s=1.0, cooldown_s=30.0)
+    coord.request(True)
+    pipe.tick(); wd.poll()
+    pipe.tile_dead = True
+    clock.advance(1.5)
+    assert wd.poll() is True                       # reverted
+    assert coord.tiling_blocked is True
+
+    # The policy wants tiling again immediately (target lost every frame).
+    assert [coord.note(0.0) for _ in range(5)] == [None] * 5   # note() refuses to even ask
+    assert coord.request(True) is False                        # and a direct request is refused
+    assert pipe.tiling is False
+    assert pipe.switch_calls == [True, False]                  # never re-entered
+
+    clock.advance(31.0)                                        # cooldown expires
+    assert coord.tiling_blocked is False
+    assert coord.request(True) is True
+    assert pipe.switch_calls == [True, False, True]
+
+
+def test_watchdog_retries_if_the_revert_itself_fails():
+    """If whole-frame will not come back either, keep trying — never give up on
+    returning to the known-good branch."""
+    wd, coord, pipe, clock = make_watchdog(stall_timeout_s=1.0)
+    coord.request(True)
+    pipe.tick(); wd.poll()
+    pipe.tile_dead = True
+
+    calls = []
+    def failing_switch(to_tiling):
+        calls.append(to_tiling)
+        return False                       # revert cannot land
+    coord._switch_fn = failing_switch
+
+    clock.advance(1.5)
+    assert wd.poll() is False              # reported failure, did not claim success
+    assert coord.tiling_on is True         # still stuck on the dead branch, honestly reported
+
+    clock.advance(1.5)
+    assert wd.poll() is False
+    assert calls == [False, False]         # retried rather than latching
+
+
+def test_whole_frame_stall_is_logged_once_not_every_poll(caplog):
+    wd, coord, pipe, clock = make_watchdog(stall_timeout_s=1.0)
+    pipe.tick(); wd.poll()
+    clock.advance(2.0)
+    with caplog.at_level("ERROR"):
+        for _ in range(5):
+            wd.poll()
+    stalls = [r for r in caplog.records if "WHOLE-FRAME branch" in r.getMessage()]
+    assert len(stalls) == 1, [r.getMessage() for r in stalls]
+
+    # ...and it re-arms once frames come back and stop again.
+    pipe.tick(); wd.poll()
+    clock.advance(2.0)
+    with caplog.at_level("ERROR"):
+        wd.poll()
+    stalls = [r for r in caplog.records if "WHOLE-FRAME branch" in r.getMessage()]
+    assert len(stalls) == 2

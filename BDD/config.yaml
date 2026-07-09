@@ -60,6 +60,15 @@ tiling:
   locked_frames_to_whole: 5
   switch_conf: 0.4
 
+  # Post-switch watchdog (switchable tiling only). The handover already refuses to move
+  # onto a branch that never warms up; this catches a branch that warms up and LATER dies
+  # — app_callback stops firing and the control loop starves. No callback for
+  # stall_timeout_s while tiling is active => revert to whole-frame, then refuse to
+  # re-enter tiling for stall_cooldown_s (else the policy rebuilds its lost-streak in
+  # ~0.7s and dives straight back into the dead branch).
+  stall_timeout_s: 2.0
+  stall_cooldown_s: 30.0
+
 thrust:
   cruise: 0.53
   hover: 0.4

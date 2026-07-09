@@ -16,7 +16,7 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_p
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser
 from app_base import GStreamerDetectionApp
-from tiling_policy import TilingSwitchPolicy, TilingSwitchCoordinator
+from tiling_policy import TilingSwitchPolicy, TilingSwitchCoordinator, BranchStallWatchdog
 from drone_controller import drone_controlling_thread
 from platform_controller import platform_controlling_thread
 
@@ -79,6 +79,11 @@ class user_app_callback_class(app_callback_class):
         goes through the same serialized path and keeps `policy.tiling_on` truthful."""
         self._coordinator = TilingSwitchCoordinator(policy, switch_fn)
         self.auto_switch = auto_switch
+
+    @property
+    def coordinator(self):
+        """The serialized switch entry point; None until attach_tiling_switch()."""
+        return self._coordinator
 
     def request_tiling(self, to_tiling: bool) -> bool:
         """Blocking, thread-safe branch switch. The ONLY entry point — used by the
@@ -715,6 +720,15 @@ def main():
     if switch_test_s is not None and switch_test_s <= 0:
         raise SystemExit("--test-switch-s expects a positive number of seconds")
 
+    # --test-kill-tile-after-s N: fault injection. Once tiling is the active branch, shut
+    # its valve so the branch dies AFTER warming up — the failure switch_tiling's warmup
+    # timeout cannot catch. Proves BranchStallWatchdog on real hardware.
+    kill_tile_after_s_spec = _pop_value(sys.argv, "--test-kill-tile-after-s", example="12")
+    kill_tile_after_s = (_parse_float(kill_tile_after_s_spec, "--test-kill-tile-after-s")
+                         if kill_tile_after_s_spec else None)
+    if kill_tile_after_s is not None and kill_tile_after_s <= 0:
+        raise SystemExit("--test-kill-tile-after-s expects a positive number of seconds")
+
     if DEBUG:
         logger.error('')
         logger.error("!!! ============================================================== !!!")
@@ -775,6 +789,10 @@ def main():
     if switch_test_s and not switchable:
         raise SystemExit("--test-switch-s toggles the whole-frame<->tiling handover, which only "
                          "exists with switchable tiling. Pass --switch-tiles NxM, or set "
+                         "tiling.switchable / tiling.auto_switch in the config.")
+    if kill_tile_after_s and not switchable:
+        raise SystemExit("--test-kill-tile-after-s kills the tile branch, which only exists with "
+                         "switchable tiling. Pass --switch-tiles NxM, or set "
                          "tiling.switchable / tiling.auto_switch in the config.")
     if switch_test_s and config.tiling.auto_switch:
         logger.warning("!!! --test-switch-s together with tiling.auto_switch: the harness and the "
@@ -905,6 +923,32 @@ def main():
                         config.tiling.lost_frames_to_tile, config.tiling.locked_frames_to_whole,
                         config.tiling.switch_conf)
 
+        # Post-switch watchdog: the handover refuses a branch that never warms up, but
+        # nothing else notices a branch that warms up and LATER dies — app_callback simply
+        # stops firing and the control loop starves. Poll the callback counter; if it
+        # freezes while tiling is active, revert to whole-frame. Daemon thread: it must
+        # never hold up shutdown, and losing it at exit costs nothing.
+        stall_watchdog = BranchStallWatchdog(
+            coordinator=user_data.coordinator,
+            frame_count_fn=user_data.get_count,
+            stall_timeout_s=config.tiling.stall_timeout_s,
+            cooldown_s=config.tiling.stall_cooldown_s,
+        )
+        # Poll well inside the stall window so detection latency is a fraction of it.
+        _poll_s = max(0.05, min(0.25, config.tiling.stall_timeout_s / 4.0))
+        def _stall_watchdog_thread():
+            while True:
+                time.sleep(_poll_s)
+                try:
+                    stall_watchdog.poll()
+                except Exception:
+                    logger.exception("branch stall watchdog poll failed")
+        threading.Thread(target=_stall_watchdog_thread, name="branch-stall-watchdog",
+                         daemon=True).start()
+        logger.info("!!! branch stall watchdog: revert to whole-frame after %.1fs without a "
+                    "callback while tiling; then refuse tiling for %.1fs",
+                    config.tiling.stall_timeout_s, config.tiling.stall_cooldown_s)
+
     # Optional dual-camera switching verification harness. The thread drives
     # the same CameraSwitcher.toggle() that production policy will use, so a
     # successful run here is direct evidence that the production switch path
@@ -943,6 +987,27 @@ def main():
                 to_tiling = not to_tiling
         threading.Thread(target=_tiling_switch_test, name="tiling-switch-test", daemon=True).start()
         logger.info("!!! --test-switch-s: toggling whole<->tiling every %.1fs", switch_test_s)
+
+    # Fault injection for the post-switch watchdog: wait for tiling to become the active
+    # branch, then shut its valve. The branch has already warmed up and been accepted, so
+    # the handover's warmup timeout cannot catch this; only the watchdog can.
+    if kill_tile_after_s:
+        def _kill_tile_branch():
+            time.sleep(kill_tile_after_s)
+            if not switch_test_s and not config.tiling.auto_switch:
+                # Nothing else will ever select tiling, so select it ourselves first.
+                logger.warning("!!! --test-kill-tile-after-s: no switch driver configured; "
+                               "switching to tiling first so there is something to kill")
+                user_data.request_tiling(True)
+            deadline = time.monotonic() + 60.0
+            while time.monotonic() < deadline:
+                if app.kill_tile_branch_for_test():
+                    return
+                time.sleep(0.2)     # not on tiling yet; wait for a driver to select it
+            logger.error("!!! --test-kill-tile-after-s: tiling never became active; nothing killed")
+        threading.Thread(target=_kill_tile_branch, name="tile-branch-killer", daemon=True).start()
+        logger.warning("!!! --test-kill-tile-after-s: will kill the tile branch %.1fs from now",
+                       kill_tile_after_s)
 
     logger.info("!!! Config: %s", config)
     if DEBUG:

@@ -19,9 +19,14 @@ Tasks that are already done are marked as `+`.
 - !! UI for launches
 - !! figure out video capture without cropping (i.e. capture full frame)
 - ! right now probes are commented out, add CLI argument that enables them (default OFF)
-- ! rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — PR#9 review #3 handover-abort DONE (switch_tiling reverts to the working branch on a dead-branch timeout); #4 serialization DONE 2026-07-09 (all switches go through tiling_policy.TilingSwitchCoordinator; `--plus-one`/`enable_plus_one()` deleted). STILL OPEN: #4c, the post-switch watchdog for a branch that warms up and then dies.
++ rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — ALL THREE DONE 2026-07-09: #3 handover-abort (switch_tiling reverts to the working branch on a dead-branch timeout), #4 serialization (all switches go through tiling_policy.TilingSwitchCoordinator; `--plus-one`/`enable_plus_one()` deleted), #4c post-switch watchdog (tiling_policy.BranchStallWatchdog reverts to whole-frame when an accepted branch later dies, with a cooldown against thrash). Remaining work here is tuning, not robustness.
 - ! CONTROL-PATH FRAME TRUST (robustness review 2026-07, item #1, deferred): is `Detections.frame` — the image `OpticalObjectInfo` segments in drone_controller.py — stale w.r.t. its own detections? Commit 3bc99a6's stated root cause ("the aggregator reorders the bypass image stream while the metadata stays in order") cannot be literally true: back then ONE tee fed both the recorder and the callback, and a tee fans buffers to all src pads synchronously and in order. Leading theory is pooled bypass memory recycled under the then-120-deep recording queue, which the callback never saw because get_numpy_from_buffer copies synchronously inside the pad probe — that would mean the control path was always fine. Until settled, `optical_refinement` (ON by default) is on unverified pixels. Step 0 costs nothing: watch an existing `_DEBUG/debug_*.mkv` and see whether the bbox tracks the ball or lags it, and grep a run log for `Dropping out-of-order/duplicate frame`. Full context + the decisive experiment: memory `handoff-aggregator-bypass-image`.
-- ! SIGINT does not stop the app. `shutdown()` (app_base.py:141) runs its callbacks, but the GLib main loop never quits, so `app.run()` never returns, `main()` never reaches `Done !!!`, and the operator must `kill -TERM` then `-9`. Re-confirmed on-rig 2026-07-09. Consequences: (a) the main pipeline's `splitmuxsink` cannot finalize the **last** `RAW_*.mkv` segment; (b) `main()`'s bounded `output_thread.join()` is unreachable in practice. Since 2026-07-09 the `debug_*.mkv` overlay recorder DOES finalize at SIGINT (its thread takes a sentinel from a shutdown callback, exits, and runs `sink.stop()` -> EOS -> NULL; verified: last segment ffprobes clean and decodes while the process still hangs). Fix: make `shutdown()` actually quit the GLib loop, then verify `Done !!!` prints and the last RAW segment ffprobes clean. NOTE for debugging: during teardown the process releases /dev/hailo0 and /dev/video0 while still alive, so `fuser /dev/hailo0` reports "free" for a live process — use `kill -0 <pid>`.
+- ! SIGINT does not stop the app. **ROOT-CAUSED 2026-07-09 (the old "the GLib loop never quits" explanation was WRONG).** `shutdown()` DOES quit the loop — it ends with `GLib.idle_add(self.loop.quit)` (app_base.py, in `shutdown`). The hang is *after* `loop.run()` returns, in the cleanup `for t in self.threads: t.join()`: `self.threads` are the **picamera producer threads**, created **without `daemon=True`** and given **no stop signal**. `picamera_thread` only leaves its loop when `picam2.capture_request(wait=capture_timeout_s)` raises `TimeoutError` — i.e. when the camera actually stalls. In a healthy run frames keep arriving, so it never exits and the join never returns. Evidence: the main thread's `/proc/<pid>/wchan` is `futex_wait_queue` (a join), not `poll`/`epoll` where `loop.run()` would sit.
+  Two independent bugs ride along:
+  (a) `shutdown()` drives the pipeline straight `PAUSED -> READY -> NULL` **without sending EOS**, so `splitmuxsink` never finalizes the last `RAW_*.mkv` fragment. That truncation has nothing to do with the hang.
+  (b) `GStreamerApp.run()` ends in `sys.exit(0)`/`sys.exit(1)`, so `main()`'s tail — `print("Done !!!")`, `detections_queue.put(STOP)`, `action_thread.join()`, the `output_thread` drain — is **unreachable even on a clean exit**. The shutdown callbacks are the only teardown that ever runs. (This is why the `debug_*.mkv` overlay recorder had to be finalized from a shutdown callback; it works, verified on-rig — the last segment ffprobes clean and decodes while the process still hangs.)
+  Fix sketch: give `picamera_thread` a stop `Event` set by `shutdown()` before the join (its `capture_request` already has a bounded wait, so it exits within a frame period); `join(timeout=...)` and log stragglers; send EOS and wait for it on the bus before going to NULL so `splitmuxsink` finalizes; and let `run()` return instead of `sys.exit` so `main()`'s teardown is reachable. Add a hard `os._exit` backstop — hailo VDevice teardown can deadlock on set-NULL mid-inference.
+  NOTE for debugging: during teardown the process releases /dev/hailo0 and /dev/video0 while still alive, so `fuser /dev/hailo0` reports "free" for a live process — use `kill -0 <pid>`. Python 3.11 does not set OS thread names, so every `/proc/<pid>/task/*/comm` reads "Hailo Detection" (inherited from `setproctitle`) — comm is useless for identifying threads here; use `wchan`.
 - rotate camera 90 degrees (to maximize lead without leading visual)
 - deprecated CLI alias `--switch-test-s` (renamed to `--test-switch-s` on 2026-07-09): DELETE the alias and `_pop_deprecated_value()` after **2026-09-30**. Kept so runbooks/skills pinned to older checkouts keep running. Test/verification-harness flags are `--test-*`; run-mode flags (`--DEBUG`, `--no-record`, `--preview`, `--tiles`, `--switch-tiles`, `--vision-only`) are not.
 - NV12 capture assumes `stride == width` (low priority — unreachable on the current rig). `picamera_thread` takes the NV12 path via `request.make_buffer("main")`, which returns the raw ISP buffer INCLUDING row padding; picamera2 aligns stride (typically 32/64 B). At imx477 @ 1280 wide the stride IS 1280, so it is correct today, and we now only use imx477. Any width that is not stride-aligned (e.g. an imx708 1296-wide mode) would push padded rows into an appsrc declaring `width=W` -> sheared image and `len(frame_bytes) != W*H*3/2`. Fix when a new sensor/mode lands: read `config['main']['stride']` and either assert equality at startup (fail fast, it is pre-launch) or de-pad. The comment above the `make_buffer` call still describes `make_array` and is wrong.
@@ -94,10 +99,25 @@ deferred, not patched inline):
   `--plus-one` / `enable_plus_one()` were deleted earlier the same day, removing a third
   unlocked caller.
 
-- ! **#4c — post-switch watchdog (still open, the remaining piece of handover robustness).**
-  `switch_tiling` reverts when the incoming branch produces no buffer within the warmup
-  timeout, but nothing recovers from a branch that warms up fine and dies *afterwards*:
-  app_callback stops firing, DET FPS -> 0, the control loop starves. Add a watchdog that
-  flips back to whole-frame if N callbacks are missed after a switch that initially
-  succeeded. Deferred deliberately — it is a new failure-detection mechanism, not part of
-  the serialization fix.
++ **#4c — post-switch watchdog.** DONE 2026-07-09.
+  Was: `switch_tiling` reverts when the incoming branch produces no buffer within the
+  warmup timeout, but nothing recovered from a branch that warmed up fine and died
+  *afterwards* — app_callback stops firing, DET FPS -> 0, the control loop starves, and
+  nothing notices because every component downstream is *waiting* rather than failing.
+
+  `tiling_policy.BranchStallWatchdog` polls the callback's frame counter from a daemon
+  thread. If it freezes for `tiling.stall_timeout_s` (default 2.0) while TILING is active,
+  it reverts to whole-frame — the branch that was known good at startup.
+    * A handover in flight legitimately pauses delivery and does NOT count as a stall.
+    * After a revert it arms a `tiling.stall_cooldown_s` (default 30) cooldown, because
+      the policy otherwise rebuilds its lost-streak in ~0.7 s and dives straight back into
+      the branch just proven dead. `note()` stops even asking during the cooldown; a direct
+      `request(True)` is refused. Requests to WHOLE-FRAME are never blocked — the watchdog
+      must always be able to get back to the known-good branch.
+    * It deliberately does NOT act when WHOLE-FRAME is the stalled branch: that branch is
+      fed by the same source tee and infers on the same hailonet, so switching to tiling
+      cannot help. It logs once (not per poll) and leaves the pipeline alone.
+    * If the revert itself fails, it reports failure honestly and retries after another
+      timeout rather than latching.
+  Fault injection `--test-kill-tile-after-s N` shuts `valve_tile` while the selector is on
+  it, which is the only way to produce this failure on demand. 7 host tests, mutation-checked.

@@ -183,6 +183,14 @@ class Config:
         lost_frames_to_tile:    Annotated[int, Range(min=1)] = 10
         locked_frames_to_whole: Annotated[int, Range(min=1)] = 5
         switch_conf: Annotated[float, Range(0.0, 1.0)] = 0.4
+        # Post-switch watchdog (switchable tiling only). switch_tiling refuses to move
+        # onto a branch that never warms up, but nothing catches a branch that warms up
+        # and LATER dies: app_callback stops firing and the control loop starves. If no
+        # callback arrives for stall_timeout_s while tiling is active, revert to
+        # whole-frame, then refuse to re-enter tiling for stall_cooldown_s (otherwise the
+        # policy rebuilds its lost-streak in ~0.7s and dives back into the dead branch).
+        stall_timeout_s:  Annotated[float, Range(min=0.0, min_inclusive=False)] = 2.0
+        stall_cooldown_s: Annotated[float, Range(min=0.0)] = 30.0
     tiling: Tiling = field(default_factory=Tiling)
 
     @dataclass(slots=True, kw_only=True, frozen=True)
