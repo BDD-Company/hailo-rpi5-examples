@@ -936,14 +936,19 @@ def main():
                 switch_conf=config.tiling.switch_conf,
                 lost_frames_to_tile=config.tiling.lost_frames_to_tile,
                 locked_frames_to_whole=config.tiling.locked_frames_to_whole,
+                locked_streak_miss_penalty=config.tiling.locked_streak_miss_penalty,
                 tiling_on=start_on_tiling,
             ),
             auto_switch=config.tiling.auto_switch,
         )
         if config.tiling.auto_switch:
-            logger.info("!!! auto-switch tiling policy: lost>=%d -> tile, locked>=%d -> whole, conf>=%.2f",
+            _p = config.tiling.locked_streak_miss_penalty
+            # Drift is positive (=> prompt return to whole-frame) while miss rate < 1/(1+P).
+            _tol = f"prompt below {100.0 / (1 + _p):.0f}% misses" if _p else "ignores misses"
+            logger.info("!!! auto-switch tiling policy: lost>=%d consecutive -> tile, "
+                        "locked>=%d -> whole (miss penalty -%d, %s), conf>=%.2f",
                         config.tiling.lost_frames_to_tile, config.tiling.locked_frames_to_whole,
-                        config.tiling.switch_conf)
+                        _p, _tol, config.tiling.switch_conf)
 
         # Post-switch watchdog: the handover refuses a branch that never warms up, but
         # nothing else notices a branch that warms up and LATER dies — app_callback simply

@@ -32,18 +32,37 @@ class TilingSwitchPolicy:
     new branch and its streak counters reset.
 
     Thresholds:
-      - ``lost_frames_to_tile`` consecutive frames with no confident target
+      - ``lost_frames_to_tile`` CONSECUTIVE frames with no confident target
         (best_conf < ``switch_conf``) while on whole-frame -> switch to tiling to
-        reacquire small/distant objects.
-      - ``locked_frames_to_whole`` consecutive confident frames while tiling ->
-        switch back to whole-frame to restore low-latency control.
+        reacquire small/distant objects. A single confident frame resets this streak:
+        one real sighting means the target is not lost.
+      - ``locked_frames_to_whole`` confident frames while tiling -> switch back to
+        whole-frame to restore low-latency control. This streak is NOT reset by a miss;
+        a miss subtracts ``locked_streak_miss_penalty`` (floor 0). Resetting it would
+        require ``locked_frames_to_whole`` frames in an unbroken row, which a detector
+        that misses even occasionally never produces — so the rig would stay pinned to
+        the high-latency tile branch forever.
+
+    Tolerated miss rate. With miss rate ``m`` and penalty ``P`` the lock streak drifts by
+    ``(1 - m) - m*P`` per frame. Below ``m = 1/(1 + P)`` the drift is positive and the
+    return to whole-frame is prompt; above it the streak only reaches the threshold by
+    chance, so the return becomes slow and unreliable (it is a random walk with a floor,
+    not a hard barrier). The default ``P = 2`` is prompt below a 1-in-3 miss rate.
+    Simulated, boot-on-tiling, locked_frames_to_whole=20, ~28 fps, median time to reach
+    whole-frame — old reset-on-miss rule vs ``P = 2``:
+        m=10%: 2.2s vs 0.9s | m=17%: 9.1s vs 1.4s | m=25%: 27.3s vs 2.5s
+        m=30%: 79.5s vs 5.4s | m=40%: never (18/21 runs) vs 19.4s
+    ``P = 0`` counts confident frames regardless of misses; ``P >= locked_frames_to_whole``
+    reproduces the old reset-on-miss behaviour exactly.
     """
 
     def __init__(self, switch_conf: float = 0.4, lost_frames_to_tile: int = 10,
-                 locked_frames_to_whole: int = 5, tiling_on: bool = False):
+                 locked_frames_to_whole: int = 5, tiling_on: bool = False,
+                 locked_streak_miss_penalty: int = 2):
         self.switch_conf = switch_conf
         self.lost_frames_to_tile = lost_frames_to_tile
         self.locked_frames_to_whole = locked_frames_to_whole
+        self.locked_streak_miss_penalty = locked_streak_miss_penalty
         self.tiling_on = tiling_on            # currently-active branch (False = whole)
         self._lost_streak = 0
         self._lock_streak = 0
@@ -56,7 +75,9 @@ class TilingSwitchPolicy:
             self._lost_streak = 0
         else:
             self._lost_streak += 1
-            self._lock_streak = 0
+            # Decay, don't reset: see the class docstring. Floor at 0 so a long miss run
+            # cannot bank negative credit that a later confident run has to pay off.
+            self._lock_streak = max(0, self._lock_streak - self.locked_streak_miss_penalty)
         if not self.tiling_on and self._lost_streak >= self.lost_frames_to_tile:
             return True          # target lost -> tile to reacquire
         if self.tiling_on and self._lock_streak >= self.locked_frames_to_whole:

@@ -188,6 +188,17 @@ class Config:
         auto_switch: bool = False
         lost_frames_to_tile:    Annotated[int, Range(min=1)] = 10
         locked_frames_to_whole: Annotated[int, Range(min=1)] = 5
+        # A missed frame SUBTRACTS this from the confident-frame streak (floor 0) rather
+        # than resetting it. Resetting would demand `locked_frames_to_whole` hits in an
+        # unbroken row, which a detector that misses even occasionally never delivers —
+        # the rig would stay pinned to the high-latency tile branch. With miss rate m the
+        # streak drifts by (1-m) - m*P per frame; below m = 1/(1+P) the drift is positive
+        # and the return to whole-frame is prompt, above it it happens only by chance.
+        # P=2 is prompt below a 1-in-3 miss rate. Simulated boot-on-tiling time to reach
+        # whole-frame (locked=20, 28fps), old reset rule vs P=2: 17% misses 9.1s -> 1.4s;
+        # 25% 27.3s -> 2.5s; 40% never -> 19.4s. P=0 counts confident frames regardless of
+        # misses; P >= locked_frames_to_whole reproduces the old reset-on-miss behaviour.
+        locked_streak_miss_penalty: Annotated[int, Range(min=0)] = 2
         switch_conf: Annotated[float, Range(0.0, 1.0)] = 0.4
         # Post-switch watchdog (switchable tiling only). switch_tiling refuses to move
         # onto a branch that never warms up, but nothing catches a branch that warms up

@@ -61,14 +61,28 @@ tiling:
   start_on_tiling: true
 
   # Automatic detection-state policy (implies switchable): switch to tiling after
-  # `lost_frames_to_tile` consecutive frames with no confident target (reacquire
+  # `lost_frames_to_tile` CONSECUTIVE frames with no confident target (reacquire
   # small/distant objects), and back to whole-frame after `locked_frames_to_whole`
-  # consecutive confident frames (restore low latency). "Confident" = detection
-  # confidence >= switch_conf. A single non-confident frame resets the streak.
-  # 30 confident frames is ~1.1s at the ~28fps this rig delivers.
+  # confident frames (restore low latency). "Confident" = detection confidence
+  # >= switch_conf. 20 confident frames is ~0.7s at the ~28fps this rig delivers.
+  #
+  # The two streaks treat a bad frame differently, on purpose:
+  #   - lost streak: a single confident frame RESETS it. One real sighting means the
+  #     target is not lost, so don't pay tiling's latency to go looking for it.
+  #   - lock streak: a miss SUBTRACTS `locked_streak_miss_penalty` (floor 0) instead of
+  #     resetting. Resetting would demand `locked_frames_to_whole` hits in an unbroken
+  #     row, which a detector that misses even occasionally never delivers — and since
+  #     start_on_tiling boots us ON the tile branch, the rig would sit at the higher
+  #     latency until the detection got lucky. With miss rate m the streak drifts by
+  #     (1-m) - m*P per frame; below m = 1/(1+P) the drift is positive and the return is
+  #     prompt, above it it happens only by chance. Simulated time to leave the tile
+  #     branch (locked=20, 28fps), old reset rule vs P=2:
+  #       17% misses: 9.1s -> 1.4s   25%: 27.3s -> 2.5s   40%: never -> 19.4s
+  #     P=0 ignores misses entirely; P >= locked_frames_to_whole restores reset-on-miss.
   auto_switch: true
   lost_frames_to_tile: 10
-  locked_frames_to_whole: 30
+  locked_frames_to_whole: 20
+  locked_streak_miss_penalty: 2
   switch_conf: 0.4
 
   # Post-switch watchdog (switchable tiling only). The handover already refuses to move

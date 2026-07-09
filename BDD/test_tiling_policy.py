@@ -72,12 +72,73 @@ def test_switches_back_to_whole_after_locked_streak():
     assert results[5] is False              # keeps asking until committed
 
 
-def test_lock_streak_needs_consecutive_frames():
-    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5, tiling_on=True)
-    # 4 confident, then a lost frame resets the lock streak.
-    assert feed(p, [0.9] * 4 + [0.1]) == [None] * 5
+def test_lock_streak_decays_by_the_penalty_on_a_miss_it_does_not_reset():
+    """A miss costs `locked_streak_miss_penalty` frames of progress, not all of it.
+    Resetting would demand `locked_frames_to_whole` hits in an unbroken row, which a
+    detector that misses even occasionally never delivers — the rig would stay pinned to
+    the high-latency tile branch forever."""
+    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5,
+                           locked_streak_miss_penalty=2, tiling_on=True)
+    assert feed(p, [0.9] * 4) == [None] * 4          # streak 4
+    assert p.note(0.1) is None                       # miss -> 4 - 2 = 2
+    assert p._lock_streak == 2
+    assert feed(p, [0.9] * 2) == [None] * 2          # 3, 4
+    assert p.note(0.9) is False                      # 5 -> switch to whole-frame
+
+
+def test_lock_streak_floors_at_zero_so_a_miss_run_banks_no_debt():
+    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5,
+                           locked_streak_miss_penalty=2, tiling_on=True)
+    feed(p, [0.9] * 2)                               # streak 2
+    feed(p, [0.0] * 10)                              # long miss run
+    assert p._lock_streak == 0                       # not -18
+    assert feed(p, [0.9] * 4) == [None] * 4          # so 5 confident frames still suffice
+    assert p.note(0.9) is False
+
+
+def test_a_flaky_detector_still_reaches_whole_frame_below_the_miss_threshold():
+    """Drift per frame is (1-m) - m*P, so whole-frame is reached iff m < 1/(1+P).
+    P=2 => tolerates just under 1-in-3 misses. This is the whole point of the decay."""
+    # 1 miss every 4 frames (m=0.25 < 1/3): converges.
+    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=10,
+                           locked_streak_miss_penalty=2, tiling_on=True)
+    assert any(p.note(c) is False for c in [0.9, 0.9, 0.9, 0.0] * 40), \
+        "a 25% miss rate must still get back to whole-frame"
+
+    # 1 miss every 2 frames (m=0.5 > 1/3): never converges, stays on tiling.
+    q = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=10,
+                           locked_streak_miss_penalty=2, tiling_on=True)
+    assert all(q.note(c) is None for c in [0.9, 0.0] * 200)
+    assert q._lock_streak == 0
+
+
+def test_penalty_zero_counts_confident_frames_regardless_of_misses():
+    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=3,
+                           locked_streak_miss_penalty=0, tiling_on=True)
+    assert feed(p, [0.9, 0.0, 0.9, 0.0]) == [None] * 4    # streak 2, misses ignored
+    assert p.note(0.9) is False                            # 3rd confident frame
+
+
+def test_penalty_at_or_above_the_threshold_reproduces_reset_on_miss():
+    """The old behaviour stays expressible, for anyone who wants it back."""
+    p = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=5,
+                           locked_streak_miss_penalty=5, tiling_on=True)
+    feed(p, [0.9] * 4)
+    assert p.note(0.0) is None
+    assert p._lock_streak == 0                       # fully reset
     assert feed(p, [0.9] * 4) == [None] * 4
     assert p.note(0.9) is False
+
+
+def test_the_lost_streak_still_resets_on_a_single_confident_frame():
+    """Deliberately asymmetric: the decay applies to the LOCK streak only. One real
+    sighting means the target is not lost, so do not pay tiling's latency to hunt it."""
+    p = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=5, tiling_on=False)
+    assert feed(p, [0.0] * 4) == [None] * 4
+    assert p.note(0.9) is None                       # one sighting...
+    assert p._lost_streak == 0                       # ...wipes the whole lost streak
+    assert feed(p, [0.0] * 4) == [None] * 4          # a fresh run of 5 is required
+    assert p.note(0.0) is True
 
 
 def test_no_downswitch_when_already_whole():
@@ -513,14 +574,17 @@ def test_policy_booted_on_tiling_switches_to_whole_after_the_locked_streak():
     assert pipe.tiling is False and coord.tiling_on is False
 
 
-def test_one_unconfident_frame_resets_the_locked_streak():
-    policy = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=30, tiling_on=True)
+def test_one_unconfident_frame_costs_two_frames_not_the_whole_locked_streak():
+    """Through the coordinator, end to end: a single miss must not throw away 29 frames
+    of progress, or a merely-flaky detector never gets the rig off the tile branch."""
+    policy = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=30,
+                                locked_streak_miss_penalty=2, tiling_on=True)
     coord = TilingSwitchCoordinator(policy, lambda t: True)
     for _ in range(29):
         coord.note(0.81)
-    assert coord.note(0.1) is None                # target lost for one frame
-    assert [coord.note(0.81) for _ in range(29)] == [None] * 29   # streak restarts
-    assert coord.note(0.81) is False
+    assert coord.note(0.1) is None                # one miss: 29 -> 27
+    assert [coord.note(0.81) for _ in range(2)] == [None, None]   # 28, 29
+    assert coord.note(0.81) is False              # 30 -> back to whole-frame
 
 
 def test_seeding_the_policy_wrong_would_invert_the_first_decision():
