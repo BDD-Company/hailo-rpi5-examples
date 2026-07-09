@@ -161,8 +161,13 @@ class Config:
         # small-object recall at the cost of latency (~N×15 ms on Hailo-8).
         tiles_x: Annotated[int, Range(min=1)] = 1
         tiles_y: Annotated[int, Range(min=1)] = 1
-        # Fractional tile overlap on both axes (0..1); 0 = abutting tiles.
-        overlap: Annotated[float, Range(0.0, 1.0)] = 0.0
+        # Fractional tile overlap on both axes; 0 = abutting tiles. Strictly < 1:
+        # at 1.0 every tile would cover the whole frame (degenerate grid).
+        overlap: Annotated[float, Range(0.0, 1.0, max_inclusive=False)] = 0.0
+        # IoU above which the hailotileaggregator merges two detections coming from
+        # different tiles — i.e. how aggressively objects straddling a tile seam get
+        # deduped. Only used on the tiled path. Lower = merge more eagerly.
+        tile_iou_threshold: Annotated[float, Range(0.0, 1.0)] = 0.4
         # Runtime-switchable tiling: build BOTH a whole-frame branch and a
         # tiles_x×tiles_y branch behind valves + an input-selector, and hot-switch
         # between them at runtime (whole-frame active at startup). Lets a policy
@@ -178,6 +183,14 @@ class Config:
         lost_frames_to_tile:    Annotated[int, Range(min=1)] = 10
         locked_frames_to_whole: Annotated[int, Range(min=1)] = 5
         switch_conf: Annotated[float, Range(0.0, 1.0)] = 0.4
+        # Post-switch watchdog (switchable tiling only). switch_tiling refuses to move
+        # onto a branch that never warms up, but nothing catches a branch that warms up
+        # and LATER dies: app_callback stops firing and the control loop starves. If no
+        # callback arrives for stall_timeout_s while tiling is active, revert to
+        # whole-frame, then refuse to re-enter tiling for stall_cooldown_s (otherwise the
+        # policy rebuilds its lost-streak in ~0.7s and dives back into the dead branch).
+        stall_timeout_s:  Annotated[float, Range(min=0.0, min_inclusive=False)] = 2.0
+        stall_cooldown_s: Annotated[float, Range(min=0.0)] = 30.0
     tiling: Tiling = field(default_factory=Tiling)
 
     @dataclass(slots=True, kw_only=True, frozen=True)

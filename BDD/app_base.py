@@ -193,6 +193,20 @@ class GStreamerApp:
         # Fractional tile overlap (0..1) for the hailotilecropper; 0 = abutting tiles.
         # Set from config.tiling.overlap by the App subclass; only the tiled path uses it.
         self.tiling_overlap = 0.0
+        # Seam-dedup IoU for the hailotileaggregator; tiled path only.
+        self.tile_iou_threshold = 0.4
+        # Queue at the head of the ACTIVE inference branch — where the detection-start
+        # stamp goes. Branch names differ between the single-branch and switchable
+        # pipelines, so get_pipeline_string() sets this to whichever it built.
+        self.detection_start_probe_element = 'inference_wrapper_input_q'
+        # Guards the valve/selector handover in switch_tiling. Held across the blocking
+        # first-buffer wait, so NEVER acquire a policy lock while holding it (see
+        # tiling_policy.TilingSwitchCoordinator for the ordering).
+        self._switch_lock = threading.RLock()
+        # Branch the pipeline is actually on. Whole-frame is active at startup: the
+        # input-selector defaults to its first-linked pad (sink_0) and valve_tile is
+        # built with drop=true.
+        self._tiling_active = False
         self.hef_path = None
         self.app_callback = None
 
@@ -379,69 +393,92 @@ class GStreamerApp:
         detections. A dead-branch switch would starve app_callback (DET FPS -> 0)
         with no recovery, and on this rig a stalled control loop can wreck hardware.
 
+        EXPECTED SIDE EFFECT — one duplicate frame per switch TO tiling. Both valves are
+        open during the make-before-break window, so the same source frame travels down
+        both branches. The whole-frame branch is faster, so when the selector flips onto
+        the slower tile branch its in-flight buffer can carry a frame id the callback has
+        already seen; FrameOrderGuard rejects it as a duplicate and logs "Dropping
+        out-of-order/duplicate frame N (last=N)". Measured on-device: 5 of 6 drops landed
+        within 28 ms of a ->TILING switch, 0 near a ->WHOLE switch (the fast branch only
+        ever skips forward). This is the guard doing its job — not a regression — so
+        "order-drops == 0" only holds in steady state, not across handovers.
+
         Returns True if the active branch is the target after the call (including a
-        no-op when already there), False if the switch could not be performed."""
-        sel = self.pipeline.get_by_name("branch_selector")
-        v_whole = self.pipeline.get_by_name("valve_whole")
-        v_tile = self.pipeline.get_by_name("valve_tile")
-        if sel is None or v_whole is None or v_tile is None:
-            logger.warning("switch_tiling: switchable-tiling pipeline not present; ignoring")
-            return False
-        target_pad_name = "sink_1" if to_tiling else "sink_0"
-        cur = sel.get_property("active-pad")
-        if cur is not None and cur.get_name() == target_pad_name:
-            return True  # already there
-        incoming_valve = v_tile if to_tiling else v_whole
-        outgoing_valve = v_whole if to_tiling else v_tile
-        target_pad = sel.get_static_pad(target_pad_name)
+        no-op when already there), False if the switch could not be performed.
 
-        incoming_valve.set_property("drop", False)        # 1. open incoming branch
-        ready = threading.Event()                         # 2. wait its first buffer
-        def _first_buf(pad, info, _u):
-            ready.set()
-            return Gst.PadProbeReturn.REMOVE
-        probe_id = target_pad.add_probe(Gst.PadProbeType.BUFFER, _first_buf, None)
-        if not ready.wait(warmup_timeout_s) and not ready.is_set():
-            # Incoming branch never produced -> REVERT: re-close the valve we opened,
-            # keep the selector + outgoing valve on the branch that IS producing.
-            logger.warning("switch_tiling: incoming %s branch gave no buffer in %.1fs; "
-                           "ABORTING switch, staying on %s",
-                           "TILING" if to_tiling else "WHOLE-FRAME", warmup_timeout_s,
-                           "WHOLE-FRAME" if to_tiling else "TILING")
-            incoming_valve.set_property("drop", True)      # undo step 1
-            try: target_pad.remove_probe(probe_id)
-            except Exception: pass
-            return False
-        sel.set_property("active-pad", target_pad)         # 3. flip selector (atomic)
-        outgoing_valve.set_property("drop", True)           # 4. idle the outgoing branch
-        self._tiling_active = to_tiling
-        logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
-        return True
+        Serialized by self._switch_lock: two callers interleaving their valve/selector
+        set_property calls could leave the selector pointing at a shut-valve branch (a
+        stall). Do NOT call this directly from application code — go through
+        tiling_policy.TilingSwitchCoordinator.request(), which also keeps the policy's
+        view of the active branch in sync. The lock here is defense-in-depth."""
+        with self._switch_lock:
+            sel = self.pipeline.get_by_name("branch_selector")
+            v_whole = self.pipeline.get_by_name("valve_whole")
+            v_tile = self.pipeline.get_by_name("valve_tile")
+            if sel is None or v_whole is None or v_tile is None:
+                logger.warning("switch_tiling: switchable-tiling pipeline not present; ignoring")
+                return False
+            target_pad_name = "sink_1" if to_tiling else "sink_0"
+            cur = sel.get_property("active-pad")
+            if cur is not None and cur.get_name() == target_pad_name:
+                self._tiling_active = to_tiling
+                return True  # already there
+            incoming_valve = v_tile if to_tiling else v_whole
+            outgoing_valve = v_whole if to_tiling else v_tile
+            target_pad = sel.get_static_pad(target_pad_name)
 
-    def enable_plus_one(self):
-        """Benchmark aid (switchable pipeline only): open BOTH valves so the tile
-        branch AND the whole-frame branch feed the device every frame — i.e. the
-        "NxM + 1" load (NxM tiles + 1 whole frame = NxM+1 inferences/frame, two
-        net-groups round-robin). Keeps the input-selector on the tile branch so the
-        measured capture->detection path is the tiling path under whole-frame
-        contention (matches the bench 'NxM+1' latency)."""
-        sel = self.pipeline.get_by_name("branch_selector")
-        v_tile = self.pipeline.get_by_name("valve_tile")
-        if sel is None or v_tile is None:
-            logger.warning("enable_plus_one: switchable-tiling pipeline not present; ignoring")
-            return
-        v_tile.set_property("drop", False)   # tile branch now also feeds (whole stays open)
-        tile_pad = sel.get_static_pad("sink_1")
-        ready = threading.Event()
-        def _first(pad, info, _u):
-            ready.set()
-            return Gst.PadProbeReturn.REMOVE
-        pid = tile_pad.add_probe(Gst.PadProbeType.BUFFER, _first, None)
-        if not ready.wait(3.0):
-            try: tile_pad.remove_probe(pid)
-            except Exception: pass
-        sel.set_property("active-pad", tile_pad)
-        logger.warning("!!! PLUS-ONE active: whole-frame + tiles both feeding device (NxM+1)")
+            incoming_valve.set_property("drop", False)        # 1. open incoming branch
+            ready = threading.Event()                         # 2. wait its first buffer
+            def _first_buf(pad, info, _u):
+                ready.set()
+                return Gst.PadProbeReturn.REMOVE
+            probe_id = target_pad.add_probe(Gst.PadProbeType.BUFFER, _first_buf, None)
+            if not ready.wait(warmup_timeout_s) and not ready.is_set():
+                # Incoming branch never produced -> REVERT: re-close the valve we opened,
+                # keep the selector + outgoing valve on the branch that IS producing.
+                logger.warning("switch_tiling: incoming %s branch gave no buffer in %.1fs; "
+                               "ABORTING switch, staying on %s",
+                               "TILING" if to_tiling else "WHOLE-FRAME", warmup_timeout_s,
+                               "WHOLE-FRAME" if to_tiling else "TILING")
+                incoming_valve.set_property("drop", True)      # undo step 1
+                try: target_pad.remove_probe(probe_id)
+                except Exception: pass
+                return False
+            sel.set_property("active-pad", target_pad)         # 3. flip selector (atomic)
+            outgoing_valve.set_property("drop", True)           # 4. idle the outgoing branch
+            self._tiling_active = to_tiling
+            logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
+            return True
+
+    @property
+    def tiling_active(self) -> bool:
+        """Branch the pipeline is actually on (False = whole-frame)."""
+        with self._switch_lock:
+            return self._tiling_active
+
+    def kill_tile_branch_for_test(self) -> bool:
+        """FAULT INJECTION, harness only (--test-kill-tile-after-s).
+
+        Shut valve_tile while the input-selector is still pointing at it. The tile branch
+        has warmed up and been accepted, and now stops delivering — the exact failure the
+        warmup timeout cannot catch and BranchStallWatchdog exists to recover from. There
+        is no other way to produce it on demand: a real branch death needs the hailonet or
+        the cropper to wedge.
+
+        Returns False (and does nothing) unless tiling is the active branch."""
+        with self._switch_lock:
+            sel = self.pipeline.get_by_name("branch_selector")
+            v_tile = self.pipeline.get_by_name("valve_tile")
+            if sel is None or v_tile is None:
+                logger.warning("kill_tile_branch_for_test: switchable-tiling pipeline not present")
+                return False
+            cur = sel.get_property("active-pad")
+            if cur is None or cur.get_name() != "sink_1":
+                return False        # not on tiling; nothing to kill
+            v_tile.set_property("drop", True)
+            logger.error("!!! TEST FAULT INJECTION: shut valve_tile while the selector is on it. "
+                         "The tile branch is now dead; the watchdog should revert to whole-frame.")
+            return True
 
     def _log_pipeline_health(self):
         """Periodic diagnostic: log per-probe buffer counts (with deltas since last call)
@@ -611,8 +648,10 @@ class GStreamerApp:
 
         if self.source_type == 'libcamera':
             # Stamp detection-start timestamp on buffers entering the inference wrapper.
-            # libcamerasrc path has nobody to attach this upstream; picamera2 path already does.
-            self._install_detection_start_probe()
+            # libcamerasrc path has nobody to attach this upstream; picamera2 path already
+            # does, which is why production (-i rpi) never installs this. The element name
+            # depends on which pipeline shape was built (switchable tiling renames it).
+            self._install_detection_start_probe(self.detection_start_probe_element)
 
         # Periodic pipeline health snapshot (buffer counts, queue levels, stall detection).
         # GLib.timeout_add_seconds(2, self._log_pipeline_health)
@@ -732,6 +771,10 @@ _pts_baseline_lock = threading.Lock()
 _pts_baseline_ns : int | None = None
 _pts_last_ns : int = -1
 
+# A backward step in the source clock larger than this is a DIFFERENT clock, not jitter
+# (inter-frame wobble is milliseconds). Anything smaller is absorbed by the +1ns clamp.
+_PTS_BACKWARD_REBASE_NS = 1_000_000_000  # 1 s
+
 
 def _shared_pts_ns(source_ns : int) -> int:
     """Return an EVEN, strictly-monotonic, shared-across-all-cameras PTS in ns.
@@ -751,6 +794,17 @@ def _shared_pts_ns(source_ns : int) -> int:
             _pts_baseline_ns = source_ns
         pts = source_ns - _pts_baseline_ns
         if pts <= _pts_last_ns:
+            if (_pts_last_ns - pts) > _PTS_BACKWARD_REBASE_NS:
+                # A SUSTAINED backward shift means the source switched clock domain (a
+                # camera whose SensorTimestamp is not CLOCK_BOOTTIME, or the push-time
+                # fallback below). Clamping through it would pin PTS at +1ns/frame
+                # forever: splitmuxsink's max-size-time would never fire, so one
+                # RAW_*.mkv segment would grow until the SD card filled, and the muxed
+                # timestamps would be meaningless. Re-baseline onto the new clock —
+                # a one-frame cadence glitch beats an unbounded file.
+                logger.warning("PTS source clock jumped back %.3fs; re-baselining "
+                               "(one frame of cadence lost)", (_pts_last_ns - pts) / 1e9)
+                _pts_baseline_ns = source_ns - (_pts_last_ns + 1)
             pts = _pts_last_ns + 1
         _pts_last_ns = pts
         return pts
@@ -1278,7 +1332,8 @@ def display_user_data_frame(user_data: app_callback_class):
 
 class GStreamerDetectionApp(GStreamerApp):
     def __init__(self, app_callback, user_data, inference : Config.Inference, camera_settings : Config.Camera, parser=None,
-                 video_format=None, tiles=None, tiling_overlap=None, switchable_tiling=False):
+                 video_format=None, tiles=None, tiling_overlap=None, tile_iou_threshold=None,
+                 switchable_tiling=False):
         if parser == None:
             parser = get_default_parser()
 
@@ -1308,6 +1363,9 @@ class GStreamerDetectionApp(GStreamerApp):
         # tiled path (ignored for whole-frame). From config.tiling.overlap.
         if tiling_overlap is not None:
             self.tiling_overlap = float(tiling_overlap)
+        # Seam dedup IoU for the hailotileaggregator; tiled path only.
+        if tile_iou_threshold is not None:
+            self.tile_iou_threshold = float(tile_iou_threshold)
         # Switchable tiling: build whole-frame + tile branches behind valves +
         # input-selector, hot-switchable at runtime (whole-frame active at start).
         self.switchable_tiling = bool(switchable_tiling)
@@ -1391,12 +1449,8 @@ class GStreamerDetectionApp(GStreamerApp):
                 additional_params=self.thresholds_str + (' scheduling-algorithm=1 ' if share_device else ''))
             return INFERENCE_PIPELINE_WRAPPER(inner, name=f'{branch_name}_wrapper',
                                               tiles_x=tx, tiles_y=ty,
-                                              tiling_overlap=self.tiling_overlap)
-
-        # Single-branch path keeps the historic 'inference'/'inference_wrapper'
-        # element names (latency probes + health logs reference them).
-        detection_pipeline_wrapper = _inference_branch('inference', self.tiles_x, self.tiles_y,
-                                                       share_device=False)
+                                              tiling_overlap=self.tiling_overlap,
+                                              tile_iou_threshold=self.tile_iou_threshold)
 
         tracker_pipeline = ''
         if False:
@@ -1456,17 +1510,34 @@ class GStreamerDetectionApp(GStreamerApp):
                 f'{tile_branch} ! branch_selector.sink_1 '
                 f'input-selector name=branch_selector sync-streams=false ! '
             )
+            # Whole-frame is the branch active at startup, so that is where a
+            # detection-start stamp belongs (libcamera source path only — see
+            # _install_detection_start_probe).
+            self.detection_start_probe_element = 'whole_wrapper_input_q'
         else:
+            # Single-branch path keeps the historic 'inference'/'inference_wrapper'
+            # element names (latency probes + health logs reference them).
+            detection_pipeline_wrapper = _inference_branch('inference', self.tiles_x, self.tiles_y,
+                                                           share_device=False)
             detection_section = f'{detection_pipeline_wrapper} ! '
+            self.detection_start_probe_element = 'inference_wrapper_input_q'
 
         # Tee the RAW source BEFORE inference. The recording taps the source directly;
         # the detection/control branch runs inference->tracker->callback separately.
-        # Why: the hailocropper/hailoaggregator reorders the bypass IMAGE stream it
-        # emits (recorded frames "jump" back and forth ~17-29%), even though the
-        # detection METADATA the callback/control path reads stays in strict order
-        # (verified: callback frame_id + ball position are monotonic; only the recorded
-        # image jumps). Recording the pre-inference source keeps the video in capture
-        # order without touching the control path or detection.
+        #
+        # Why: tapping AFTER the inference wrapper produced recorded frames that stepped
+        # backward (~17% by the ball-interleave metric) while the callback's frame_id and
+        # detections stayed strictly monotonic. Recording the pre-inference source removed
+        # it. The exact mechanism is NOT settled — the commit that made this change
+        # (3bc99a6) blamed "the aggregator reorders the bypass image stream", but that
+        # cannot be literally true: back then one `tee` fed both branches, and a tee fans
+        # each buffer to every src pad synchronously and in order, so the callback saw the
+        # same buffers in the same sequence and FrameOrderGuard never fired. The leading
+        # theory is pooled bypass memory being reused underneath the (then 120-deep)
+        # recording queue, which the callback never saw because get_numpy_from_buffer
+        # copies synchronously inside the pad probe. Until that is confirmed, do not use
+        # this comment to reason about whether the control path's image is trustworthy —
+        # see the open investigation before touching Detections.frame or optical_refinement.
         pipeline_string = (
             f'{source_pipeline} ! '
             f'tee name=output_tee '

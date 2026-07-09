@@ -7,18 +7,31 @@ Tasks that are already done are marked as `+`.
 
 # List of tasks
 
+- !!! on RPI box 2 cores are used in realtime mode, hence the whole system only uses two remaining ones. Consider either disable realtime mode for those 2 cores OR pin our app to the those 2 realtime cores so it doesn't conflict with anything else. FIRST try to pin our app, that's a minor fix in bdd.ssh and it is easily verifieable.
+- !!! PD coeff: make P inverse-propoprtional to speed, i.e. starting from 100kmh reduce p, higher speed --> smaller p. (there should be a coeff)
+
 + !! break configuration into the config-file (YAML) and run-time config object (dataclass). Parsing of the config file and validation of the fields must be based on types of the fields of dataclass.
 - Figure out how to test the code on CI/CD ti make sure that merged PRs are viable.
 - break code into proper modules, so the directory structure of "BDD" folder is not flat, but split into the 'src', 'tests', 'utils'
 + !!!! merge other two-camera and latency related commts from `detection-latency-bench-2026-06-03` branch.
 + !!! logs and videos percistency -- both should survive power down event so that whatever debug information we have after a crash is not lost. It is Ok to change video encoder/file format.
-- !! PD coeff: make P inverse-propoprtional to speed, i.e. starting from 100kmh reduce p, higher speed --> smaller p. (there should be a coeff)
 - !! implement noise reduction on target position log and estimation
 - !! UI for launches
 - !! figure out video capture without cropping (i.e. capture full frame)
 - ! right now probes are commented out, add CLI argument that enables them (default OFF)
-- ! rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — PR#9 review #3 handover-abort DONE (switch_tiling now reverts to the working branch on a dead-branch timeout); still open: #4 (--switch-test-s desyncs the policy + races the unlocked switch_tiling) and the optional post-switch watchdog.
++ rework tiling mode-switch conditions & handover robustness (see tiling_switch_rework below) — ALL THREE DONE 2026-07-09: #3 handover-abort (switch_tiling reverts to the working branch on a dead-branch timeout), #4 serialization (all switches go through tiling_policy.TilingSwitchCoordinator; `--plus-one`/`enable_plus_one()` deleted), #4c post-switch watchdog (tiling_policy.BranchStallWatchdog reverts to whole-frame when an accepted branch later dies, with a cooldown against thrash). Remaining work here is tuning, not robustness.
+- ! CONTROL-PATH FRAME TRUST (robustness review 2026-07, item #1, deferred): is `Detections.frame` — the image `OpticalObjectInfo` segments in drone_controller.py — stale w.r.t. its own detections? Commit 3bc99a6's stated root cause ("the aggregator reorders the bypass image stream while the metadata stays in order") cannot be literally true: back then ONE tee fed both the recorder and the callback, and a tee fans buffers to all src pads synchronously and in order. Leading theory is pooled bypass memory recycled under the then-120-deep recording queue, which the callback never saw because get_numpy_from_buffer copies synchronously inside the pad probe — that would mean the control path was always fine. Until settled, `optical_refinement` (ON by default) is on unverified pixels. Step 0 costs nothing: watch an existing `_DEBUG/debug_*.mkv` and see whether the bbox tracks the ball or lags it, and grep a run log for `Dropping out-of-order/duplicate frame`. Full context + the decisive experiment: memory `handoff-aggregator-bypass-image`.
+- ! SIGINT does not stop the app. **ROOT-CAUSED 2026-07-09 (the old "the GLib loop never quits" explanation was WRONG).** `shutdown()` DOES quit the loop — it ends with `GLib.idle_add(self.loop.quit)` (app_base.py, in `shutdown`). The hang is *after* `loop.run()` returns, in the cleanup `for t in self.threads: t.join()`: `self.threads` are the **picamera producer threads**, created **without `daemon=True`** and given **no stop signal**. `picamera_thread` only leaves its loop when `picam2.capture_request(wait=capture_timeout_s)` raises `TimeoutError` — i.e. when the camera actually stalls. In a healthy run frames keep arriving, so it never exits and the join never returns. Evidence: the main thread's `/proc/<pid>/wchan` is `futex_wait_queue` (a join), not `poll`/`epoll` where `loop.run()` would sit.
+  Two independent bugs ride along:
+  (a) `shutdown()` drives the pipeline straight `PAUSED -> READY -> NULL` **without sending EOS**, so `splitmuxsink` never finalizes the last `RAW_*.mkv` fragment. That truncation has nothing to do with the hang.
+  (b) `GStreamerApp.run()` ends in `sys.exit(0)`/`sys.exit(1)`, so `main()`'s tail — `print("Done !!!")`, `detections_queue.put(STOP)`, `action_thread.join()`, the `output_thread` drain — is **unreachable even on a clean exit**. The shutdown callbacks are the only teardown that ever runs. (This is why the `debug_*.mkv` overlay recorder had to be finalized from a shutdown callback; it works, verified on-rig — the last segment ffprobes clean and decodes while the process still hangs.)
+  Fix sketch: give `picamera_thread` a stop `Event` set by `shutdown()` before the join (its `capture_request` already has a bounded wait, so it exits within a frame period); `join(timeout=...)` and log stragglers; send EOS and wait for it on the bus before going to NULL so `splitmuxsink` finalizes; and let `run()` return instead of `sys.exit` so `main()`'s teardown is reachable. Add a hard `os._exit` backstop — hailo VDevice teardown can deadlock on set-NULL mid-inference.
+  NOTE for debugging: during teardown the process releases /dev/hailo0 and /dev/video0 while still alive, so `fuser /dev/hailo0` reports "free" for a live process — use `kill -0 <pid>`. Python 3.11 does not set OS thread names, so every `/proc/<pid>/task/*/comm` reads "Hailo Detection" (inherited from `setproctitle`) — comm is useless for identifying threads here; use `wchan`.
 - rotate camera 90 degrees (to maximize lead without leading visual)
+- deprecated CLI alias `--switch-test-s` (renamed to `--test-switch-s` on 2026-07-09): DELETE the alias and `_pop_deprecated_value()` after **2026-09-30**. Kept so runbooks/skills pinned to older checkouts keep running. Test/verification-harness flags are `--test-*`; run-mode flags (`--DEBUG`, `--no-record`, `--preview`, `--tiles`, `--switch-tiles`, `--vision-only`) are not.
+- NV12 capture assumes `stride == width` (low priority — unreachable on the current rig). `picamera_thread` takes the NV12 path via `request.make_buffer("main")`, which returns the raw ISP buffer INCLUDING row padding; picamera2 aligns stride (typically 32/64 B). At imx477 @ 1280 wide the stride IS 1280, so it is correct today, and we now only use imx477. Any width that is not stride-aligned (e.g. an imx708 1296-wide mode) would push padded rows into an appsrc declaring `width=W` -> sheared image and `len(frame_bytes) != W*H*3/2`. Fix when a new sensor/mode lands: read `config['main']['stride']` and either assert equality at startup (fail fast, it is pre-launch) or de-pad. The comment above the `make_buffer` call still describes `make_array` and is wrong.
+- `platform_controller.py` is STALE — mark for removal. It reads the same `Detections` queue as `drone_controller` but never got the `FrameOrderGuard` defense-in-depth added in 2b0d457, and line ~298 binds `frame` and never uses it (a trap now that `.frame` is a `Frame`, not an ndarray). Do not add features to it; delete once nothing imports `platform_controlling_thread`.
+- `test_OverwriteQueue.py::test_fifo_when_not_overwritten` fails in the FULL suite and passes in isolation — pre-existing on `origin/main` (verified 2026-07-09), not a regression. It asserts strict FIFO with `maxsize=128` while a producer races a consumer; leaked daemon threads from earlier tests starve the consumer, the deque overwrites the oldest, and `len(out) == N` fails (~8700-9100 of 10000). Either bound the producer (semaphore) or assert "no reorder among what survived" instead of "nothing dropped".
 - consolidate the near-duplicate bench configs config.test-single-imx477.yaml / config.test-single-imx477-nv12.yaml (PR#9 review #8, low priority): they differ only by `video_format`, which main() now overrides from the model input via detect_hef_video_format(), so the two are functionally identical when pointed at the same HEF. Parametrize or drop one; also propagate new keys like `record_videos` into the remaining test config(s).
 
 ## Experiments
@@ -61,12 +74,50 @@ deferred, not patched inline):
   whole-frame if N callbacks are missed AFTER a switch that initially succeeded but
   then the branch dies.
 
-- **#4 — manual `--switch-test-s` desyncs the policy and races switch_tiling.**
-  The test thread calls `app.switch_tiling()` directly and never updates
-  `policy.tiling_on`, so with `auto_switch` ALSO on the policy's belief goes stale
-  and it can't command the reverse switch. `switch_tiling` also holds no lock, so
-  the test thread and the policy worker can interleave valve/selector set_property
-  calls -> selector can land on a closed-valve branch (stall). When reworking:
-  route ALL switches (manual + policy) through ONE serialized entry point that
-  updates policy.committed() and holds a lock; or simply forbid `--switch-test-s`
-  together with `auto_switch`.
++ **#4 — manual `--test-switch-s` desynced the policy and raced switch_tiling.** DONE 2026-07-09.
+  Was: the harness thread called `app.switch_tiling()` directly and never updated
+  `policy.tiling_on`, so with `auto_switch` ALSO on, the policy's belief went stale and
+  it could never command the reverse switch (the rig latches onto the >200 ms tiling
+  branch). And `switch_tiling` held no lock, so two callers could interleave their
+  valve/selector `set_property` calls and leave the selector on a shut-valve branch.
+
+  Fix, as designed and reviewed:
+    * New `tiling_policy.TilingSwitchCoordinator` — the ONE entry point. `request()`
+      is serialized, and updates the policy (`committed()` / `reset_streaks()`) on the
+      way out. `note()` is the streaming-thread hot path and returns a target only when
+      a switch should START, never while one is in flight (so no worker-per-frame).
+    * TWO locks, never nested. `switch_tiling` blocks up to `warmup_timeout_s` (1 s) in
+      `ready.wait()`, so one shared lock would stall the streaming thread ~30 frames per
+      switch — worse than the desync. `GStreamerApp._switch_lock` (RLock) guards only the
+      valve/selector handover; the coordinator's lock guards only policy state and is
+      never held while `switch_fn` runs. Deadlock-free by construction.
+    * `_tiling_active` is initialized and exposed as `GStreamerApp.tiling_active`.
+    * Both drivers — the policy worker and the `--test-switch-s` thread — call
+      `user_data.request_tiling()`. Nothing calls `app.switch_tiling()` directly anymore.
+  Covered by 10 tests in `test_tiling_policy.py`, mutation-checked: reverting the lock,
+  the `committed()` call, or the lock-scope each makes the intended tests fail.
+  `--plus-one` / `enable_plus_one()` were deleted earlier the same day, removing a third
+  unlocked caller.
+
++ **#4c — post-switch watchdog.** DONE 2026-07-09.
+  Was: `switch_tiling` reverts when the incoming branch produces no buffer within the
+  warmup timeout, but nothing recovered from a branch that warmed up fine and died
+  *afterwards* — app_callback stops firing, DET FPS -> 0, the control loop starves, and
+  nothing notices because every component downstream is *waiting* rather than failing.
+
+  `tiling_policy.BranchStallWatchdog` polls the callback's frame counter from a daemon
+  thread. If it freezes for `tiling.stall_timeout_s` (default 2.0) while TILING is active,
+  it reverts to whole-frame — the branch that was known good at startup.
+    * A handover in flight legitimately pauses delivery and does NOT count as a stall.
+    * After a revert it arms a `tiling.stall_cooldown_s` (default 30) cooldown, because
+      the policy otherwise rebuilds its lost-streak in ~0.7 s and dives straight back into
+      the branch just proven dead. `note()` stops even asking during the cooldown; a direct
+      `request(True)` is refused. Requests to WHOLE-FRAME are never blocked — the watchdog
+      must always be able to get back to the known-good branch.
+    * It deliberately does NOT act when WHOLE-FRAME is the stalled branch: that branch is
+      fed by the same source tee and infers on the same hailonet, so switching to tiling
+      cannot help. It logs once (not per poll) and leaves the pipeline alone.
+    * If the revert itself fails, it reports failure honestly and retries after another
+      timeout rather than latching.
+  Fault injection `--test-kill-tile-after-s N` shuts `valve_tile` while the selector is on
+  it, which is the only way to produce this failure on demand. 7 host tests, mutation-checked.
