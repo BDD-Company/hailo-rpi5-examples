@@ -147,11 +147,11 @@ pd_coeff:
 takeoff:
   delay_until_n_detection_frames: 10
   #TODO: change from nanoseconds to miliseconds
-  duration_ns: 1000000000           # initial "safe" takeoff window
+  duration_ns: 500000000           # initial "safe" takeoff window
   # starting from platform with guides, make sure that initial takeoff is almost perpendicular
   # and we don't hit the guides with props.
   pd_coeff_p: [0.1, 0.1]
-  thrust: 1.0
+  thrust: 1.0 # max speed just to get off the rails
 
 # Multi-camera support. The shared caps (width/height/fps/video_format/
 # active_id/switch_to_wide_size/switch_to_zoom_size) apply to ALL cameras (a
