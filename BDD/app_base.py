@@ -393,6 +393,16 @@ class GStreamerApp:
         detections. A dead-branch switch would starve app_callback (DET FPS -> 0)
         with no recovery, and on this rig a stalled control loop can wreck hardware.
 
+        EXPECTED SIDE EFFECT — one duplicate frame per switch TO tiling. Both valves are
+        open during the make-before-break window, so the same source frame travels down
+        both branches. The whole-frame branch is faster, so when the selector flips onto
+        the slower tile branch its in-flight buffer can carry a frame id the callback has
+        already seen; FrameOrderGuard rejects it as a duplicate and logs "Dropping
+        out-of-order/duplicate frame N (last=N)". Measured on-device: 5 of 6 drops landed
+        within 28 ms of a ->TILING switch, 0 near a ->WHOLE switch (the fast branch only
+        ever skips forward). This is the guard doing its job — not a regression — so
+        "order-drops == 0" only holds in steady state, not across handovers.
+
         Returns True if the active branch is the target after the call (including a
         no-op when already there), False if the switch could not be performed.
 
