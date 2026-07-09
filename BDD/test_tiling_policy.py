@@ -492,3 +492,43 @@ def test_watchdog_stays_disarmed_until_the_first_frame_ever_arrives(caplog):
     with caplog.at_level("ERROR"):
         wd.poll()
     assert [r for r in caplog.records if "STALL" in r.getMessage()]
+
+
+# ===========================================================================
+# start_on_tiling: the policy must be seeded with the branch the pipeline booted on.
+# ===========================================================================
+def test_policy_booted_on_tiling_switches_to_whole_after_the_locked_streak():
+    """Shipped config: start_on_tiling + locked_frames_to_whole=30. The first decision
+    must be about the branch we are ACTUALLY on."""
+    policy = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=10,
+                                locked_frames_to_whole=30, tiling_on=True)
+    pipe = FakePipeline(); pipe.tiling = True
+    coord = TilingSwitchCoordinator(policy, pipe.switch)
+
+    assert coord.tiling_on is True
+    # 29 confident frames: still tiling.
+    assert [coord.note(0.81) for _ in range(29)] == [None] * 29
+    assert coord.note(0.81) is False              # the 30th crosses the threshold
+    assert coord.request(False) is True
+    assert pipe.tiling is False and coord.tiling_on is False
+
+
+def test_one_unconfident_frame_resets_the_locked_streak():
+    policy = TilingSwitchPolicy(switch_conf=0.4, locked_frames_to_whole=30, tiling_on=True)
+    coord = TilingSwitchCoordinator(policy, lambda t: True)
+    for _ in range(29):
+        coord.note(0.81)
+    assert coord.note(0.1) is None                # target lost for one frame
+    assert [coord.note(0.81) for _ in range(29)] == [None] * 29   # streak restarts
+    assert coord.note(0.81) is False
+
+
+def test_seeding_the_policy_wrong_would_invert_the_first_decision():
+    """If the pipeline boots on tiling but the policy is told tiling_on=False (the bug the
+    assert in main() guards), confident frames produce NO switch and lost frames ask to
+    switch to the branch we are already on."""
+    wrong = TilingSwitchPolicy(switch_conf=0.4, lost_frames_to_tile=10,
+                               locked_frames_to_whole=30, tiling_on=False)
+    assert [wrong.note(0.81) for _ in range(60)] == [None] * 60    # never comes back to whole
+    assert wrong.note(0.0) is None
+    assert [wrong.note(0.0) for _ in range(9)][-1] is True         # asks for tiling... again

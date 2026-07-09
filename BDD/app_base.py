@@ -27,6 +27,7 @@ from pipelines import (
     SOURCE_PIPELINE,
     INFERENCE_PIPELINE,
     INFERENCE_PIPELINE_WRAPPER,
+    SWITCHABLE_DETECTION_SECTION,
     TRACKER_PIPELINE,
     USER_CALLBACK_PIPELINE,
     DISPLAY_PIPELINE
@@ -203,9 +204,11 @@ class GStreamerApp:
         # first-buffer wait, so NEVER acquire a policy lock while holding it (see
         # tiling_policy.TilingSwitchCoordinator for the ordering).
         self._switch_lock = threading.RLock()
-        # Branch the pipeline is actually on. Whole-frame is active at startup: the
-        # input-selector defaults to its first-linked pad (sink_0) and valve_tile is
-        # built with drop=true.
+        # Which branch is live at startup. Set from config.tiling.start_on_tiling by the
+        # App subclass BEFORE create_pipeline() runs: it decides which valve boots open
+        # and which selector pad create_pipeline() activates.
+        self.start_on_tiling = False
+        # Branch the pipeline is actually on; kept in step with the above.
         self._tiling_active = False
         self.hef_path = None
         self.app_callback = None
@@ -257,6 +260,18 @@ class GStreamerApp:
         except Exception as e:
             logger.error(f"Error creating pipeline", exc_info=True)
             sys.exit(1)
+
+        # Boot on the tile branch. Opening valve_tile in the pipeline string is only half
+        # of it: input-selector activates its FIRST-LINKED pad, which is sink_0 (whole),
+        # and active-pad is a pad object that does not exist until parse_launch has run.
+        if self.switchable_tiling and self.start_on_tiling:
+            sel = self.pipeline.get_by_name("branch_selector")
+            if sel is None:
+                logger.error("start_on_tiling: branch_selector missing; staying on whole-frame")
+            else:
+                sel.set_property("active-pad", sel.get_static_pad("sink_1"))
+                self._tiling_active = True
+                logger.info("!!! startup branch: TILING (%dx%d)", self.tiles_x, self.tiles_y)
 
         # Connect to hailo_display fps-measurements
         if self.show_fps:
@@ -1334,7 +1349,7 @@ def display_user_data_frame(user_data: app_callback_class):
 class GStreamerDetectionApp(GStreamerApp):
     def __init__(self, app_callback, user_data, inference : Config.Inference, camera_settings : Config.Camera, parser=None,
                  video_format=None, tiles=None, tiling_overlap=None, tile_iou_threshold=None,
-                 switchable_tiling=False):
+                 switchable_tiling=False, start_on_tiling=False):
         if parser == None:
             parser = get_default_parser()
 
@@ -1368,8 +1383,10 @@ class GStreamerDetectionApp(GStreamerApp):
         if tile_iou_threshold is not None:
             self.tile_iou_threshold = float(tile_iou_threshold)
         # Switchable tiling: build whole-frame + tile branches behind valves +
-        # input-selector, hot-switchable at runtime (whole-frame active at start).
+        # input-selector, hot-switchable at runtime. start_on_tiling picks which one is
+        # live at startup; both are read by create_pipeline() below, so set them first.
         self.switchable_tiling = bool(switchable_tiling)
+        self.start_on_tiling = bool(start_on_tiling) and self.switchable_tiling
         # Set Hailo parameters these parameters should be set based on the model used
         self.batch_size = 1
         # Model + NMS come from config.inference (config.yaml); CLI --hef-path /
@@ -1495,26 +1512,14 @@ class GStreamerDetectionApp(GStreamerApp):
         )
 
         if self.switchable_tiling:
-            # Two valve-gated branches share the source via a tee and merge at an
-            # input-selector. Whole-frame active at startup (valve_tile closed,
-            # selector defaults to the first-linked pad = sink_0 = whole). A runtime
-            # switch (switch_tiling) opens the other valve, waits for its first
-            # buffer, flips the selector, then closes the old valve — zero command
-            # gap. Same hef on both hailonets (shared vdevice) => no PCIe reload.
             whole_branch = _inference_branch('whole', 1, 1, share_device=True)
             tile_branch = _inference_branch('tile', self.tiles_x, self.tiles_y, share_device=True)
-            detection_section = (
-                f'tee name=branch_src_tee '
-                f'branch_src_tee. ! {QUEUE(name="whole_gate_q")} ! valve name=valve_whole drop=false ! '
-                f'{whole_branch} ! branch_selector.sink_0 '
-                f'branch_src_tee. ! {QUEUE(name="tile_gate_q")} ! valve name=valve_tile drop=true ! '
-                f'{tile_branch} ! branch_selector.sink_1 '
-                f'input-selector name=branch_selector sync-streams=false ! '
-            )
-            # Whole-frame is the branch active at startup, so that is where a
-            # detection-start stamp belongs (libcamera source path only — see
-            # _install_detection_start_probe).
-            self.detection_start_probe_element = 'whole_wrapper_input_q'
+            detection_section = SWITCHABLE_DETECTION_SECTION(
+                whole_branch, tile_branch, start_on_tiling=self.start_on_tiling)
+            # The detection-start stamp belongs on whichever branch is live at startup
+            # (libcamera source path only — see _install_detection_start_probe).
+            self.detection_start_probe_element = (
+                'tile_wrapper_input_q' if self.start_on_tiling else 'whole_wrapper_input_q')
         else:
             # Single-branch path keeps the historic 'inference'/'inference_wrapper'
             # element names (latency probes + health logs reference them).

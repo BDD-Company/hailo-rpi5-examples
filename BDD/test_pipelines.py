@@ -14,7 +14,10 @@ import pytest
 
 pytest.importorskip("hailo_apps", reason="pipelines.py imports hailo_apps (Pi only)")
 
-from pipelines import INFERENCE_PIPELINE_WRAPPER  # noqa: E402
+from pipelines import (  # noqa: E402
+    INFERENCE_PIPELINE_WRAPPER,
+    SWITCHABLE_DETECTION_SECTION,
+)
 
 
 INNER = 'fakeinner'
@@ -67,3 +70,35 @@ def test_branch_names_follow_the_wrapper_name():
     assert 'name=tile_wrapper_input_q' in s
     assert 'name=tile_wrapper_crop' in s
     assert 'name=tile_wrapper_agg' in s
+
+
+# ---------------------------------------------------------------------------
+# SWITCHABLE_DETECTION_SECTION: which branch boots live.
+# ---------------------------------------------------------------------------
+def _valve_drop(section, valve_name):
+    """Extract `drop=<x>` from the `valve name=<valve_name> drop=<x>` element."""
+    frag = section.split(f'valve name={valve_name} ')[1]
+    return frag.split()[0].split('=')[1]
+
+
+def test_switchable_section_boots_on_whole_frame_by_default():
+    s = SWITCHABLE_DETECTION_SECTION('WHOLE', 'TILE')
+    assert _valve_drop(s, 'valve_whole') == 'false'   # whole-frame feeds
+    assert _valve_drop(s, 'valve_tile') == 'true'     # tile branch idle
+
+
+def test_switchable_section_boots_on_tiling_when_asked():
+    s = SWITCHABLE_DETECTION_SECTION('WHOLE', 'TILE', start_on_tiling=True)
+    assert _valve_drop(s, 'valve_whole') == 'true'    # whole-frame idle
+    assert _valve_drop(s, 'valve_tile') == 'false'    # tile branch feeds
+
+
+def test_switchable_section_always_names_what_switch_tiling_looks_up():
+    """switch_tiling() resolves these three by name; nothing else pins them together."""
+    for start in (False, True):
+        s = SWITCHABLE_DETECTION_SECTION('WHOLE', 'TILE', start_on_tiling=start)
+        for name in ('valve_whole', 'valve_tile', 'branch_selector'):
+            assert f'name={name}' in s, (start, name)
+        # whole -> sink_0, tile -> sink_1: switch_tiling maps to_tiling onto these pads.
+        assert 'WHOLE ! branch_selector.sink_0' in s
+        assert 'TILE ! branch_selector.sink_1' in s

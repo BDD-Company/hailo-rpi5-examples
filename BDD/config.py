@@ -174,6 +174,12 @@ class Config:
         # (e.g. tile-to-reacquire when the target is lost) trade latency for recall
         # on demand. When false, tiling is static (whole-frame if 1×1, else fixed).
         switchable: bool = False
+        # Which branch is ACTIVE at startup (implies switchable). False = whole-frame,
+        # the lowest-latency path. True = boot on the tiles_x×tiles_y branch, so the
+        # first frames are inferred at tiling's small-object recall; the policy then
+        # switches to whole-frame once the target is locked (see locked_frames_to_whole).
+        # Costs latency until that happens — 2x1 StageB ~28ms vs ~13ms whole-frame.
+        start_on_tiling: bool = False
         # Automatic detection-state policy (implies switchable): switch to tiling
         # after `lost_frames_to_tile` consecutive frames with no confident target
         # (reacquire small/distant objects), and back to whole-frame after

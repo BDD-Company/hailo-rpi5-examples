@@ -338,6 +338,36 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
     return inference_wrapper_pipeline
 
 
+def SWITCHABLE_DETECTION_SECTION(whole_branch, tile_branch, start_on_tiling=False):
+    """Two valve-gated inference branches sharing the source via a tee, merged at an
+    input-selector so exactly ONE feeds the callback at a time.
+
+    A runtime switch (GStreamerApp.switch_tiling) opens the incoming valve, waits for its
+    first buffer, flips the selector, then closes the outgoing valve — a make-before-break
+    handover with no command gap. Both branches carry the same hef on a shared vdevice, so
+    a switch costs no PCIe weight reload, only the steady-state latency step.
+
+    ``start_on_tiling`` picks the branch that is live at startup by choosing which valve
+    boots open. The selector ALSO has to be pointed at that branch — it defaults to its
+    first-linked pad (sink_0 = whole-frame) — which GStreamerApp.create_pipeline does
+    after parse_launch, because active-pad is a pad object that does not exist yet here.
+
+    Element names are load-bearing: switch_tiling() looks up `valve_whole`, `valve_tile`
+    and `branch_selector` by name, and the detection-start probe looks up
+    `<branch>_wrapper_input_q`. test_pipelines.py pins them.
+    """
+    whole_drop = 'true' if start_on_tiling else 'false'
+    tile_drop = 'false' if start_on_tiling else 'true'
+    return (
+        f'tee name=branch_src_tee '
+        f'branch_src_tee. ! {QUEUE(name="whole_gate_q")} ! valve name=valve_whole drop={whole_drop} ! '
+        f'{whole_branch} ! branch_selector.sink_0 '
+        f'branch_src_tee. ! {QUEUE(name="tile_gate_q")} ! valve name=valve_tile drop={tile_drop} ! '
+        f'{tile_branch} ! branch_selector.sink_1 '
+        f'input-selector name=branch_selector sync-streams=false ! '
+    )
+
+
 def USER_CALLBACK_PIPELINE(name='identity_callback'):
     """
     Creates a GStreamer pipeline string for the user callback element.

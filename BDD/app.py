@@ -414,7 +414,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, tiles=None, tiling_overlap=None, tile_iou_threshold=None, switchable_tiling=False, preview=False):
+    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, tiles=None, tiling_overlap=None, tile_iou_threshold=None, switchable_tiling=False, start_on_tiling=False, preview=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
@@ -428,7 +428,8 @@ class App(GStreamerDetectionApp):
         self.camera_switcher = camera_switcher
         super().__init__(app_callback, user_data, inference=config.inference, camera_settings=config.camera, parser=parser,
                          video_format=video_format, tiles=tiles, tiling_overlap=tiling_overlap,
-                         tile_iou_threshold=tile_iou_threshold, switchable_tiling=switchable_tiling)
+                         tile_iou_threshold=tile_iou_threshold, switchable_tiling=switchable_tiling,
+                         start_on_tiling=start_on_tiling)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -781,30 +782,46 @@ def main():
     record_videos = config.record_videos and not no_record_flag
     logger.info("!!! RAW video recording: %s", "ENABLED" if record_videos else "DISABLED")
 
-    # Switchable tiling: CLI --switch-tiles wins, else config.tiling.switchable.
-    # When on, the tile-branch geometry is the --switch-tiles value (or config
-    # tiles_x/y), and the pipeline builds whole-frame + tile branches hot-switchable
-    # at runtime (whole-frame active at startup).
-    switchable = switch_tiles_override is not None or config.tiling.switchable or config.tiling.auto_switch
+    # Switchable tiling: --switch-tiles forces it on; config.tiling.switchable /
+    # auto_switch / start_on_tiling each imply it. `--tiles NxM` means "STATIC grid" and
+    # therefore forces it OFF — that is the only way to get a plain single-branch run
+    # (e.g. `--tiles 1x1` for whole-frame only) from the CLI now that the shipped
+    # config.yaml enables auto_switch.
+    config_wants_switchable = (config.tiling.switchable or config.tiling.auto_switch
+                               or config.tiling.start_on_tiling)
+    switchable = switch_tiles_override is not None or (tiles_override is None and config_wants_switchable)
+    if tiles_override is not None and config_wants_switchable:
+        logger.warning("!!! --tiles %dx%d forces a STATIC grid: config.tiling switchable/auto_switch/"
+                       "start_on_tiling are ignored for this run (use --switch-tiles to keep them).",
+                       tiles_override[0], tiles_override[1])
+
+    _no_switchable = ("Pass --switch-tiles NxM, or set tiling.switchable / tiling.auto_switch / "
+                      "tiling.start_on_tiling in the config (and drop --tiles, which forces a "
+                      "static grid).")
     if switch_test_s and not switchable:
         raise SystemExit("--test-switch-s toggles the whole-frame<->tiling handover, which only "
-                         "exists with switchable tiling. Pass --switch-tiles NxM, or set "
-                         "tiling.switchable / tiling.auto_switch in the config.")
+                         "exists with switchable tiling. " + _no_switchable)
     if kill_tile_after_s and not switchable:
         raise SystemExit("--test-kill-tile-after-s kills the tile branch, which only exists with "
-                         "switchable tiling. Pass --switch-tiles NxM, or set "
-                         "tiling.switchable / tiling.auto_switch in the config.")
+                         "switchable tiling. " + _no_switchable)
     if switch_test_s and config.tiling.auto_switch:
         logger.warning("!!! --test-switch-s together with tiling.auto_switch: the harness and the "
                        "detection policy will both drive the branch and fight each other. "
                        "Both switches are serialized, but the run is not representative.")
+
+    # Which branch is live at startup. Only meaningful when both branches exist.
+    start_on_tiling = switchable and config.tiling.start_on_tiling
+
     if switchable:
         tiles = switch_tiles_override if switch_tiles_override is not None \
             else (config.tiling.tiles_x, config.tiling.tiles_y)
         if tiles == (1, 1):
             tiles = (2, 1)  # a 1x1 "tile branch" == whole-frame; default to 2x1
-        logger.info("!!! SWITCHABLE tiling: whole-frame <-> %dx%d (whole active at startup)",
-                    tiles[0], tiles[1])
+        logger.info("!!! SWITCHABLE tiling: whole-frame <-> %dx%d (%s active at startup)",
+                    tiles[0], tiles[1], "TILING" if start_on_tiling else "whole-frame")
+        if start_on_tiling and not config.tiling.auto_switch:
+            logger.warning("!!! start_on_tiling without auto_switch: nothing will ever switch back "
+                           "to whole-frame on its own; the run stays on the higher-latency branch.")
     else:
         # Static tile grid: CLI --tiles wins, else config.tiling.
         tiles = tiles_override if tiles_override is not None else (config.tiling.tiles_x, config.tiling.tiles_y)
@@ -895,6 +912,7 @@ def main():
         tiling_overlap=config.tiling.overlap,
         tile_iou_threshold=config.tiling.tile_iou_threshold,
         switchable_tiling=switchable,
+        start_on_tiling=start_on_tiling,
         preview=preview_flag)
     if preview_flag:
         logger.info("!!! PREVIEW window enabled (%s); needs a display (DISPLAY/WAYLAND_DISPLAY set)",
@@ -906,15 +924,19 @@ def main():
     # Install the switch coordinator whenever the pipeline HAS two branches, even if
     # the automatic policy is off: the --test-switch-s harness must go through the same
     # serialized path, or it desyncs the policy and races the handover.
-    # tiling_on=False matches the pipeline at startup (selector on sink_0, valve_tile shut).
+    # tiling_on MUST match the branch the pipeline actually booted on, or the policy's
+    # very first decision is made about the wrong branch.
     if switchable:
+        assert app.tiling_active == start_on_tiling, (
+            f"pipeline booted on {'tiling' if app.tiling_active else 'whole-frame'} but "
+            f"start_on_tiling={start_on_tiling}")
         user_data.attach_tiling_switch(
             switch_fn=app.switch_tiling,
             policy=TilingSwitchPolicy(
                 switch_conf=config.tiling.switch_conf,
                 lost_frames_to_tile=config.tiling.lost_frames_to_tile,
                 locked_frames_to_whole=config.tiling.locked_frames_to_whole,
-                tiling_on=False,
+                tiling_on=start_on_tiling,
             ),
             auto_switch=config.tiling.auto_switch,
         )
