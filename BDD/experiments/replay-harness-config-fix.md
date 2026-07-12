@@ -114,11 +114,26 @@ Tests load the repo's real `config.yaml`, so they also fail if `config.yaml` and
 apart again. They assert **structure, never values** — `config.yaml` carries local flight tuning
 and its numbers change constantly.
 
-Acceptance (manual, off-rig): replay the real flight from the handoff headless —
-`/media/BDD/_BACKUPS/UAE/2026-04/2026-04-27/_DEBUG_13/BDD_20260427-160029.log`, 1655 frames
-(speeds p50 10.4 / p90 30.6 / max 39.1 m/s) — expecting exit 0 and zero exceptions, then again
-with `--params "{'pd_coeff.speed_reduction.enabled': False}"` to confirm the A/B control the
-handoff describes still works.
+Acceptance (manual, off-rig): replay the **whole standard corpus** headless, expecting exit 0
+and zero exceptions on each. This same set is what every future control-loop change gets
+verified against, so the fixed harness must handle all three regimes, not just the dive.
+
+`/media/BDD/_BACKUPS/UAE/2026-04/2026-04-27/_DEBUG_13/`:
+
+| Log | Frames | Speed p50 / p90 / max (m/s) | Why |
+|---|---|---|---|
+| `BDD_20260427-160029.log` | 1655 | 10.4 / 30.5 / **39.1** | Full dive — the only log that exercises the whole speed range |
+| `BDD_20260427-155753.log` | 1080 | 11.4 / 17.2 / 21.2 | Second, independent flight — cruise speeds |
+| `BDD_20260427-160006.log` | 98 | 0.3 / 0.6 / 0.7 | Near-stationary (the bench condition); fast smoke test |
+| `BDD_20260427-155731.log` | 0 | — | **Junk, no frames.** Do not use |
+
+Traps: (a) do NOT pass the `_DEBUG_13` directory — `find_files_in_dir` picks
+`sorted(glob("*.log"))[0]`, i.e. the *empty* `155731` log, and globs videos from all three
+flights together; pass an explicit log path. (b) Video stamps are off by one second from the log
+stem (`155753.log` ↔ `debug_20260427-15575`**`4`**`_*.mkv`).
+
+Then re-run `160029` with `--params "{'pd_coeff.speed_reduction.enabled': False}"` to confirm the
+A/B control the handoff describes still works.
 
 ## Out of scope
 
