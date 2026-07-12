@@ -579,7 +579,8 @@ def run_replay(config: Config,
                frames: dict,
                base_ns: int,
                *,
-               output_queue=None) -> MockDroneMover:
+               output_queue=None,
+               mock_monotonic: MockMonotonicNs | None = None) -> MockDroneMover:
     """Drive the REAL `drone_controlling_thread` with replayed frames. Returns the
     MockDroneMover, whose `.commands` / `.telemetry_seen` are the record of the run.
 
@@ -589,8 +590,12 @@ def run_replay(config: Config,
     production control loop.
 
     Blocks until the queue is exhausted. Both monkeypatches are undone on the way out.
+
+    `mock_monotonic` lets a caller share its clock (debug_app_callback drives app_callback
+    off the same one, so both halves of the replay must see the same time).
     """
-    mock_monotonic = MockMonotonicNs(base_ns)
+    if mock_monotonic is None:
+        mock_monotonic = MockMonotonicNs(base_ns)
     mock_drone: list[MockDroneMover | None] = [None]
     first_frame_id = min(frames) if frames else None
 

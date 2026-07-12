@@ -191,14 +191,17 @@ def _setup_other_stubs():
     if 'setproctitle' not in sys.modules:
         _ensure_module('setproctitle', {'setproctitle': lambda s: None})
     if 'pipelines' not in sys.modules:
-        _ensure_module('pipelines', {
-            'SOURCE_PIPELINE': lambda **kw: '',
-            'INFERENCE_PIPELINE': lambda **kw: '',
-            'INFERENCE_PIPELINE_WRAPPER': lambda s: '',
-            'TRACKER_PIPELINE': lambda **kw: '',
-            'USER_CALLBACK_PIPELINE': lambda **kw: '',
-            'DISPLAY_PIPELINE': lambda **kw: '',
-        })
+        # `pipelines` only ever builds GStreamer pipeline STRINGS, and replay builds no
+        # pipeline — detections come from the log. So nothing app_base imports from here is
+        # ever called, and the stub can answer to any name.
+        #
+        # It used to enumerate six specific symbols, which silently rotted the moment
+        # app_base imported a seventh (`QUEUE`): the stub shadows the real pipelines.py, so
+        # the import failed with a baffling "cannot import name 'QUEUE' from 'pipelines'
+        # (unknown location)" and the whole tool was unusable. __getattr__ (PEP 562) cannot
+        # fall out of date the same way.
+        _pipelines = _ensure_module('pipelines')
+        _pipelines.__getattr__ = lambda name: (lambda *args, **kwargs: '')
     try:
         import mavsdk  # noqa: F401
     except ImportError:
@@ -227,7 +230,8 @@ _setup_other_stubs()
 # ===================================================================
 
 import app as app_module
-from app import app_callback, user_app_callback_class, seen_frames
+from app import app_callback, user_app_callback_class
+from frame_order import FrameOrderGuard
 
 import hailo
 from gi.repository import Gst  # noqa: F811
@@ -235,13 +239,14 @@ from bytetrack import BYTETracker
 
 from debug_drone_controller import (
     parse_log, find_files_in_dir,
-    MockMonotonicNs, MockDroneMover,
+    MockMonotonicNs,
     ReplayQueue, InteractiveDisplaySink,
+    REPLAY_CONFIG_DEFAULT, load_replay_config, run_replay,
+    warn_replayed_config_is_not_the_flights,
 )
-import drone_controller as drone_controller_module
+from parse_config import ConfigError
 
 from flight_debugger import VideoReader
-from helpers import XY
 from OverwriteQueue import OverwriteQueue
 from debug_output import debug_output_thread
 
@@ -474,14 +479,26 @@ def main():
         help="Path to video file(s) or directory with video files",
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=REPLAY_CONFIG_DEFAULT,
+        help="Config YAML to replay WITH (default: config.yaml next to this script). "
+             "Note this is today's config, not the one the flight flew with.",
+    )
+    parser.add_argument(
         "--params",
         type=lambda x: dict(ast.literal_eval(x)),
         default=None,
-        help="Extra config parameters to overwrite",
+        help="Config overrides as DOTTED paths, e.g. \"{'pd_coeff.p': [4, 4], "
+             "'bytetrack.track_thresh': 0.5}\". Validated; unknown keys are an error.",
     )
     parser.add_argument(
         "--autoplay", action='store_true', default=False,
         help="Do NOT wait for user input to advance frames",
+    )
+    parser.add_argument(
+        "--headless", action='store_true', default=False,
+        help="No display at all: no window, no keypress. Needs no X/Wayland.",
     )
     args = parser.parse_args()
 
@@ -500,121 +517,68 @@ def main():
     logger.info("Video path: %s", video_path)
 
     # -- Parse log --
-    config_dict, frames, base_ns = parse_log(log_file)
+    # parse_log also scrapes the log's `!!! Config:` line; we deliberately do NOT build the
+    # control config from it (flat pre-refactor dict on old logs, non-eval-able repr on new
+    # ones). See load_replay_config.
+    _logged_config, frames, base_ns = parse_log(log_file)
     if not frames:
         print("No frame data found in log file", file=sys.stderr)
         sys.exit(1)
     logger.info("Parsed %d frames from log", len(frames))
 
-    if config_dict:
-        logger.info("Loaded config from log: %s", config_dict)
-    else:
-        logger.warning("No config found in log, using defaults")
-        config_dict = {
-            'confidence_min': 0.4,
-            'thrust_takeoff': 0.5,
-            'thrust_min': 0.5,
-            'thrust_max': 0.5,
-            'thrust_dynamic': False,
-            'thrust_proportional_to_distance': False,
-            'target_lost_fade_per_frame': 0.99,
-            'target_estimator_clear_history_after_target_lost_frames': 3,
-            'estimation_3d': False,
-            'follow_target_position_ned': False,
-            'estimation_lookahead_frames': 2,
-            'estimation_lookahead_dynamic': False,
-            'pd_coeff_p': XY(3, 3), # per-axis P gain (x, y)
-            'pd_coeff_d': 0,
-            'pd_coeff_p_safe_min': 0.6,
-            'pd_coeff_p_min': XY(0.5, 0.5),
-            'pd_coeff_p_max': XY(10, 10),
-            'pd_coeff_p_dynamic': False,
-            'frame_angular_size_deg': XY(107, 85),
-            'target_size_m': XY(1.7, 2),
-            'safe_takeoff_period_ns': 300_000_000,
-            'delay_takeof_until_n_detection_frames': 3,
-            'aim_point': XY(0.5, 0.5),
-            'DEBUG': True,
-        }
-
-    # -- Config overrides --
-    config_dict['DEBUG'] = True
-    config_dict.update({
-        'follow_target_position_ned': True,
-        'estimation_3d': True,
-        'estimation_3d_method': 'numpy',
-        'estimation_lookahead_frames': 10,
-        'estimation_lookahead_dynamic': False,
-        'estimation_lookahead_dynamic_sqrt': False,
-        'estimation_lookahead_dynamic_factor': 0.1,
-        'estimation_lookahead_dynamic_frames_near': 0,
-        'estimation_lookahead_dynamic_frames_medium': 0,
-        'estimation_lookahead_dynamic_frames_far': 0,
-        'optical_methods_to_refine_target_size_and_center' : True,
-        'adjust_aim_point_at_edge_of_frame': True,
-    })
-
-    if args.params:
-        config_dict.update(args.params)
-
-    # Remove stale config keys
-    for k in ['confidence_move', 'inertia_correction_gain',
-              'inertia_correction_limits', 'inertia_correction_min_speed_ms',
-              'aim_point_max_offset']:
-        config_dict.pop(k, None)
-
-    # -- Extract ByteTracker config (consumed by app_callback, not drone_controller) --
-    bytetrack_config = {
-        'track_thresh':   config_dict.pop('bytetrack_track_thresh', 0.3),
-        'det_thresh':     config_dict.pop('bytetrack_det_thresh', 0.35),
-        'match_thresh':   config_dict.pop('bytetrack_match_thresh', 0.3),
-        'track_buffer':   config_dict.pop('bytetrack_track_buffer', 30),
-        'frame_rate':     config_dict.pop('bytetrack_frame_rate', 30),
-        'match_max_dist': config_dict.pop('bytetrack_match_max_dist', 0.2),
-    }
+    # -- Load the config to replay WITH --
+    try:
+        config = load_replay_config(args.config, args.params)
+    except ConfigError as e:
+        print(f"Config error: {e}", file=sys.stderr)
+        sys.exit(1)
+    warn_replayed_config_is_not_the_flights(log_file, args.config)
 
     # -- Open video --
+    # app_callback reads pixels (optical refinement, tiling), so video matters more here than
+    # in debug_drone_controller. Degrade to blank frames rather than dying, but say so.
     video_reader = VideoReader(video_path)
     if video_reader.available:
         logger.info("Video loaded: %d frames", video_reader.total)
     else:
-        logger.error("Failed to load video %s", video_path)
-        sys.exit(-1)
+        logger.warning(
+            "!!! No usable video at %s — replaying on BLANK frames. app_callback reads pixels, "
+            "so anything image-based (optical refinement) will not behave as it did in flight.",
+            video_path,
+        )
 
     # -- Build per-frame data --
     frame_data_list = build_frame_data_list(frames, video_reader)
 
     # -- Mock time.monotonic_ns --
+    # app_callback runs in the pre-pass below and drone_controller in run_replay, but both
+    # halves of the replay must see the SAME clock, so it is built here and handed over.
     mock_monotonic = MockMonotonicNs(base_ns)
     mock_time = types.ModuleType("mock_time")
     for attr in dir(real_time_module):
         if not attr.startswith("_"):
             setattr(mock_time, attr, getattr(real_time_module, attr))
     mock_time.monotonic_ns = mock_monotonic
-    # Patch both app and drone_controller modules
-    app_module.time = mock_time
-    drone_controller_module.time = mock_time
-
-    # -- Mock DroneMover --
-    drone_controller_module.DroneMover = MockDroneMover
-    mock_drone = [None]
-
-    _original_init = MockDroneMover.__init__
-    def _capturing_init(self, *args, **kwargs):
-        _original_init(self, *args, **kwargs)
-        mock_drone[0] = self
-        first_fid = sorted(frames.keys())[0]
-        self.set_frame_data(first_fid, frames[first_fid].get("telemetry", {}))
-    MockDroneMover.__init__ = _capturing_init
+    app_module.time = mock_time     # drone_controller's own patch is run_replay's job
 
     # -- Install mock patches on app module --
     install_mock_patches()
 
-    # -- Clear app.py's frame deduplication state --
-    seen_frames.clear()
+    # -- Clear app.py's frame-ordering state --
+    # A replay starts again at frame 0, so a guard left over from a previous run would
+    # reject every frame as a reorder. app_callback looks this up as a module global at
+    # call time, so rebinding a fresh guard is enough. (Was `seen_frames.clear()`, from
+    # before FrameOrderGuard replaced the old last-10 dedup set.)
+    app_module.frame_order_guard = FrameOrderGuard()
 
     # -- Set up ByteTracker and user_data --
-    bytetracker = BYTETracker(**bytetrack_config)
+    # From the real Config, exactly as app.py does it. This used to be scraped from flat
+    # `bytetrack_*` keys in the log, which no longer exist: every one silently fell back to
+    # its default, so the replay tracked with parameters that were nobody's.
+    bytetracker = (BYTETracker(**config.bytetrack.tracker_kwargs())
+                   if config.bytetrack is not None else None)
+    if bytetracker is None:
+        logger.warning("bytetrack is disabled in %s — replaying without a tracker.", args.config)
     user_data = user_app_callback_class(OverwriteQueue(maxsize=1), bytetracker)
     user_data.use_frame = True
 
@@ -625,54 +589,47 @@ def main():
     )
 
     # -- Build ReplayQueue — same pattern as debug_drone_controller.py --
-    replay_queue = ReplayQueue(detections_list)
-
-    def on_frame_callback(frame_id, item_index):
-        fd = frames.get(frame_id, {})
-        if mock_drone[0] is not None:
-            mock_drone[0].set_frame_data(frame_id, fd.get("telemetry", {}))
-        mock_monotonic.set_frame(fd.get("timestamp_ns", 0))
-
-    replay_queue.set_on_frame_callback(on_frame_callback)
+    # (run_replay installs the per-frame callback that winds the clock and telemetry.)
+    replay_queue = ReplayQueue(detections_list, auto_advance=args.headless)
 
     # -- Set up output display --
-    output_queue = OverwriteQueue(maxsize=200)
-    sink = InteractiveDisplaySink(
-        replay_queue,
-        autoplay=args.autoplay,
-        window_title=f"App Callback Debug: {log_file}  {video_path}",
-    )
+    output_queue = None
+    output_thread = None
+    if not args.headless:
+        output_queue = OverwriteQueue(maxsize=200)
+        sink = InteractiveDisplaySink(
+            replay_queue,
+            autoplay=args.autoplay,
+            window_title=f"App Callback Debug: {log_file}  {video_path}",
+        )
 
-    output_thread = threading.Thread(
-        target=debug_output_thread,
-        args=(output_queue, sink),
-        name="DEBUG_DISPLAY",
-        daemon=True,
-    )
-    output_thread.start()
+        output_thread = threading.Thread(
+            target=debug_output_thread,
+            args=(output_queue, sink),
+            name="DEBUG_DISPLAY",
+            daemon=True,
+        )
+        output_thread.start()
 
     # -- Run drone_controller on the main thread (same as debug_drone_controller.py) --
     logger.info(
         "Pre-processed %d → %d frames. Starting replay (ByteTracker: %s)...",
-        len(frame_data_list), len(detections_list), bytetrack_config,
+        len(frame_data_list), len(detections_list),
+        config.bytetrack.tracker_kwargs() if config.bytetrack else None,
     )
 
-    drone_config = {"upside_down_angle_deg": 130, "upside_down_hold_s": 0.2}
     try:
-        drone_controller_module.drone_controlling_thread(
-            "replay://mock",
-            drone_config,
-            replay_queue,
-            control_config=dict(config_dict),
+        drone = run_replay(
+            config, replay_queue, frames, base_ns,
             output_queue=output_queue,
+            mock_monotonic=mock_monotonic,
         )
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
     except Exception:
         logger.exception("drone_controlling_thread finished with error")
+        sys.exit(1)
 
-    logger.info("Replay finished.")
-    if output_thread.is_alive():
+    logger.info("Replay finished: %d commands issued.", len(drone.commands) if drone else 0)
+    if output_thread is not None and output_thread.is_alive():
         output_thread.join(timeout=5)
 
 
