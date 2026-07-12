@@ -10,6 +10,7 @@ import math
 import pytest
 
 from config import Config
+from parse_config import loads_config
 from helpers import XY
 from drone_controller import speed_from_telemetry, speed_reduced_p
 
@@ -125,6 +126,48 @@ def test_speed_is_none_when_velocity_is_malformed():
 
 def test_speed_is_none_when_telemetry_is_none():
     assert speed_from_telemetry(None) is None
+
+
+def _pd_coeff_yaml(speed_reduction_block: str) -> str:
+    return (
+        "p: [8, 2]\n"
+        "p_min: [0.5, 0.25]\n"
+        "p_max: [4, 2]\n"
+        + speed_reduction_block
+    )
+
+
+def test_config_section_absent_disables_the_feature():
+    pd = loads_config(Config.PDCoeff, _pd_coeff_yaml(""))
+    assert pd.speed_reduction is None
+
+
+def test_config_section_with_enabled_false_disables_the_feature():
+    # The section uses the same `enabled` flag as optical_refinement /
+    # proportional_to_distance: false parses to None, which speed_reduced_p
+    # then treats as "off". Guards the config wiring, not the math.
+    pd = loads_config(Config.PDCoeff, _pd_coeff_yaml(
+        "speed_reduction:\n"
+        "  enabled: false\n"
+        "  start_speed_ms: 15.0\n"
+        "  coeff: 0.947\n"
+        "  speed_step_ms: 1.0\n"))
+    assert pd.speed_reduction is None
+    assert speed_reduced_p(XY(4.0, 2.0), 40.0, pd.speed_reduction) == XY(4.0, 2.0)
+
+
+def test_config_section_enabled_parses_the_values():
+    pd = loads_config(Config.PDCoeff, _pd_coeff_yaml(
+        "speed_reduction:\n"
+        "  enabled: true\n"
+        "  start_speed_ms: 15.0\n"
+        "  coeff: 0.947\n"
+        "  speed_step_ms: 1.0\n"))
+    sr = pd.speed_reduction
+    assert sr is not None
+    assert (sr.start_speed_ms, sr.coeff, sr.speed_step_ms) == (15.0, 0.947, 1.0)
+    # and it actually reduces
+    assert speed_reduced_p(XY(4.0, 2.0), 25.0, sr).x == pytest.approx(4.0 * 0.947 ** 10)
 
 
 def test_speed_is_none_on_nan_velocity():
