@@ -294,6 +294,24 @@ class Config:
         p_dynamic_stage_1_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
         p_dynamic_stage_2_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
         p_dynamic_stage_3_ratio: Annotated[float, Range(0.0, 1.0)] = 1.0
+
+        @dataclass(slots=True, kw_only=True, frozen=True)
+        class SpeedReduction:
+            """Bleed off P as the airframe speeds up.
+
+            The same gain that is well-damped in a slow approach is twitchy at speed,
+            so above `start_speed_ms` P decays geometrically with speed:
+
+                P *= coeff ** ((speed_ms - start_speed_ms) / speed_step_ms)
+
+            Speed is the 3D magnitude of odometry.velocity_body. This is applied LAST,
+            after every other P modification, and the result is clamped into
+            [p_min, p_max]. An absent section means the feature is off.
+            """
+            start_speed_ms: Annotated[float, Range(0.0, 100.0)] = 15.0
+            coeff:          Annotated[float, Range(0.0, 1.0)]   = 0.947
+            speed_step_ms:  Annotated[float, Range(1.0, 10.0)]  = 1.0
+        speed_reduction: Optional[SpeedReduction] = None
     pd_coeff: PDCoeff
 
     @dataclass(slots=True, kw_only=True, frozen=True)

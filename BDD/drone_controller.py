@@ -96,6 +96,61 @@ def clamp_xy(min_val, val: XY, max_val) -> XY:
     return XY(clamp(min_x, val.x, max_x), clamp(min_y, val.y, max_y))
 
 
+def speed_from_telemetry(telemetry_dict) -> float | None:
+    """Airframe speed in m/s: the 3D magnitude of odometry.velocity_body (FRD).
+
+    The vertical component is included on purpose — the drone dives at its targets,
+    so descent rate is a real part of how fast it is moving.
+
+    Returns None for any unusable reading (missing odometry, missing/partial
+    velocity, non-numeric, NaN/inf) rather than raising or returning a poisoned
+    value: a telemetry glitch must never take down the control loop.
+    """
+    if not isinstance(telemetry_dict, dict):
+        return None
+
+    odometry = telemetry_dict.get('odometry') or None
+    if not isinstance(odometry, dict):
+        return None
+
+    velocity = odometry.get('velocity_body') or None
+    if not isinstance(velocity, dict):
+        return None
+
+    try:
+        speed = math.sqrt(
+            float(velocity['x_m_s']) ** 2
+            + float(velocity['y_m_s']) ** 2
+            + float(velocity['z_m_s']) ** 2
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    if not math.isfinite(speed):
+        return None
+
+    return speed
+
+
+def speed_reduced_p(p: XY, speed_ms: float, cfg) -> XY:
+    """Reduce P as the airframe speeds up past `cfg.start_speed_ms`.
+
+        P *= coeff ** ((speed_ms - start_speed_ms) / speed_step_ms)
+
+    `cfg` is a Config.PDCoeff.SpeedReduction, or None when the feature is
+    disabled (the config section is absent). Both axes are scaled by the same factor
+    — speed is a property of the airframe, not of an axis.
+
+    Pure: does not clamp. The caller applies the [p_min, p_max] clamp afterwards, as
+    the last step of the whole P chain.
+    """
+    if cfg is None or speed_ms is None or speed_ms <= cfg.start_speed_ms:
+        return copy(p)
+
+    factor = cfg.coeff ** ((speed_ms - cfg.start_speed_ms) / cfg.speed_step_ms)
+    return XY(p.x * factor, p.y * factor)
+
+
 def _pick_target_detection(
     detections: list,
     confidence_min: float,
@@ -263,6 +318,10 @@ async def drone_controlling_thread_async(
     PD_COEFF_P_MIN                   = to_XY(control_config.pd_coeff.p_min)
     PD_COEFF_P_MAX                   = to_XY(control_config.pd_coeff.p_max)
 
+    # pd_coeff.speed_reduction is Optional: present (non-null) enables the feature.
+    # Applied LAST of all P modifications, right before the final clamp.
+    PD_COEFF_P_SPEED_REDUCTION       = control_config.pd_coeff.speed_reduction
+
     # optical_refinement is Optional: present (non-null) enables the feature.
     _OPTICAL = control_config.optical_refinement
     OPTICAL_METHODS_TO_REFINE_TARGET_SIZE_AND_CENTER  = bool(_OPTICAL)
@@ -380,6 +439,10 @@ async def drone_controlling_thread_async(
     # must use this counter to stay consistent across switches.
     frame_id = 0
     pd_coeff_p_dynamic_stage = None
+    # Last usable airframe speed (m/s). A telemetry dropout reuses it rather than
+    # reverting to full gain: holding the reduced, calmer P mid-dive is the safe
+    # side to fail on. None = we have never had a reading, so no reduction yet.
+    last_known_speed_ms = None
 
     cpu = CPUTemperature()
     logger.info("PRE START CPU Temperature: %s°C", cpu.temperature)
@@ -1082,6 +1145,24 @@ async def drone_controlling_thread_async(
                         thrust = clamp(THRUST_MIN, thrust, THRUST_MAX)
                         extra += f' changing thrust to: {thrust}, p to: {pd_coeff_p} '
 
+                # Speed-dependent P reduction. MUST be the LAST P modification: the
+                # gains above are chosen for the target, this one for the airframe.
+                speed_ms = speed_from_telemetry(telemetry_dict)
+                if speed_ms is None:
+                    speed_ms = last_known_speed_ms  # may still be None: never had a reading
+                else:
+                    last_known_speed_ms = speed_ms
+
+                if PD_COEFF_P_SPEED_REDUCTION is not None and speed_ms is not None:
+                    p_before_speed = pd_coeff_p
+                    pd_coeff_p = speed_reduced_p(pd_coeff_p, speed_ms, PD_COEFF_P_SPEED_REDUCTION)
+                    if pd_coeff_p != p_before_speed:
+                        extra += f' speed: {speed_ms:.1f}m/s p: {p_before_speed} -> {pd_coeff_p}'
+
+                # Final clamp, applied unconditionally — p_min/p_max bound whatever the
+                # chain above produced (the NEAR/MEDIUM boosts land after the clamp in
+                # pd_coeff_p_for_target_size and would otherwise escape p_max).
+                pd_coeff_p = clamp_xy(PD_COEFF_P_MIN, pd_coeff_p, PD_COEFF_P_MAX)
 
                 logger.info("Setting new command regulator coeffs P=%s D=%s", pd_coeff_p, PD_COEFF_D)
                 command_regulator.set_coeffs(Pk = pd_coeff_p, Dk = PD_COEFF_D)

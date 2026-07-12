@@ -1,21 +1,18 @@
 # Notes on how to read list
 
-Here in this list priority is signified by number of exclamation signs BEFORE the item name, like "! task 1" is more urgent/imporant than "task 2" and less important than "!!! task 3".
+Here in this list priority is signified by number of exclamation signs BEFORE the item name, like "! task 1" is more urgent/imporant than "task 2" and both less important than "!!! task 3".
 
 Tasks that are already done are marked as `+`.
 `#` is a comment, as usual.
 
 # List of tasks
 
-- !!! on RPI box 2 cores are used in realtime mode, hence the whole system only uses two remaining ones. Consider either disable realtime mode for those 2 cores OR pin our app to the those 2 realtime cores so it doesn't conflict with anything else. FIRST try to pin our app, that's a minor fix in bdd.ssh and it is easily verifieable.
-- !!! PD coeff: make P inverse-propoprtional to speed, i.e. starting from 100kmh reduce p, higher speed --> smaller p. (there should be a coeff)
-
-+ !! break configuration into the config-file (YAML) and run-time config object (dataclass). Parsing of the config file and validation of the fields must be based on types of the fields of dataclass.
++ speed-dependant PD coeff — DONE 2026-07-12 (branch `feat/speed-dependant-pd-coeff`). P decays geometrically above a threshold: `P *= coeff ** ((speed - start_speed_ms) / speed_step_ms)`, speed = 3D magnitude of `odometry.velocity_body`. Applied LAST of all P modifications, then clamped into `[p_min, p_max]` — that final clamp now runs unconditionally, which also fixed a latent bug where the NEAR/MEDIUM `*= 1.1` boosts landed AFTER `pd_coeff_p_for_target_size()`'s clamp and could push P past `p_max`. Config: optional `pd_coeff.speed_reduction` (standard `enabled` flag; defaults 15 m/s / 0.947 / 1 m/s). A telemetry dropout REUSES the last known speed rather than reverting to full gain (holding the calmer P mid-dive is the safe side to fail on). 20 host tests + replayed against the 2026-04-27 UAE flight log (39 m/s peak): P tracked speed down to the p_min floor, and killing telemetry at 29.6 m/s held P at 1.806 instead of snapping back to 4.0. Remaining work is TUNING (coeff/threshold on the rig), not implementation.
+- !!! implement noise reduction on target position and speed estimation
+- !! targets below the drone must have lower priority that targets above the drone. Adjust for drone nose attitude, ideally anything below horizon should be considered a lesser priority target, especially at the early stages of the flight (1s). Make it configurable via .yaml: enabled/disabled switch, confidence multiplier (float, [0.5 .. 1], deafult = 0.8), early stage multiplier (float, [0.5 .. 1], deafult = 0.8), early stage duration in seconds ([0 .. inf], deafult = 1.0)
+- !!! write extra logs into the px4's persistent ulog for post-crash analisys.
 - Figure out how to test the code on CI/CD ti make sure that merged PRs are viable.
 - break code into proper modules, so the directory structure of "BDD" folder is not flat, but split into the 'src', 'tests', 'utils'
-+ !!!! merge other two-camera and latency related commts from `detection-latency-bench-2026-06-03` branch.
-+ !!! logs and videos percistency -- both should survive power down event so that whatever debug information we have after a crash is not lost. It is Ok to change video encoder/file format.
-- !! implement noise reduction on target position log and estimation
 - !! UI for launches
 - !! figure out video capture without cropping (i.e. capture full frame)
 - ! right now probes are commented out, add CLI argument that enables them (default OFF)
@@ -30,24 +27,46 @@ Tasks that are already done are marked as `+`.
 - rotate camera 90 degrees (to maximize lead without leading visual)
 - deprecated CLI alias `--switch-test-s` (renamed to `--test-switch-s` on 2026-07-09): DELETE the alias and `_pop_deprecated_value()` after **2026-09-30**. Kept so runbooks/skills pinned to older checkouts keep running. Test/verification-harness flags are `--test-*`; run-mode flags (`--DEBUG`, `--no-record`, `--preview`, `--tiles`, `--switch-tiles`, `--vision-only`) are not.
 - NV12 capture assumes `stride == width` (low priority — unreachable on the current rig). `picamera_thread` takes the NV12 path via `request.make_buffer("main")`, which returns the raw ISP buffer INCLUDING row padding; picamera2 aligns stride (typically 32/64 B). At imx477 @ 1280 wide the stride IS 1280, so it is correct today, and we now only use imx477. Any width that is not stride-aligned (e.g. an imx708 1296-wide mode) would push padded rows into an appsrc declaring `width=W` -> sheared image and `len(frame_bytes) != W*H*3/2`. Fix when a new sensor/mode lands: read `config['main']['stride']` and either assert equality at startup (fail fast, it is pre-launch) or de-pad. The comment above the `make_buffer` call still describes `make_array` and is wrong.
+- !! `debug_drone_controller.py` is STALE and cannot run — dies instantly on any log with `AttributeError: 'dict' object has no attribute 'DEBUG'`. `main()` (line 658) still passes `control_config=dict(config_dict)`, the pre-refactor FLAT dict scraped from the log, while `drone_controller.py:278` expects the `Config` dataclass. Everything else in the harness (parse_log, build_detections_list, ReplayQueue, MockDroneMover, MockMonotonicNs) is sound — verified by reusing it to replay 1655 frames through the real control thread. NOT a one-line fix: the config path is flat-dict end to end (eval namespace lacks `Config`; the no-config fallback dict is flat; `--params` updates flat keys), AND a new-era log's `Config` repr is not eval-able (it contains `<VelocityMethod.NUMPY_REGRESSION: 'numpy'>`). Fix = stop reconstructing config from the log; add `--config PATH` and `loads_config(Config, ...)`. This is our ONLY off-rig way to exercise the control loop (and the only way at all for speed/telemetry-dependent code — you can't fly the bench). Full writeup: `experiments/debug-drone-controller-stale-handoff.md`.
 - `platform_controller.py` is STALE — mark for removal. It reads the same `Detections` queue as `drone_controller` but never got the `FrameOrderGuard` defense-in-depth added in 2b0d457, and line ~298 binds `frame` and never uses it (a trap now that `.frame` is a `Frame`, not an ndarray). Do not add features to it; delete once nothing imports `platform_controlling_thread`.
 - `test_OverwriteQueue.py::test_fifo_when_not_overwritten` fails in the FULL suite and passes in isolation — pre-existing on `origin/main` (verified 2026-07-09), not a regression. It asserts strict FIFO with `maxsize=128` while a producer races a consumer; leaked daemon threads from earlier tests starve the consumer, the deque overwrites the oldest, and `len(out) == N` fails (~8700-9100 of 10000). Either bound the producer (semaphore) or assert "no reorder among what survived" instead of "nothing dropped".
 - consolidate the near-duplicate bench configs config.test-single-imx477.yaml / config.test-single-imx477-nv12.yaml (PR#9 review #8, low priority): they differ only by `video_format`, which main() now overrides from the model input via detect_hef_video_format(), so the two are functionally identical when pointed at the same HEF. Parametrize or drop one; also propagate new keys like `record_videos` into the remaining test config(s).
 
 ## Experiments
 
-+ !!! camera Stage-A latency (see camera_Stage-A_latency) reduction (sensor->appsrc)
-  # DONE 2026-06-23 (branch camera-stage-a-latency): config-driven exposure pin + buffer_count(floor 2);
-  # measured Stage-A p99/max ~halved (41->22ms) on bench. Fix 1 (drop surplus) deferred to the tiling task
-  # (only pays off when inference < capture rate). See experiments/camera-stage-a-latency.md "Results".
-
 - !! runtime tiling / branch switching (see runtime_tiling) on a shared Hailo-8: change tile size+count at runtime and/or switch between detection branches (same HEF on every branch) with minimal latency and frames lost.
 
 ## Further refinement of tasks
 
-### camera_Stage-A_latency
+### write extra logs into the px4's persistent ulog
+To analyze drone behaviour post-crash, when SD card might be severely damaged, write small traces of what was going on in the decision pipeline to the more robust and crash-tolerant ulog of px4. Things worth writing (at 5Hz?) rate:
+  - format version
+  - number frames with no detection (zero in case of detection)
+  - Selected detection: x,y,w,h,confidence
+  - computed value of p of pd
+  - control decision: x,y,thrust
+Ideally those must be tightly-packed, if values must be of uniform types, then float16 should be enough. If there is a way to log arbitrary binary, then there are even tighter packaging possible to reduce strain.
 
-the DOMINANT remaining latency (~135-170ms of ~234ms e2e; target 50-120ms) and the prerequisite that GATES the tiling task below. FULL HANDOFF in `experiments/camera-stage-a-latency.md` (read its TL;DR first) — do NOT lose details. Core fix: capture 30fps + drop surplus frames newest-first & CHEAPLY (request-level, skip make_array/numpy) + buffer_count 3->2 (NOT 1, breaks double-buffering) + pin exposure short (enables 30fps, needs enough light). Expected ~150ms -> ~60-70ms. Validate delivered-fps, detection-delay p50 AND p99, libcamera dropped-frame warnings.
+### speed-dependant PD coeff
+
+make P inverse-propoprtional to speed, i.e. starting from 100kmh reduce p, higher speed --> smaller p.
+This scaling must be applied last of all P modification, and final values MUST not exceed min and max values of P from config.
+#### Config
+It all must be configurable under a separate optional section in config.
+Config field:
+  - reduction starting speed meters per second: float [0..100] = 15
+  - p reduction coeffecient: float [0..1] = 0.947
+  - p reduction speed step meters per second : float [1..10] = 1
+
+### Example
+reduction start speed rs = 10 ms, drone speed ds = 20mps, reduction coefficient rc= 0.9 and reduction speed step rss= 1mps, P=10.
+Then new value of P is computed as follows:
+P *= rc ** ((ds - rs) / rss)
+which is:
+P = 10 * (0.9 ** ((20 - 10) / 1)) = 3.48
+same but rss=2mps
+P = 10 * (0.9 ** ((20 - 10) / 2)) = 5.9
+
 
 ### runtime_tiling : runtime tiling / branch switching
 

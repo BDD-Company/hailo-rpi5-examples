@@ -158,6 +158,18 @@ pd_coeff:
   p_dynamic_stage_2_ratio: 1
   p_dynamic_stage_3_ratio: 1
 
+  # Bleed off P as the airframe speeds up: a gain that is well-damped in a slow
+  # approach is twitchy at speed. Above start_speed_ms:
+  #     P *= coeff ** ((speed_ms - start_speed_ms) / speed_step_ms)
+  # Speed is the 3D magnitude of odometry.velocity_body (descent rate included).
+  # Applied LAST of all P modifications, then clamped into [p_min, p_max].
+  # Optional sub-section: OMIT it entirely to disable.
+  speed_reduction:
+    enabled: true
+    start_speed_ms: 15.0   # at or below this speed, P is untouched
+    coeff: 0.947           # per-step multiplier, 0..1 (1.0 = no reduction)
+    speed_step_ms: 1.0     # one reduction step, m/s
+
 takeoff:
   delay_until_n_detection_frames: 10
   #TODO: change from nanoseconds to miliseconds
