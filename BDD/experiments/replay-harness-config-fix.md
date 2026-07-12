@@ -1,7 +1,58 @@
-# PLAN: make the replay harnesses load a real `Config`
+# Making the replay harnesses load a real `Config`
 
-Branch: `fix/replay-harness-real-config`
+Branch: `fix/replay-harness-real-config`. **Done 2026-07-12.**
 Supersedes the diagnosis in [debug-drone-controller-stale-handoff.md](debug-drone-controller-stale-handoff.md).
+
+## How to use it now
+
+```bash
+cd BDD
+python debug_drone_controller.py <log> --headless                     # replay, no display
+python debug_drone_controller.py <log> --headless \
+    --params "{'pd_coeff.speed_reduction.enabled': False}"            # A/B control
+python debug_drone_controller.py <log> --video <RAW_*.mkv>            # step through frames
+```
+
+`--params` keys are DOTTED (`pd_coeff.p`, `thrust.max`), take the same values the YAML does
+(`pd_coeff.p` needs `[x, y]`, not a scalar), and are validated by the real parser: an unknown
+key is an error, not a silent no-op. `--config` defaults to `config.yaml`.
+
+`debug_app_callback.py` takes the same flags, but additionally needs the GStreamer
+introspection typelibs on a dev host (`GstApp`, from `gir1.2-gst-plugins-base-1.0`) — it
+imports `app.py`. `debug_drone_controller.py` does not, and is the one to reach for.
+
+## Outcome
+
+Both tools replay clean, headless, on the whole corpus: exit 0, zero exceptions, and the dive
+issues 1646 commands through *either* tool (they agree). The speed-dependent P is exercised
+across its full range — 157 distinct P values on the dive, collapsing to 2 with
+`speed_reduction.enabled: False`, which is the clean A/B control the handoff wanted. The
+1655-frame dive replays in ~3 seconds headless.
+
+**Running it found three more dead things that static reading did not.** All three were the
+same species as the original bug — a hardcoded mirror of something that moved on:
+
+1. `debug_app_callback`'s `pipelines` stub enumerated six symbols; `app_base` had grown a
+   seventh (`QUEUE`). Because the stub shadows the real `pipelines.py`, the import died before
+   `main()` with a baffling `cannot import name 'QUEUE' from 'pipelines' (unknown location)`.
+   Now a PEP 562 `__getattr__` that answers to any name — replay builds no GStreamer pipeline,
+   so nothing imported from there is ever called, and it cannot rot this way again.
+2. `seen_frames` no longer exists in `app.py` (`FrameOrderGuard` replaced the last-10 dedup
+   set). A fresh `app.frame_order_guard` is now rebound per replay: a replay restarts at frame
+   0, and a stale guard would reject every frame as a reorder.
+3. The ByteTracker was built from flat `bytetrack_*` log keys with `.get(default)` — so it
+   never crashed, it just silently tracked with defaults. The nested `bytetrack` section has
+   **nine** parameters where the scraper knew six: `recovery_max_dist`, `nms_thresh` and
+   `nms_dist_thresh` were never passed at all.
+
+The lesson for the next harness: `.get(key, default)` against a config that has moved on is
+worse than a crash. The crash is what got `debug_drone_controller` fixed; the silent default is
+what let `debug_app_callback` lie for months.
+
+---
+
+Everything below is the plan as written before implementation. It held up, except that
+`debug_app_callback` needed the three extra fixes above.
 
 ## Problem
 

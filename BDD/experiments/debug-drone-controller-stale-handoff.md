@@ -1,7 +1,21 @@
 # HANDOFF: `debug_drone_controller.py` is stale and cannot run
 
 Written 2026-07-12, while verifying the speed-dependant PD coeff feature.
-Status: **BROKEN, unfixed.** Not caused by that feature — it was already dead.
+
+> **STATUS: RESOLVED 2026-07-12** — branch `fix/replay-harness-real-config`.
+> Both harnesses now load a real `Config` and replay clean, headless, on the whole UAE
+> corpus. **What was fixed, and the three caveats this document missed, are in
+> [replay-harness-config-fix.md](replay-harness-config-fix.md) — read that, not this.**
+> Kept for the diagnosis and for the log-era table, which is still accurate.
+>
+> Corrections to what follows: the recommended fix said to point `--config` at a bench
+> config — that does not work, since every `config.test-*.yaml` also references
+> `/home/bdd/models`, so the harness stubs the missing HEF path itself. And
+> `debug_app_callback.py` was dead in the same way (plus three more), which this document
+> does not mention at all.
+
+Original status when written: **BROKEN, unfixed.** Not caused by that feature — it was
+already dead.
 
 ## TL;DR
 
