@@ -26,12 +26,16 @@ from datetime import datetime
 import cv2
 import numpy as np
 import ast
+import yaml
+from dataclasses import asdict, replace
 
 from helpers import XY, Rect, Detection, Detections, FrameMetadata, dotdict, STOP
 from OverwriteQueue import OverwriteQueue
 from flight_debugger import VideoReader, parse_log_lines
 from debug_output import debug_output_thread
 from interfaces import FrameSinkInterface
+from config import Config
+from parse_config import ConfigError, parse_config
 
 import time as real_time_module
 
@@ -192,6 +196,101 @@ def parse_log(logfile_path: Path):
     return config_dict, frames, base_ns
 
 
+def logged_config_text(logfile_path: Path) -> str | None:
+    """The raw `!!! Config:` line from the log, verbatim — or None.
+
+    Deliberately NOT parsed. Old logs carry a flat pre-refactor dict and new ones carry a
+    `Config` repr that isn't even eval-able (it contains `<VelocityMethod.NUMPY_REGRESSION:
+    'numpy'>`). Neither is mechanically convertible into today's `Config`, so this exists
+    only to be shown to a human comparing what flew against what is being replayed.
+    """
+    with open(logfile_path, "r", errors="replace") as f:
+        for line in f:
+            m = CONFIG_RE.search(line)
+            if m:
+                return m.group(1).strip()
+    return None
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Replay config
+# ───────────────────────────────────────────────────────────────────────
+
+REPLAY_CONFIG_DEFAULT = Path(__file__).resolve().parent / "config.yaml"
+
+
+def _set_dotted(data: dict, dotted_key: str, value) -> None:
+    """Set `a.b.c` in a nested dict, creating missing sections."""
+    *sections, leaf = dotted_key.split(".")
+    node = data
+    for i, section in enumerate(sections):
+        child = node.get(section)
+        if child is None:                       # absent, or a disabled (null) section
+            child = node[section] = {}
+        elif not isinstance(child, dict):
+            path = ".".join(sections[:i + 1])
+            raise ConfigError([f"{path}: is a value, cannot set {dotted_key!r} inside it"])
+        node = child
+    node[leaf] = value
+
+
+def _stub_missing_inference_files(data: dict, config_path: Path) -> None:
+    """Point non-existent model paths at a file that does exist.
+
+    `inference.hef_model_path` is an `ExistingFile`, and every config we ship references
+    /home/bdd/models/... — present on the Pi, absent on a dev host. Replay never runs
+    inference (detections come from the log), so the path is irrelevant to the result;
+    without this, though, the config simply refuses to load and the harness is unusable
+    off-rig, which is the only place it is ever used.
+    """
+    inference = data.get("inference")
+    if not isinstance(inference, dict):
+        return
+    for key in ("hef_model_path", "labels_json"):
+        value = inference.get(key)
+        if value and not Path(value).is_file():
+            inference[key] = str(config_path)
+            logger.warning(
+                "!!! inference.%s (%s) does not exist here; pointing it at %s so the config "
+                "loads. Replay uses the detections recorded in the log — no inference runs — "
+                "so this cannot affect the replay.",
+                key, value, config_path.name,
+            )
+
+
+def load_replay_config(path: Path | str = REPLAY_CONFIG_DEFAULT,
+                       overrides: dict | None = None) -> Config:
+    """Load a real `Config` for replay, the same way the app does.
+
+    NOT reconstructed from the log: the config a flight flew with is recorded only as a flat
+    pre-refactor dict (see `logged_config_text`) and cannot be mechanically converted. You are
+    replaying an old flight against TODAY's config — usually exactly what you want, but never
+    assume the replay reproduces the original commands.
+
+    `overrides` are dotted paths applied before validation, e.g. {'pd_coeff.p': 4}, so they are
+    checked by the real parser instead of being trusted.
+    """
+    path = Path(path)
+    data = yaml.safe_load(path.read_text())
+    if not isinstance(data, dict):
+        raise ConfigError([f"{path}: top level must be a mapping"])
+
+    _stub_missing_inference_files(data, path)
+    for dotted_key, value in (overrides or {}).items():
+        _set_dotted(data, dotted_key, value)
+
+    config = parse_config(Config, data, source=str(path))
+    # DEBUG is runtime-only (never settable from the file) and replay always wants it.
+    return replace(config, DEBUG=True)
+
+
+def warn_replayed_config_is_not_the_flights(log_file: Path, config_path: Path) -> None:
+    flew_with = logged_config_text(log_file)
+    logger.warning("!!! Replaying with %s — NOT the config this flight flew with.", config_path)
+    if flew_with:
+        logger.warning("!!! The flight flew with (from the log, for comparison only): %s", flew_with)
+
+
 # ───────────────────────────────────────────────────────────────────────
 # Mock time.monotonic_ns
 # ───────────────────────────────────────────────────────────────────────
@@ -230,11 +329,16 @@ class MockDroneMover:
         self.drone_connection_string = drone_connection_string
         self._current_telemetry: dict = {}
         self._current_frame_id = -1
+        # Every command the control loop issued, and every telemetry sample it was fed, in
+        # order. The log is the primary evidence; these make a replay assertable in a test.
+        self.commands: list[tuple] = []
+        self.telemetry_seen: list[dict] = []
         logger.info("MockDroneMover created (connection_string=%s)", drone_connection_string)
 
     def set_frame_data(self, frame_id: int, telemetry_dict: dict):
         self._current_frame_id = frame_id
         self._current_telemetry = telemetry_dict
+        self.telemetry_seen.append(telemetry_dict)
 
     async def startup_sequence(self, arm_attempts=100, force_arm=False):
         logger.info("MockDroneMover.startup_sequence(arm_attempts=%s, force_arm=%s)", arm_attempts, force_arm)
@@ -260,6 +364,8 @@ class MockDroneMover:
     async def move_to_target_zenith_async(self, roll_degree: float, pitch_degree: float, thrust: float = 0.0, current_telemetry=None):
         current_telemetry = self._resolve_current_telemetry(current_telemetry)
         yaw_deg = self._yaw_deg_from_telemetry(current_telemetry)
+        self.commands.append(
+            ("move_to_target_zenith", self._current_frame_id, roll_degree, pitch_degree, thrust))
         logger.debug(
             "MockDroneMover.move_to_target_zenith_async(roll=%.2f, pitch=%.2f, thrust=%.3f, yaw=%.2f, telemetry=%s)",
             roll_degree,
@@ -272,6 +378,7 @@ class MockDroneMover:
     async def move_to_target_ned(self, target_position_ned, current_telemetry=None):
         current_telemetry = self._resolve_current_telemetry(current_telemetry)
         yaw_deg = self._yaw_deg_from_telemetry(current_telemetry)
+        self.commands.append(("move_to_target_ned", self._current_frame_id, target_position_ned))
         logger.debug(
             "MockDroneMover.move_to_target_ned(north=%.2f, east=%.2f, down=%.2f, yaw=%.2f, telemetry=%s)",
             target_position_ned.north_m,
@@ -282,12 +389,15 @@ class MockDroneMover:
         )
 
     async def standstill(self, thrust):
+        self.commands.append(("standstill", self._current_frame_id, thrust))
         logger.debug(f"MockDroneMover.standstill({thrust})")
 
     async def idle(self):
+        self.commands.append(("idle", self._current_frame_id))
         logger.debug("MockDroneMover.idle()")
 
     def ABORT(self):
+        self.commands.append(("ABORT", self._current_frame_id))
         logger.info("MockDroneMover.ABORT()")
 
 
@@ -301,15 +411,19 @@ class ReplayQueue:
     get() blocks until advance() is called (from the display sink on
     keypress), giving frame-by-frame stepping.  The first frame is
     auto-advanced so the pipeline can start without user interaction.
+
+    With auto_advance=True (headless), get() never waits: there is no display sink to
+    press a key on, so waiting would deadlock on the first frame.
     """
 
-    def __init__(self, items: list):
+    def __init__(self, items: list, auto_advance: bool = False):
         self._items = items
         self._index = 0
         self._lock = threading.Lock()
         self._on_frame_callback = None
         self._advance_event = threading.Event()
         self._stopped = False
+        self._auto_advance = auto_advance
         # Auto-advance so the first frame is processed immediately
         self._advance_event.set()
 
@@ -318,9 +432,10 @@ class ReplayQueue:
         self._on_frame_callback = callback
 
     def get(self, timeout=None):
-        # Block until the display sink signals "advance"
-        self._advance_event.wait()
-        self._advance_event.clear()
+        if not self._auto_advance:
+            # Block until the display sink signals "advance"
+            self._advance_event.wait()
+            self._advance_event.clear()
 
         if self._stopped:
             return STOP
@@ -456,6 +571,75 @@ def find_files_in_dir(dir_path: Path) -> tuple[Path | None, list[Path]]:
 
 
 # ───────────────────────────────────────────────────────────────────────
+# Run the real control thread against the replayed flight
+# ───────────────────────────────────────────────────────────────────────
+
+def run_replay(config: Config,
+               replay_queue: ReplayQueue,
+               frames: dict,
+               base_ns: int,
+               *,
+               output_queue=None) -> MockDroneMover:
+    """Drive the REAL `drone_controlling_thread` with replayed frames. Returns the
+    MockDroneMover, whose `.commands` / `.telemetry_seen` are the record of the run.
+
+    Two things are faked, and only these two: the drone (commands are recorded, not flown)
+    and the clock (frozen to each frame's logged timestamp, so the loop's timing maths sees
+    the flight's real intervals rather than replay wall-clock). Everything in between is the
+    production control loop.
+
+    Blocks until the queue is exhausted. Both monkeypatches are undone on the way out.
+    """
+    mock_monotonic = MockMonotonicNs(base_ns)
+    mock_drone: list[MockDroneMover | None] = [None]
+    first_frame_id = min(frames) if frames else None
+
+    def on_frame_callback(frame_id, item_index):
+        """Called by ReplayQueue before each frame: wind the clock and telemetry to it."""
+        fd = frames.get(frame_id, {})
+        mock_monotonic.set_frame(fd.get("timestamp_ns", base_ns))
+        if mock_drone[0] is not None:
+            mock_drone[0].set_frame_data(frame_id, fd.get("telemetry", {}))
+
+    replay_queue.set_on_frame_callback(on_frame_callback)
+
+    class _CapturingMockDroneMover(MockDroneMover):
+        """Captures the instance drone_controller constructs, so telemetry can be fed to it."""
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            mock_drone[0] = self
+            if first_frame_id is not None:      # pre-load, the loop reads telemetry immediately
+                self.set_frame_data(first_frame_id, frames[first_frame_id].get("telemetry", {}))
+
+    # A stand-in `time` module: everything real except monotonic_ns.
+    mock_time = types.ModuleType("mock_time")
+    for attr in dir(real_time_module):
+        if not attr.startswith("_"):
+            setattr(mock_time, attr, getattr(real_time_module, attr))
+    mock_time.monotonic_ns = mock_monotonic
+
+    original_drone_mover = drone_controller_module.DroneMover
+    original_time = drone_controller_module.time
+    drone_controller_module.DroneMover = _CapturingMockDroneMover
+    drone_controller_module.time = mock_time
+    try:
+        drone_controller_module.drone_controlling_thread(
+            "replay://mock",
+            asdict(config.drone.config),        # DroneMover's own config, as app.py passes it
+            replay_queue,
+            control_config=config,              # the real Config — NOT a flat dict from the log
+            output_queue=output_queue,
+        )
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    finally:
+        drone_controller_module.DroneMover = original_drone_mover
+        drone_controller_module.time = original_time
+
+    return mock_drone[0]
+
+
+# ───────────────────────────────────────────────────────────────────────
 # Main
 # ───────────────────────────────────────────────────────────────────────
 
@@ -475,16 +659,31 @@ def main():
         help="Path to video file(s) or directory with video files",
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=REPLAY_CONFIG_DEFAULT,
+        help="Config YAML to replay WITH (default: config.yaml next to this script). "
+             "Note this is today's config, not the one the flight flew with.",
+    )
+    parser.add_argument(
         "--params",
         type=lambda x: dict(ast.literal_eval(x)),
         default=None,
-        help="Extra parameters of config to overwrite",
+        help="Config overrides as DOTTED paths, e.g. \"{'pd_coeff.p': 4, 'thrust.max': 0.6}\". "
+             "Validated like any config value; unknown keys are an error.",
     )
     parser.add_argument(
         "--autoplay",
         action='store_true',
         default=False,
         help="do NOT wait for user input to advance frames",
+    )
+    parser.add_argument(
+        "--headless",
+        action='store_true',
+        default=False,
+        help="No display at all: no window, no video decode (unless --video is given). "
+             "The fastest way to replay a flight; needs no X/Wayland.",
     )
     args = parser.parse_args()
 
@@ -503,170 +702,78 @@ def main():
     logger.info("Video path: %s", video_path)
 
     # ── Parse log ──────────────────────────────────────────────────────
-    config_dict, frames, base_ns = parse_log(log_file)
+    # parse_log also scrapes the log's `!!! Config:` line, but we deliberately do NOT
+    # build the control config from it: on old logs it is a flat pre-refactor dict, on new
+    # ones a repr that will not even eval. See load_replay_config.
+    _logged_config, frames, base_ns = parse_log(log_file)
     if not frames:
         print("No frame data found in log file", file=sys.stderr)
         sys.exit(1)
     logger.info("Parsed %d frames from log", len(frames))
 
-    if config_dict:
-        logger.info("Loaded config from log: %s", config_dict)
-    else:
-        logger.warning("No config found in log, using defaults from app.py")
-        config_dict = {
-            'confidence_min': 0.4,
-            'thrust_takeoff': 0.5,
-            'thrust_min': 0.5,
-            'thrust_max': 0.5,
-            'thrust_dynamic': False,
-            'thrust_proportional_to_distance': False,
-            'target_lost_fade_per_frame': 0.99,
-            'target_estimator_clear_history_after_target_lost_frames': 3,
-            'estimation_use_3d': False,
-            'follow_target_position_ned': False,
-            'estimation_lookahead_frames': 5,
-            'estimation_lookahead_dynamic': False,
-            'estimation_lookahead_dynamic_frames_near': 3,
-            'estimation_lookahead_dynamic_frames_medium': 10,
-            'estimation_lookahead_dynamic_frames_far': 20,
-            'pd_coeff_p': XY(3, 3), # per-axis P gain (x, y)
-            'pd_coeff_d': 0,
-            'pd_coeff_p_safe_min': 0.6,
-            'pd_coeff_p_min': XY(0.5, 0.5),
-            'pd_coeff_p_max': XY(10, 10),
-            'pd_coeff_p_dynamic': False,
-            'frame_angular_size_deg': XY(107, 85),
-            'target_size_m': XY(1.7, 2),
-            'safe_takeoff_period_ns': 300_000_000,
-            'delay_takeof_until_n_detection_frames': 3,
-            'aim_point': XY(0.5, 0.5),
-            'DEBUG': True,
-        }
-
-    # =========================================================================
-    # !!! OVERWRITE config
-    # =========================================================================
-    #
-
-    config_dict['DEBUG'] = True
-    config_dict.update({
-        'follow_target_position_ned': True,
-        'estimation_3d' : True,
-        'estimation_3d_method' : 'numpy',
-        'estimation_lookahead_frames': 5,
-        'estimation_lookahead_dynamic': True,
-        'estimation_lookahead_dynamic_frames_near': 2,
-        'estimation_lookahead_dynamic_frames_medium': 4,
-        'estimation_lookahead_dynamic_frames_far': 8,
-    })
-
-    if args.params:
-        config_dict.update(args.params)
-
-    #
-    # =========================================================================
-
-    # Remove config keys not consumed by current drone_controller to avoid warnings
-    _stale_keys = [
-        'confidence_move', 'inertia_correction_gain',
-        'inertia_correction_limits', 'inertia_correction_min_speed_ms',
-        'aim_point_max_offset',
-    ]
-    for k in _stale_keys:
-        config_dict.pop(k, None)
+    # ── Load the config to replay WITH ─────────────────────────────────
+    try:
+        config = load_replay_config(args.config, args.params)
+    except ConfigError as e:
+        print(f"Config error: {e}", file=sys.stderr)
+        sys.exit(1)
+    warn_replayed_config_is_not_the_flights(log_file, args.config)
 
     # ── Open video ─────────────────────────────────────────────────────
+    # Headless skips the decode entirely unless video was asked for explicitly: the
+    # controller is happy with blank frames, and decoding a whole flight is the slow part.
+    if args.headless and args.video is None:
+        video_path = None
+
     video_reader = VideoReader(video_path)
     if video_reader.available:
         logger.info("Video loaded: %d frames", video_reader.total)
     else:
-        logger.error("Failed to load video %s", video_path)
-        sys.exit(-1)
+        # Degrade rather than die: blank frames replay fine for everything that doesn't
+        # read pixels (which is everything except optical refinement).
+        if video_path is not None:
+            logger.warning("No usable video at %s — replaying on blank frames.", video_path)
+        if config.optical_refinement is not None:
+            logger.warning(
+                "!!! optical_refinement is ENABLED but the frames are blank: that code reads "
+                "pixels, so it will NOT behave as it did in flight. Pass --video for real frames."
+            )
 
     # ── Build replay data ──────────────────────────────────────────────
     detections_list = build_detections_list(frames, video_reader)
-
-    # ── Set up mocks ───────────────────────────────────────────────────
-    mock_monotonic = MockMonotonicNs(base_ns)
-    mock_drone = [None]  # mutable container so callback can access it
-
-    def on_frame_callback(frame_id, item_index):
-        """Called by ReplayQueue when a new frame is about to be returned."""
-        fd = frames.get(frame_id, {})
-        ts_ns = fd.get("timestamp_ns", base_ns)
-        mock_monotonic.set_frame(ts_ns)
-        if mock_drone[0] is not None:
-            telemetry = fd.get("telemetry", {})
-            mock_drone[0].set_frame_data(frame_id, telemetry)
-
-    replay_queue = ReplayQueue(detections_list)
-    replay_queue.set_on_frame_callback(on_frame_callback)
-
-    # ── Monkey-patch drone_controller ──────────────────────────────────
-    # Replace DroneMover with MockDroneMover
-    drone_controller_module.DroneMover = MockDroneMover
-
-    # Replace time.monotonic_ns in drone_controller's time module reference
-    # Create a wrapper module that delegates everything to real time
-    # but overrides monotonic_ns
-    mock_time = types.ModuleType("mock_time")
-    for attr in dir(real_time_module):
-        if not attr.startswith("_"):
-            setattr(mock_time, attr, getattr(real_time_module, attr))
-    mock_time.monotonic_ns = mock_monotonic
-    drone_controller_module.time = mock_time
-
-    # ── Hook into MockDroneMover creation ──────────────────────────────
-    # drone_controller creates DroneMover at line 244.  After our patch,
-    # it will create MockDroneMover instead.  We need to capture that
-    # instance so on_frame_callback can feed it telemetry.
-    _original_init = MockDroneMover.__init__
-
-    def _capturing_init(self, *args, **kwargs):
-        _original_init(self, *args, **kwargs)
-        mock_drone[0] = self
-        # Pre-load first frame telemetry
-        first_frame_id = sorted(frames.keys())[0]
-        fd = frames[first_frame_id]
-        self.set_frame_data(first_frame_id, fd.get("telemetry", {}))
-
-    MockDroneMover.__init__ = _capturing_init
+    replay_queue = ReplayQueue(detections_list, auto_advance=args.headless)
 
     # ── Set up output display ──────────────────────────────────────────
-    output_queue = OverwriteQueue(maxsize=200)
-
-    sink = InteractiveDisplaySink(replay_queue, autoplay=args.autoplay, window_title=f"Debug Controller {log_file}  {video_path}")
-
-    output_thread = threading.Thread(
-        target=debug_output_thread,
-        args=(output_queue, sink),
-        name="DEBUG_DISPLAY",
-        daemon=True,
-    )
-    output_thread.start()
+    output_queue = None
+    output_thread = None
+    if not args.headless:
+        output_queue = OverwriteQueue(maxsize=200)
+        sink = InteractiveDisplaySink(
+            replay_queue,
+            autoplay=args.autoplay,
+            window_title=f"Debug Controller {log_file}  {video_path}",
+        )
+        output_thread = threading.Thread(
+            target=debug_output_thread,
+            args=(output_queue, sink),
+            name="DEBUG_DISPLAY",
+            daemon=True,
+        )
+        output_thread.start()
 
     # ── Run drone_controlling_thread ───────────────────────────────────
     logger.info("Starting drone_controller replay with %d frames...", len(detections_list))
 
-    drone_config = {"upside_down_angle_deg": 130, "upside_down_hold_s": 0.2}
-
     try:
-        drone_controller_module.drone_controlling_thread(
-            "replay://mock",
-            drone_config,
-            replay_queue,
-            control_config=dict(config_dict),
-            output_queue=output_queue,
-        )
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
+        drone = run_replay(config, replay_queue, frames, base_ns, output_queue=output_queue)
     except Exception:
         logger.exception("drone_controlling_thread finished with error")
+        sys.exit(1)
 
-    logger.info("Replay finished.")
+    logger.info("Replay finished: %d commands issued.", len(drone.commands) if drone else 0)
 
     # Keep display open until user closes it
-    if output_thread.is_alive():
+    if output_thread is not None and output_thread.is_alive():
         output_thread.join(timeout=5)
 
 
