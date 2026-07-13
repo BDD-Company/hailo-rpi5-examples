@@ -262,9 +262,33 @@ sample, and that commanded roll/pitch/thrust match what the controller passed to
 `MockDroneMover`. This is the check that the wiring is real rather than merely
 well-unit-tested.
 
-**On-rig verification** is a separate, later step (needs the FC param set + a reboot):
-fly or bench-run, pull the ulog, and confirm a `debug_array` topic named `BDD` is
-present with sane values.
+**On-rig, against the real Auterion PX4** (`bdd-sd9-mandarin`, 2026-07-13) — DONE:
+
+- The host suite passes on the Pi's Python 3.11 as well as the dev host's 3.12.
+- `SDLOG_PROFILE = 1057` — debug bit already set. `SDLOG_MODE = 0`, so PX4 logs only
+  while ARMED, which is exactly the crash window we care about.
+- Over the real 1 Mbps serial link: 3/3 direct `send_debug_array` calls, 25 tracer
+  sends at 5 Hz, zero failures.
+- **The decisive check.** Streaming traces while asking PX4's own nsh shell for
+  `listener debug_array` echoed our payload straight back out of the flight
+  controller — `3.25, 1.75, -2.5, 1.5, 0.625, 0.375, 0.4375, 0.0625, 0.03125, 0.875`,
+  every slot matching what we sent, tail zeroed. That proves PX4 *received* the
+  DEBUG_FLOAT_ARRAY, *parsed* it, and *published* it on the `debug_array` uORB topic —
+  which, with the debug bit set, is precisely what the logger writes.
+
+  This route replaced the original plan of downloading the ulog over MAVLink FTP:
+  `log_files.get_entries()` times out on this link, and the FC only logs while armed
+  anyway. The listener proves the same thing without arming the aircraft.
+
+Two traps worth recording for anyone repeating this. Killed runs leave `mavsdk_server`
+processes alive holding the serial port; a second one then silently contends for it and
+every `param`/`shell` call starts timing out. Kill them with `pkill -9 -x mavsdk_server`
+— **not** `pkill -f`, which matches the SSH shell's own command line and kills your
+session. And `DroneMover.__del__` calls `asyncio.run()` from a running loop, so any
+script that connects must `os._exit()` rather than fall off the end.
+
+Still outstanding: a live ARMED flight, where the trace lands in a real ulog on the FC's
+SD card. Nothing in the code path is untested at this point — only the arming is.
 
 ## Out of scope
 
