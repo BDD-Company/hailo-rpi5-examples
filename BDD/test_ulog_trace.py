@@ -68,16 +68,36 @@ class TestSampleLayout(unittest.TestCase):
         data = UlogTraceSample(frame_id=7, frames_since_detection=3).to_floats()
         self.assertEqual(data[9:], [0.0] * (TRACE_SLOTS - 9))
 
-    def test_absent_command_is_nan_not_zero(self):
-        # A zero roll/thrust is a legal command, so 0.0 could not mean "none issued".
+    def test_absent_command_is_all_zero(self):
+        # Unambiguous: a real command always carries non-zero thrust.
         data = UlogTraceSample(frame_id=7).to_floats()
-        for slot in (6, 7, 8):
-            self.assertTrue(math.isnan(data[slot]), f"slot {slot} should be NaN")
+        self.assertEqual(data[6:9], [0.0, 0.0, 0.0])
 
-    def test_defaults_are_the_no_detection_case(self):
+    def test_non_finite_values_are_zeroed(self):
+        # MAVSDK serialises the fields as JSON and its parser REJECTS a bare NaN /
+        # Infinity token, which costs the WHOLE message. One stray non-finite from
+        # anywhere upstream would silently delete a trace sample, so they are clamped
+        # here: lose one field, not the sample. (Verified against a real mavsdk_server.)
+        data = UlogTraceSample(
+            frame_id=7,
+            pd_p=XY(float('nan'), 3.0),
+            cmd_roll_deg=float('inf'),
+            cmd_thrust=float('-inf'),
+            det_conf=float('nan'),
+        ).to_floats()
+
+        self.assertTrue(all(math.isfinite(v) for v in data), "no non-finite may reach the wire")
+        self.assertEqual(data[4], 0.0)    # pd_p.x was NaN
+        self.assertEqual(data[5], 3.0)    # ... and the good half survives
+        self.assertEqual(data[6], 0.0)    # cmd_roll_deg was +inf
+        self.assertEqual(data[8], 0.0)    # cmd_thrust was -inf
+        self.assertEqual(data[13], 0.0)   # det_conf was NaN
+
+    def test_defaults_are_the_no_detection_no_command_case(self):
         sample = UlogTraceSample()
         self.assertEqual(sample.det_conf, 0.0)
-        self.assertTrue(math.isnan(sample.cmd_thrust))
+        self.assertEqual(sample.cmd_thrust, 0.0)
+        self.assertEqual(sample.to_floats()[1:], [0.0] * (TRACE_SLOTS - 1))
 
 
 class _FakeSender:

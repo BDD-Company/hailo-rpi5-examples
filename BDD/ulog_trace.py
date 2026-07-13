@@ -34,6 +34,7 @@ Slot layout (see docs/superpowers/specs/2026-07-12-px4-ulog-trace-design.md):
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -53,27 +54,41 @@ TRACE_SLOTS    = 58
 TRACE_NAME     = "BDD"
 TRACE_ARRAY_ID = 0
 
-NAN = float('nan')
-
 # How many failures to swallow silently between log lines, once the first has
 # been reported. A dead link must not turn into a per-tick log flood.
 _FAILURE_LOG_EVERY = 100
+
+
+def _finite(value) -> float:
+    """Non-finite values become 0.0.
+
+    MAVSDK serialises the message fields as JSON, and `json.dumps` emits a bare
+    `NaN` / `Infinity` token, which its own C++ parser then REJECTS — costing us the
+    whole message ("Failed to parse JSON", mavlink_direct_impl.cpp). Verified against
+    a real mavsdk_server. So one stray NaN from anywhere upstream would silently
+    delete a trace sample; clamping it here means we lose one field instead.
+    """
+    value = float(value)
+    return value if math.isfinite(value) else 0.0
 
 
 @dataclass(slots=True, frozen=True)
 class UlogTraceSample:
     """One tick of the decision pipeline, as it goes into the ulog.
 
-    The detection fields come LAST on the wire and default to 0.0. MAVLink 2 trims
-    trailing zero bytes from the payload, so a tick with no detection physically
-    shrinks. Zero is unambiguous here: a width, height and confidence of exactly
-    zero is a far more reliable signature of "nothing was detected" than of a real
-    target sitting dead-centre at zero confidence.
+    Absent values are 0.0 throughout, and are unambiguous in both blocks because a
+    zeroed reading is not something the live system can produce:
 
-    The command fields default to NaN instead, because that argument does not hold
-    for them — a zero roll or zero thrust is a perfectly legal command, so 0.0
-    could not mean "none issued". They sit before the detection block, so a NaN
-    there costs nothing: it cannot block the trailing-zero trim.
+      * detection: a width, height and confidence of exactly zero is a far more
+        reliable signature of "nothing was detected" than of a real target sitting
+        dead-centre at zero confidence.
+      * command: a real command always carries non-zero thrust (THRUST_CRUISE, and
+        even idle() uses IDLE_THRUST / 2), so an all-zero roll/pitch/thrust means no
+        command has been issued yet — nothing before takeoff, or a NED position
+        command, which has no attitude to report.
+
+    The detection block comes LAST on the wire. MAVLink 2 trims trailing zero bytes
+    from the payload, so a tick with no detection physically shrinks.
     """
     frame_id               : int   = 0     # controller's monotonic counter
     frames_since_detection : int   = 0     # frames arrived, vision found no target
@@ -82,12 +97,16 @@ class UlogTraceSample:
     # The gain actually in force, after the final clamp into [p_min, p_max].
     pd_p : XY = field(default_factory=XY)
 
-    # Verbatim, as handed to DroneMover: before the upside-down veto and before
-    # any clamping. This is the decision the vision pipeline made; what the FC then
-    # did with it is already in the ulog's own attitude topics.
-    cmd_roll_deg  : float = NAN
-    cmd_pitch_deg : float = NAN
-    cmd_thrust    : float = NAN
+    # Verbatim, as handed to DroneMover: before the upside-down veto and before any
+    # clamping. This is the decision the vision pipeline made; what the FC then did
+    # with it is already in the ulog's own attitude topics.
+    #
+    # Sticky, and legitimately so: an offboard setpoint stays in force in PX4 until
+    # it is replaced, so on a tick that issues no command the last one is still what
+    # the FC is flying. That is a fact about the aircraft, not a stale reading.
+    cmd_roll_deg  : float = 0.0
+    cmd_pitch_deg : float = 0.0
+    cmd_thrust    : float = 0.0
 
     # Normalised [0, 1].
     det_x    : float = 0.0
@@ -99,19 +118,19 @@ class UlogTraceSample:
     def to_floats(self) -> list[float]:
         data = [0.0] * TRACE_SLOTS
         data[0]  = float(TRACE_FORMAT_VERSION)
-        data[1]  = float(self.frame_id)
-        data[2]  = float(self.frames_since_detection)
-        data[3]  = float(self.frames_without_frame)
-        data[4]  = float(self.pd_p.x)
-        data[5]  = float(self.pd_p.y)
-        data[6]  = float(self.cmd_roll_deg)
-        data[7]  = float(self.cmd_pitch_deg)
-        data[8]  = float(self.cmd_thrust)
-        data[9]  = float(self.det_x)
-        data[10] = float(self.det_y)
-        data[11] = float(self.det_w)
-        data[12] = float(self.det_h)
-        data[13] = float(self.det_conf)
+        data[1]  = _finite(self.frame_id)
+        data[2]  = _finite(self.frames_since_detection)
+        data[3]  = _finite(self.frames_without_frame)
+        data[4]  = _finite(self.pd_p.x)
+        data[5]  = _finite(self.pd_p.y)
+        data[6]  = _finite(self.cmd_roll_deg)
+        data[7]  = _finite(self.cmd_pitch_deg)
+        data[8]  = _finite(self.cmd_thrust)
+        data[9]  = _finite(self.det_x)
+        data[10] = _finite(self.det_y)
+        data[11] = _finite(self.det_w)
+        data[12] = _finite(self.det_h)
+        data[13] = _finite(self.det_conf)
         return data
 
 
