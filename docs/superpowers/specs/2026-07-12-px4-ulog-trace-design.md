@@ -212,12 +212,17 @@ PX4 only writes `debug_array` into the ulog when `SDLOG_PROFILE` has its Debug b
 (32) set, and the logger reads that param at startup — so a change needs an FC reboot
 and cannot help the flight during which it is made.
 
-The app therefore **checks and warns, but does not write**. Auto-setting the param
+**On the rig this is already satisfied.** Checked against the real Auterion PX4 on
+`bdd-sd9-mandarin` (2026-07-13): `SDLOG_PROFILE = 1057` = 1024 (internal temperature
+sensors) + **32 (debug)** + 1 (default). So no param change and no FC reboot are
+needed — the trace will be logged as soon as the app sends it.
+
+The app nonetheless **checks and warns, but never writes**. Auto-setting the param
 would give the vision app the power to mutate flight-controller configuration, which
-is a new and invasive capability for a benefit (a trace that only starts working
-after the next reboot anyway) that does not justify it. Setting it is a documented,
-one-time rig-provisioning step; the startup warning is what stops a misconfigured FC
-from being discovered post-crash, which is the one moment it cannot be fixed.
+is a new and invasive capability for a benefit — a trace that only starts working
+after the next reboot anyway — that does not justify it. The startup warning is what
+stops a *differently* configured FC (a swapped board, a params reset) from being
+discovered post-crash, which is the one moment it cannot be fixed.
 
 ## Failure modes
 
