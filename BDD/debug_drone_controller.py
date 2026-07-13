@@ -30,6 +30,7 @@ import yaml
 from dataclasses import asdict, replace
 
 from helpers import XY, Rect, Detection, Detections, FrameMetadata, dotdict, STOP
+from drone import IDLE_THRUST
 from OverwriteQueue import OverwriteQueue
 from flight_debugger import VideoReader, parse_log_lines
 from debug_output import debug_output_thread
@@ -333,7 +334,19 @@ class MockDroneMover:
         # order. The log is the primary evidence; these make a replay assertable in a test.
         self.commands: list[tuple] = []
         self.telemetry_seen: list[dict] = []
+        # Mirrors DroneMover: the attitude command verbatim as the controller handed it
+        # over. All-zero means none issued. Read by the ulog trace, so the replay
+        # exercises the real trace path rather than a stub of it.
+        self._last_attitude_command: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        # Every DEBUG_FLOAT_ARRAY the tracer produced, recorded instead of sent.
+        self.debug_arrays: list[tuple[str, int, list[float]]] = []
         logger.info("MockDroneMover created (connection_string=%s)", drone_connection_string)
+
+    def last_attitude_command(self) -> tuple[float, float, float]:
+        return self._last_attitude_command
+
+    async def send_debug_array(self, name: str, array_id: int, data: list[float]) -> None:
+        self.debug_arrays.append((name, array_id, list(data)))
 
     def set_frame_data(self, frame_id: int, telemetry_dict: dict):
         self._current_frame_id = frame_id
@@ -362,6 +375,7 @@ class MockDroneMover:
         return ((current_telemetry.get("attitude_euler", {}) or {}).get("yaw_deg", 0))
 
     async def move_to_target_zenith_async(self, roll_degree: float, pitch_degree: float, thrust: float = 0.0, current_telemetry=None):
+        self._last_attitude_command = (roll_degree, pitch_degree, thrust)
         current_telemetry = self._resolve_current_telemetry(current_telemetry)
         yaw_deg = self._yaw_deg_from_telemetry(current_telemetry)
         self.commands.append(
@@ -376,6 +390,8 @@ class MockDroneMover:
         )
 
     async def move_to_target_ned(self, target_position_ned, current_telemetry=None):
+        # A position command carries no attitude, exactly as in DroneMover.
+        self._last_attitude_command = (0.0, 0.0, 0.0)
         current_telemetry = self._resolve_current_telemetry(current_telemetry)
         yaw_deg = self._yaw_deg_from_telemetry(current_telemetry)
         self.commands.append(("move_to_target_ned", self._current_frame_id, target_position_ned))
@@ -389,10 +405,14 @@ class MockDroneMover:
         )
 
     async def standstill(self, thrust):
+        self._last_attitude_command = (0.0, 0.0, thrust)
         self.commands.append(("standstill", self._current_frame_id, thrust))
         logger.debug(f"MockDroneMover.standstill({thrust})")
 
     async def idle(self):
+        # DroneMover.idle() funnels through move_to_target_zenith_async(0, 0,
+        # IDLE_THRUST / 2); mirror the command it would have recorded.
+        self._last_attitude_command = (0.0, 0.0, IDLE_THRUST / 2)
         self.commands.append(("idle", self._current_frame_id))
         logger.debug("MockDroneMover.idle()")
 

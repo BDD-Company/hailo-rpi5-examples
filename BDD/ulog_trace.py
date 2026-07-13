@@ -20,16 +20,19 @@ when it is clear.
 
 Slot layout (see docs/superpowers/specs/2026-07-12-px4-ulog-trace-design.md):
 
-     0  format version        7  commanded pitch, deg
-     1  frame id              8  commanded thrust
-     2  frames since a usable target
-     3  iterations with no frame at all
-     4  pd_coeff_p.x          9  detection centre x
-     5  pd_coeff_p.y         10  detection centre y
-     6  commanded roll, deg  11  detection width
-                             12  detection height
-                             13  detection confidence
-                          14-57  reserved (zero)
+     0  format version                     9  detection centre x
+     1  frame id                          10  detection centre y
+     2  frames since a usable target      11  detection width
+     3  iterations with no frame at all   12  detection height
+     4  pd_coeff_p.x                      13  detection confidence
+     5  pd_coeff_p.y                   14-57  reserved (zero)
+     6  commanded roll     <- deg OR deg/s, see UlogTraceSample
+     7  commanded pitch    <- ditto
+     8  commanded thrust
+
+The detection block is LAST so that a no-detection tick is all-zero from slot 9 on
+and MAVLink 2 trims it off the wire: ~76 B/message in practice, against 264 B
+untrimmed (measured over the 2026-04-27 UAE dive replay).
 """
 
 import asyncio
@@ -101,12 +104,19 @@ class UlogTraceSample:
     # clamping. This is the decision the vision pipeline made; what the FC then did
     # with it is already in the ulog's own attitude topics.
     #
+    # UNITS DEPEND ON drone.config.use_set_attitude, because DroneMover forwards these
+    # to two different MAVSDK calls:
+    #   use_set_attitude: true  -> set_attitude      -> DEGREES  (an angle)
+    #   use_set_attitude: false -> set_attitude_rate -> DEG/SEC  (a rate)  <- rig default
+    # So do not read a value of 230 as an impossible bank angle: on the current rig it
+    # is 230 deg/s of roll rate, and is entirely normal.
+    #
     # Sticky, and legitimately so: an offboard setpoint stays in force in PX4 until
     # it is replaced, so on a tick that issues no command the last one is still what
     # the FC is flying. That is a fact about the aircraft, not a stale reading.
-    cmd_roll_deg  : float = 0.0
-    cmd_pitch_deg : float = 0.0
-    cmd_thrust    : float = 0.0
+    cmd_roll  : float = 0.0
+    cmd_pitch : float = 0.0
+    cmd_thrust : float = 0.0
 
     # Normalised [0, 1].
     det_x    : float = 0.0
@@ -123,8 +133,8 @@ class UlogTraceSample:
         data[3]  = _finite(self.frames_without_frame)
         data[4]  = _finite(self.pd_p.x)
         data[5]  = _finite(self.pd_p.y)
-        data[6]  = _finite(self.cmd_roll_deg)
-        data[7]  = _finite(self.cmd_pitch_deg)
+        data[6]  = _finite(self.cmd_roll)
+        data[7]  = _finite(self.cmd_pitch)
         data[8]  = _finite(self.cmd_thrust)
         data[9]  = _finite(self.det_x)
         data[10] = _finite(self.det_y)

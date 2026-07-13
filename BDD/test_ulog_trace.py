@@ -22,8 +22,8 @@ def _detected(**overrides) -> UlogTraceSample:
         frames_since_detection=0,
         frames_without_frame=0,
         pd_p=XY(3.0, 4.0),
-        cmd_roll_deg=-1.5,
-        cmd_pitch_deg=2.5,
+        cmd_roll=-1.5,
+        cmd_pitch=2.5,
         cmd_thrust=0.7,
         det_x=0.5,
         det_y=0.25,
@@ -47,8 +47,8 @@ class TestSampleLayout(unittest.TestCase):
         self.assertEqual(data[3], 0.0)      # frames_without_frame
         self.assertEqual(data[4], 3.0)      # pd_p.x
         self.assertEqual(data[5], 4.0)      # pd_p.y
-        self.assertEqual(data[6], -1.5)     # cmd_roll_deg
-        self.assertEqual(data[7], 2.5)      # cmd_pitch_deg
+        self.assertEqual(data[6], -1.5)     # cmd_roll
+        self.assertEqual(data[7], 2.5)      # cmd_pitch
         self.assertEqual(data[8], 0.7)      # cmd_thrust
         self.assertEqual(data[9], 0.5)      # det_x
         self.assertEqual(data[10], 0.25)    # det_y
@@ -81,7 +81,7 @@ class TestSampleLayout(unittest.TestCase):
         data = UlogTraceSample(
             frame_id=7,
             pd_p=XY(float('nan'), 3.0),
-            cmd_roll_deg=float('inf'),
+            cmd_roll=float('inf'),
             cmd_thrust=float('-inf'),
             det_conf=float('nan'),
         ).to_floats()
@@ -89,7 +89,7 @@ class TestSampleLayout(unittest.TestCase):
         self.assertTrue(all(math.isfinite(v) for v in data), "no non-finite may reach the wire")
         self.assertEqual(data[4], 0.0)    # pd_p.x was NaN
         self.assertEqual(data[5], 3.0)    # ... and the good half survives
-        self.assertEqual(data[6], 0.0)    # cmd_roll_deg was +inf
+        self.assertEqual(data[6], 0.0)    # cmd_roll was +inf
         self.assertEqual(data[8], 0.0)    # cmd_thrust was -inf
         self.assertEqual(data[13], 0.0)   # det_conf was NaN
 

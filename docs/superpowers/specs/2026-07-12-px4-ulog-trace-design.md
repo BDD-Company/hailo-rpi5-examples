@@ -60,9 +60,9 @@ second connection, no new dependency.
 | 3 | iterations with no frame at all | `0` when a frame arrived | the loop's `skipped_detetions`; the pipeline itself starved. |
 | 4 | `pd_coeff_p.x` | — | after the final clamp into `[p_min, p_max]`. |
 | 5 | `pd_coeff_p.y` | — | " |
-| 6 | commanded roll, degrees | `NaN` | verbatim, as passed to `DroneMover`, pre-clamp. |
-| 7 | commanded pitch, degrees | `NaN` | " |
-| 8 | commanded thrust | `NaN` | " |
+| 6 | commanded roll | `0.0` | verbatim, as passed to `DroneMover`, pre-clamp. **Units vary — see below.** |
+| 7 | commanded pitch | `0.0` | " |
+| 8 | commanded thrust | `0.0` | " |
 | 9 | detection centre x | `0.0` | ← detection block. Normalised `[0, 1]`. |
 | 10 | detection centre y | `0.0` | " |
 | 11 | detection width | `0.0` | " |
@@ -86,21 +86,50 @@ reserved slots trim away on *every* message (~180 bytes each). Wire cost at 5 Hz
 Note this saves link bandwidth only. The ulog still records all 58 floats, because
 the `debug_array` uORB struct is fixed-size.
 
-### Absent values: `0.0` for detection, `NaN` for commands
+### The command slots are NOT always degrees
 
-Detection fields are `0.0` when there is no target. A width, height, and confidence
-of exactly zero is itself a reliable signature of "no detection" — far more so than
-it is of a real target sitting dead-centre — so zeros are unambiguous here, and they
-are what makes the trailing-zero trim work.
+`DroneMover.move_to_target_zenith_async` forwards its arguments to one of two
+different MAVSDK calls, depending on `drone.config.use_set_attitude`:
 
-Command fields are `NaN` when no attitude command was issued, because the same
-argument does not hold for them: a zero roll or zero thrust is a perfectly legal
-command, so `0.0` would be genuinely ambiguous. It costs no bandwidth — slots 6–8 sit
-*before* the detection block, so a `NaN` there does not block the trailing-zero trim.
+| `use_set_attitude` | MAVSDK call | slots 6–7 mean |
+|---|---|---|
+| `true` | `set_attitude` | **degrees** (an angle) |
+| `false` ← **rig default** | `set_attitude_rate` | **deg/s** (a rate) |
 
-`frame_id` is a float32, which holds integers exactly to 16,777,216 — about 9 days of
-continuous flight at 20 fps before it would start rounding. Not a real limit, but it
-is a property of the format worth recording rather than rediscovering.
+The replay of the 2026-04-27 UAE dive shows commanded roll ranging to ±235, which is
+absurd as a bank angle and entirely normal as a roll *rate*. Anyone reading the ulog
+after a crash must know which one they are looking at, so the slots are named
+`cmd_roll` / `cmd_pitch` rather than `..._deg`, and this is called out in
+`UlogTraceSample`.
+
+### Absent values are `0.0` everywhere — never NaN
+
+`NaN` is the obvious sentinel for "no value", and it is **unusable here**. MAVSDK
+serialises message fields as JSON; `json.dumps` emits a bare `NaN` token; MAVSDK's own
+C++ parser then rejects the message outright — `Failed to parse JSON`
+(`mavlink_direct_impl.cpp`). One `NaN` anywhere in the array silently costs the
+*entire* sample. This was found by sending real messages through a real
+`mavsdk_server`, not by reading the docs, and it is why `to_floats()` clamps every
+non-finite value to `0.0`: better to lose one field than the whole sample.
+
+Zeros are unambiguous in both blocks anyway, because a zeroed reading is not something
+the live system can produce:
+
+- **detection**: a width, height, and confidence of exactly zero is a far more
+  reliable signature of "nothing was detected" than of a real target sitting
+  dead-centre at zero confidence.
+- **command**: a real command always carries non-zero thrust — `THRUST_CRUISE`, and
+  even `idle()` uses `IDLE_THRUST / 2` — so an all-zero roll/pitch/thrust means no
+  command has been issued.
+
+### `frame_id` precision
+
+float32 holds integers exactly to 2²⁴ = 16,777,216; the next integer, 16,777,217,
+rounds down, and above that only even integers exist, so `+1` increments stop being
+distinguishable. At 3 fps that is ~65 days of continuous running, at 20 fps ~9.7 days,
+and the counter resets every process start. Not a real limit — but a property of the
+format worth recording rather than rediscovering from a log full of duplicate frame
+ids.
 
 ## Components
 

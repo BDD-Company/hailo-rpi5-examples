@@ -193,6 +193,56 @@ def test_replay_leaves_no_monkeypatches_behind(synthetic_log):
     assert (dc.DroneMover, dc.time) == before
 
 
+def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log):
+    """The ulog trace only earns its keep if it is actually wired into the loop. Drive
+    the real control thread and check the samples that reached DroneMover.send_debug_array:
+    right name, right format version, and a command that matches what the loop commanded."""
+    from ulog_trace import TRACE_FORMAT_VERSION, TRACE_NAME
+
+    cfg = ddc.load_replay_config(CONFIG_YAML)
+    assert cfg.ulog_trace is not None, "config.yaml should ship with the trace enabled"
+
+    _config_dict, frames, base_ns = ddc.parse_log(synthetic_log)
+    replay_queue = ddc.ReplayQueue(ddc.build_detections_list(frames, None), auto_advance=True)
+
+    drone = ddc.run_replay(cfg, replay_queue, frames, base_ns)
+
+    assert drone.debug_arrays, "the control loop emitted no ulog trace at all"
+
+    for name, array_id, data in drone.debug_arrays:
+        assert name == TRACE_NAME
+        assert array_id == 0
+        assert len(data) == 58
+        assert data[0] == float(TRACE_FORMAT_VERSION)
+        # A NaN here would be silently rejected by MAVSDK's JSON parser, costing the
+        # whole message. Nothing non-finite may ever reach the wire.
+        assert all(math.isfinite(v) for v in data)
+
+    # The trace is rate-limited on the control loop's clock, which the replay drives from
+    # the log's timestamps — so the count should track 5 Hz of FLIGHT time, not wall time.
+    stamps = sorted(fd["timestamp_ns"] for fd in frames.values() if fd.get("timestamp_ns"))
+    flight_s = (stamps[-1] - stamps[0]) / 1e9
+    expected = flight_s * cfg.ulog_trace.rate_hz
+    assert 0.5 * expected <= len(drone.debug_arrays) <= 1.5 * expected + 2, (
+        f"{len(drone.debug_arrays)} traces over {flight_s:.1f}s of flight, "
+        f"expected ~{expected:.0f} at {cfg.ulog_trace.rate_hz} Hz"
+    )
+
+    # The commanded attitude in the trace must be a command the loop really issued.
+    commanded = {
+        (round(roll, 4), round(pitch, 4), round(thrust, 4))
+        for kind, _frame, roll, pitch, thrust in
+        (c for c in drone.commands if c[0] == "move_to_target_zenith")
+    }
+    traced = {
+        (round(d[6], 4), round(d[7], 4), round(d[8], 4))
+        for _n, _a, d in drone.debug_arrays
+    }
+    traced.discard((0.0, 0.0, 0.0))     # "no command issued yet" — before the first one
+    assert traced, "every traced command was empty"
+    assert traced <= commanded, f"traced commands the loop never issued: {traced - commanded}"
+
+
 def test_the_replayed_speeds_reach_the_control_loop(synthetic_log):
     """Speed-dependent code (e.g. the PD speed reduction) is the main reason this harness
     exists — on the bench everything sits at 0 m/s. Prove the telemetry actually lands."""
