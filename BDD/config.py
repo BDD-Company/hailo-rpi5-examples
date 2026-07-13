@@ -469,6 +469,14 @@ class Config:
         NOTE: PX4 only writes these into the log when its `SDLOG_PROFILE` param has
         the Debug bit (32) set, and it reads that param at boot. DroneMover warns at
         startup when it is clear.
+
+        The 50 Hz ceiling is measured, not arbitrary. Stress-tested on the rig's real
+        PX4 (2026-07-13): the USB link and PX4 itself accept 2200+ msg/s happily, but
+        the FC's LOGGER only persists ~195 records/s — beyond that it silently keeps
+        only the latest sample per poll, reporting `dropouts: 0` while discarding 93%
+        of them. Everything up to 50 Hz is logged in full; above ~195 Hz you would be
+        writing a stream full of invisible holes. Raising this bound means re-measuring
+        that ceiling, not just editing the number.
         """
         rate_hz: Annotated[float, Range(0.1, 50.0)] = 5.0
     ulog_trace: Optional[UlogTrace] = None

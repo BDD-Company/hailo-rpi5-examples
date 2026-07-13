@@ -290,6 +290,47 @@ script that connects must `os._exit()` rather than fall off the end.
 Still outstanding: a live ARMED flight, where the trace lands in a real ulog on the FC's
 SD card. Nothing in the code path is untested at this point — only the arming is.
 
+## Stress test: what happens with no rate limiting (2026-07-13, on the rig)
+
+Run at 5 / 20 / 50 / 100 Hz and unlimited, against the real PX4.
+
+**The control loop is unaffected.** The tracer's send shares the control loop's asyncio
+loop, so the risk was that it delays commands. Measured as the lateness of a simulated
+20 Hz control tick: **p50 0.54 ms quiet → 0.60 ms at one-message-per-frame → 0.70 ms at
+50 Hz**. Noise.
+
+**Telemetry is unaffected.** The control loop reads attitude + odometry at 50 Hz over the
+same link, so starving them would make it fly on stale data. They hold **50.0 Hz exactly**
+at every trace rate, including a 2200 msg/s flood.
+
+**The link is not the bottleneck, and it is not 1 Mbps.** PX4's own `uorb top` reports its
+`debug_array` publish rate tracking ours 1:1 all the way to **2221 msg/s** — which at
+~88 B/msg is ~1.95 Mbps, impossible on a 1 Mbps UART. The device is a **USB CDC-ACM**
+virtual serial port (`/dev/serial/by-id/usb-Auterion_PX4_FMU_v6X...`), where the
+`:1000000` baud in the connection string is *ignored*. The real ceiling is USB.
+
+**The bottleneck is the FC's LOGGER, and it fails silently.** Measured as the growth of
+the actual `.ulg` on the FC's SD card (each `debug_array` record is ~256 B):
+
+| trace rate | log growth | trace contribution | records persisted |
+|---|---|---|---|
+| quiet | 38.7 kB/s | — | — |
+| **20 Hz (per frame)** | 43.7 kB/s | **+5.0 kB/s** | **~20/s — all of them** |
+| unlimited (2644/s) | 88.5 kB/s | +49.8 kB/s | **~195/s — 7% of them** |
+
+At 20 Hz the +5.0 kB/s is exactly 20 × 256 B, which independently confirms the records
+really are being written. But an unlimited flood only grows the log by ~195 records/s: the
+logger polls the uORB topic more slowly than we publish and keeps just the latest sample
+per poll. It reports **`dropouts: 0` while discarding 93% of them** — these are not buffer
+overruns, so nothing warns you.
+
+**Conclusion.** Per-frame logging (20–30 Hz) is safe and fully persisted, costing ~5 kB/s
+on top of the FC's own ~39 kB/s of logging. Unlimited is not dangerous, merely pointless:
+it burns ~2 Mbps of USB and 50 kB/s of SD to persist a seventh of what it sends, and
+bloats the flight log 2.3× with a stream full of invisible holes. The config's 50 Hz
+ceiling sits comfortably inside the fully-logged region; **raising it means re-measuring
+that ~195/s logger ceiling, not just editing the number.**
+
 ## Out of scope
 
 - Setting `SDLOG_PROFILE` from the app.
