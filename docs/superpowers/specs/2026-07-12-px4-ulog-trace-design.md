@@ -52,32 +52,55 @@ second connection, no new dependency.
 
 `DEBUG_FLOAT_ARRAY`, `name = "BDD"`, `array_id = 0`.
 
-| slot | field | notes |
-|-----:|-------|-------|
-| 0 | format version | `1`. Lets a decoder tell layouts apart. |
-| 1 | frames since a usable target | `0` on a tick that selected a target. |
-| 2 | iterations with no frame at all | the loop's `skipped_detetions`; `0` when a frame arrived. |
-| 3 | detection centre x | normalised `[0, 1]`; `NaN` if no target. |
-| 4 | detection centre y | " |
-| 5 | detection width | " |
-| 6 | detection height | " |
-| 7 | detection confidence | `NaN` if no target. |
-| 8 | `pd_coeff_p.x` | after the final clamp into `[p_min, p_max]`. |
-| 9 | `pd_coeff_p.y` | " |
-| 10 | commanded roll, degrees | verbatim, as passed to `DroneMover`. |
-| 11 | commanded pitch, degrees | " |
-| 12 | commanded thrust | " |
-| 13–57 | zero | reserved. |
+| slot | field | absent / idle | notes |
+|-----:|-------|---------------|-------|
+| 0 | format version | — | `1`. Non-zero, so a message can never truncate to nothing. |
+| 1 | frame id | — | the controller's monotonic counter, the one in our log prefix `frame=#0123`. |
+| 2 | frames since a usable target | `0` on a tick that selected one | frames arrived, vision found nothing. |
+| 3 | iterations with no frame at all | `0` when a frame arrived | the loop's `skipped_detetions`; the pipeline itself starved. |
+| 4 | `pd_coeff_p.x` | — | after the final clamp into `[p_min, p_max]`. |
+| 5 | `pd_coeff_p.y` | — | " |
+| 6 | commanded roll, degrees | `NaN` | verbatim, as passed to `DroneMover`, pre-clamp. |
+| 7 | commanded pitch, degrees | `NaN` | " |
+| 8 | commanded thrust | `NaN` | " |
+| 9 | detection centre x | `0.0` | ← detection block. Normalised `[0, 1]`. |
+| 10 | detection centre y | `0.0` | " |
+| 11 | detection width | `0.0` | " |
+| 12 | detection height | `0.0` | " |
+| 13 | detection confidence | `0.0` | " |
+| 14–57 | reserved | `0.0` | always trimmed on the wire. |
 
-Slots 1 and 2 are two different starvation modes and neither implies the other.
-Slot 1 rising means vision lost the ball while frames kept coming. Slot 2 rising
+Slots 2 and 3 are two different starvation modes and neither implies the other.
+Slot 2 rising means vision lost the ball while frames kept coming. Slot 3 rising
 means the camera/inference pipeline itself starved and the controller had nothing to
 act on. Post-crash you cannot distinguish those from either counter alone, and the
 distinction points at completely different root causes, so both are recorded.
 
-`NaN` rather than `0.0` for absent detection fields: a detection at the exact frame
-centre with zero confidence is a legal (if unlikely) reading, so zeros would be
-ambiguous. `NaN` is not.
+### Why the detection block goes last
+
+MAVLink 2 trims trailing zero bytes from the payload on the wire. Putting the
+detection fields at the end means a no-detection tick physically shrinks, and the 44
+reserved slots trim away on *every* message (~180 bytes each). Wire cost at 5 Hz:
+~84 B/msg with a detection, ~64 B/msg without, against 264 B untrimmed.
+
+Note this saves link bandwidth only. The ulog still records all 58 floats, because
+the `debug_array` uORB struct is fixed-size.
+
+### Absent values: `0.0` for detection, `NaN` for commands
+
+Detection fields are `0.0` when there is no target. A width, height, and confidence
+of exactly zero is itself a reliable signature of "no detection" — far more so than
+it is of a real target sitting dead-centre — so zeros are unambiguous here, and they
+are what makes the trailing-zero trim work.
+
+Command fields are `NaN` when no attitude command was issued, because the same
+argument does not hold for them: a zero roll or zero thrust is a perfectly legal
+command, so `0.0` would be genuinely ambiguous. It costs no bandwidth — slots 6–8 sit
+*before* the detection block, so a `NaN` there does not block the trailing-zero trim.
+
+`frame_id` is a float32, which holds integers exactly to 16,777,216 — about 9 days of
+continuous flight at 20 fps before it would start rounding. Not a real limit, but it
+is a property of the format worth recording rather than rediscovering.
 
 ## Components
 
@@ -186,7 +209,8 @@ the hardware, and a *debugging* feature must never be the thing that stalls it.
 
 - `to_floats()` puts each field in its documented slot; the array is exactly 58 long;
   the format version is slot 0; unused slots are zero.
-- Absent detection → `NaN` in slots 3–7, not `0.0`.
+- Absent detection → `0.0` in slots 9–13, so that everything from slot 9 on is zero
+  and the payload trims. Absent command → `NaN` in slots 6–8.
 - Rate limiting: submitting at 20 Hz against `rate_hz=5` sends ~1 in 4 (driven by an
   injected `now_fn`, so the test is deterministic and does not sleep).
 - Drop-on-inflight: with a send that never completes, subsequent submits are dropped
