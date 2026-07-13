@@ -195,9 +195,13 @@ def test_replay_leaves_no_monkeypatches_behind(synthetic_log):
 
 def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log):
     """The ulog trace only earns its keep if it is actually wired into the loop. Drive
-    the real control thread and check the samples that reached DroneMover.send_debug_array:
+    the real control thread and check the records that reached DroneMover.send_debug_array:
     right name, right format version, and a command that matches what the loop commanded."""
-    from ulog_trace import TRACE_FORMAT_VERSION, TRACE_NAME
+    from ulog_trace import (
+        SLOT_CMD_ROLL, SLOT_CMD_PITCH, SLOT_CMD_THRUST,
+        SLOT_HISTORY_0, SLOT_HISTORY_1,
+        TRACE_FORMAT_VERSION, TRACE_NAME, FrameOutcome, unpack_history,
+    )
 
     cfg = ddc.load_replay_config(CONFIG_YAML)
     assert cfg.ulog_trace is not None, "config.yaml should ship with the trace enabled"
@@ -228,6 +232,16 @@ def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log
         f"expected ~{expected:.0f} at {cfg.ulog_trace.rate_hz} Hz"
     )
 
+    # Each record must summarise a real interval, not a single frame: at ~20 fps and
+    # 5 Hz there should be several frames of history behind every record.
+    histories = [
+        unpack_history([d[SLOT_HISTORY_0], d[SLOT_HISTORY_1]])
+        for _n, _a, d in drone.debug_arrays
+    ]
+    real_frames = [sum(1 for o in h if o is not FrameOutcome.NO_DATA) for h in histories]
+    assert max(real_frames) > 1, "every record covered a single frame — aggregation is not happening"
+    assert any(FrameOutcome.VIABLE in h for h in histories), "no viable frame ever recorded"
+
     # The commanded attitude in the trace must be a command the loop really issued.
     commanded = {
         (round(roll, 4), round(pitch, 4), round(thrust, 4))
@@ -235,7 +249,7 @@ def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log
         (c for c in drone.commands if c[0] == "move_to_target_zenith")
     }
     traced = {
-        (round(d[6], 4), round(d[7], 4), round(d[8], 4))
+        (round(d[SLOT_CMD_ROLL], 4), round(d[SLOT_CMD_PITCH], 4), round(d[SLOT_CMD_THRUST], 4))
         for _n, _a, d in drone.debug_arrays
     }
     traced.discard((0.0, 0.0, 0.0))     # "no command issued yet" — before the first one

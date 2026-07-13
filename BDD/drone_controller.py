@@ -24,7 +24,7 @@ from telemetry_position import (
 # from drone_killswitch import kill_on_rc_switch_on_channel
 from helpers import Detection, Detections, MoveCommand, STOP, CameraSwitcher, DEFAULT_CAMERA_ID, CameraConfig
 from frame_order import FrameOrderGuard
-from ulog_trace import UlogTracer, UlogTraceSample
+from ulog_trace import FrameOutcome, UlogTracer
 
 try:
     from gpiozero import CPUTemperature
@@ -508,7 +508,6 @@ async def drone_controlling_thread_async(
     takeoff_time_ns = None
     prev_angle_to_target = XY()
     skipped_detetions = 0
-    frames_starved_before_this = 0
     # The gain currently in force. Initialised to the regulator's starting coeffs so
     # the ulog trace has a truthful value on the frames before the first detection.
     pd_coeff_p = to_XY(PD_COEFF_P)
@@ -725,35 +724,28 @@ async def drone_controlling_thread_async(
     )
     logger.info("ulog trace: %s", f"ON at {ULOG_TRACE.rate_hz} Hz" if ULOG_TRACE else "OFF")
 
-    def submit_ulog_trace(picked_detection : Detection | None):
-        """Snapshot this iteration for the PX4 ulog. Cheap and non-raising: it
-        rate-limits internally and fires the send as a detached task, so it can
-        neither block nor break the control loop.
+    def note_ulog_trace(outcome : FrameOutcome, picked_detection : Detection | None = None):
+        """Fold this iteration into the PX4 trace. Cheap and non-raising: it accumulates,
+        and only on the send tick fires a detached task, so it can neither block nor
+        break the control loop.
 
-        `picked_detection` is None when no usable target was selected — the detection
-        slots then stay zero, which is what lets the message trim on the wire.
+        A record summarises the whole INTERVAL since the last one was SENT (~6 frames at
+        5 Hz on a 30 fps loop), not just this frame: the counts, the per-frame history,
+        and the LAST VIABLE detection of the interval. So a detection followed by five
+        misses is still logged as a detection — a snapshot would have reported nothing.
 
         The command comes from DroneMover, verbatim as the controller handed it over
-        (pre-clamp). It is sticky, and rightly so: an offboard setpoint stays in force
-        in PX4 until replaced, so on a tick that issues no command the last one is
-        still what the aircraft is flying.
+        (pre-clamp). It is sticky, and rightly so: an offboard setpoint stays in force in
+        PX4 until replaced, so on a tick that issues no command the last one is still
+        what the aircraft is flying.
         """
-        bbox = picked_detection.bbox if picked_detection is not None else None
-        roll, pitch, thrust_cmd = drone.last_attitude_command()
-        ulog_tracer.submit(UlogTraceSample(
-            frame_id               = frame_id,
-            frames_since_detection = frame_id - last_seen_target_at_frame,
-            frames_without_frame   = frames_starved_before_this,
-            pd_p                   = pd_coeff_p,
-            cmd_roll           = roll,
-            cmd_pitch          = pitch,
-            cmd_thrust             = thrust_cmd,
-            det_x    = bbox.center.x if bbox else 0.0,
-            det_y    = bbox.center.y if bbox else 0.0,
-            det_w    = bbox.size.x   if bbox else 0.0,
-            det_h    = bbox.size.y   if bbox else 0.0,
-            det_conf = picked_detection.confidence if picked_detection is not None else 0.0,
-        ))
+        ulog_tracer.note(
+            frame_id  = frame_id,
+            outcome   = outcome,
+            pd_p      = pd_coeff_p,
+            cmd       = drone.last_attitude_command(),
+            detection = picked_detection,
+        )
 
     while True:
         extra = ''
@@ -810,8 +802,7 @@ async def drone_controlling_thread_async(
                 # we never reach the normal trace point below, and the ulog would simply
                 # fall silent — losing the one datum that says WHY. Here the trace keeps
                 # beating with a rising frames_without_frame, which names the failure.
-                frames_starved_before_this = skipped_detetions
-                submit_ulog_trace(None)
+                note_ulog_trace(FrameOutcome.NO_FRAME)
                 continue
 
             except:
@@ -898,10 +889,6 @@ async def drone_controlling_thread_async(
                     (detections_obj.meta.detection_end_timestamp_ns - detections_obj.meta.detection_start_timestamp_ns) / 1000_000,
                     (detections_obj.meta.detection_end_timestamp_ns - detections_obj.meta.capture_timestamp_ns) / 1000_000
                 )
-            # How long the pipeline starved immediately before this frame. Kept for the
-            # ulog trace, which is emitted after the command has gone out — by then
-            # skipped_detetions is back to 0 and the burst would be invisible.
-            frames_starved_before_this = skipped_detetions
             skipped_detetions = 0
             frame_capture_timestampt_ns = detections_obj.meta.capture_timestamp_ns or None
 
@@ -1332,7 +1319,16 @@ async def drone_controlling_thread_async(
             # Mirror this decision into the PX4's ulog. Deliberately placed AFTER the
             # awaited command has gone out, so it adds nothing to capture->command
             # latency — the metric this project optimises above all others.
-            submit_ulog_trace(picked)
+            #
+            # Three distinct ways a frame can carry no target, and the ulog keeps them
+            # apart because they mean different things after a crash: the detector saw
+            # nothing at all, versus it saw something we judged not worth acting on.
+            if picked is not None:
+                note_ulog_trace(FrameOutcome.VIABLE, picked)
+            elif not detections:
+                note_ulog_trace(FrameOutcome.NO_DETECTIONS)
+            else:
+                note_ulog_trace(FrameOutcome.NO_VIABLE)
 
             raw_last_command = drone.last_command()
             last_command = raw_last_command or '<<== NO ==>>'

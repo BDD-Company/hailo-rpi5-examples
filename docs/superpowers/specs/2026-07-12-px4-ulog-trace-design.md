@@ -26,11 +26,12 @@ PX4 accepts four inbound debug messages: `DEBUG` (`debug_value`), `NAMED_VALUE_F
 (`debug_array`). Only `DEBUG_FLOAT_ARRAY` carries all our fields in a single
 message: it is `time_usec` + `name[10]` + `array_id` + `data[58]` (MAVLink msg 350).
 
-58 float32 slots is far more than the ~12 values we need, so the float16 /
-bit-packing idea sketched in the TODO is unnecessary. One message per tick costs
-~1.3 KB/s on a 1 Mbps serial link. Packing would save bandwidth we do not need and
-would make the log unreadable without a bespoke decoder. Every value goes in as a
-plain float32 and `pyulog` / FlightReview read it directly.
+58 float32 slots is far more than the ~16 we need, so the float16 / bit-packing idea
+sketched in the TODO is unnecessary for the *values*. Measured cost is ~375 B/s at 5 Hz.
+Packing every field would save bandwidth we do not need and make the log unreadable
+without a bespoke decoder, so each value goes in as a plain float32 that `pyulog` /
+FlightReview read directly. (The one place bit-packing *does* earn its keep is the
+per-frame history, where the alternative would be one slot per frame.)
 
 The alternative, `NAMED_VALUE_FLOAT` per field, is more readable in FlightReview but
 needs ~12 messages per tick and — decisively — the fields would no longer be
@@ -44,31 +45,62 @@ serial-USB (`connection_string: usb` → `serial:///dev/serial/by-id/...:1000000
 which `mavsdk_server` opens exclusively. A second pymavlink connection to the same
 port is therefore impossible.
 
+(That `:1000000` baud is a red herring — it is a USB CDC-ACM virtual serial port, so
+the baud is ignored entirely and the real ceiling is USB. See the stress test below.)
+
 The installed MAVSDK (3.15.3) ships the `mavlink_direct` plugin, which sends an
 arbitrary MAVLink message as JSON fields over the link MAVSDK already holds. No
 second connection, no new dependency.
 
+## A record is an INTERVAL SUMMARY, not a snapshot
+
+The control loop runs at ~20–30 fps and we send at 5 Hz, so one record stands for ~5–6
+iterations. A snapshot of the sending frame would throw the other five away — and worse,
+it would *misreport*: a good detection followed by a single miss would log as "no
+detection", erasing the detection from the log entirely. That is the one thing a
+post-crash trace must never do.
+
+So every field is aggregated over the interval **since the last record was SENT**:
+
+- **counts** — how many frames arrived carrying no viable target, and how many
+  iterations got no frame at all;
+- **a per-frame history** — the outcome of each of the last 12 frames, packed into 2
+  slots;
+- **the LAST VIABLE DETECTION of the interval**, not the last frame's.
+
+The accumulator resets on **dispatch**, not when a record merely becomes due. If a send
+is skipped (previous one still in flight), the interval simply keeps growing, so the
+next record that does go out accounts for every frame since the last one that did. A
+slow link can never silently eat the data we are trying to preserve.
+
+`pd_coeff_p` and the command stay **momentary** — they are the values *in force* at send
+time, which is what you want to know. The history tells you how many frames ago the
+logged detection actually occurred, so there is no ambiguity about whether the gain was
+computed from it.
+
 ## Trace layout
 
-`DEBUG_FLOAT_ARRAY`, `name = "BDD"`, `array_id = 0`.
+`DEBUG_FLOAT_ARRAY`, `name = "BDD"`, `array_id = 0`. **Format version 2.**
 
 | slot | field | absent / idle | notes |
 |-----:|-------|---------------|-------|
-| 0 | format version | — | `1`. Non-zero, so a message can never truncate to nothing. |
-| 1 | frame id | — | the controller's monotonic counter, the one in our log prefix `frame=#0123`. |
-| 2 | frames since a usable target | `0` on a tick that selected one | frames arrived, vision found nothing. |
-| 3 | iterations with no frame at all | `0` when a frame arrived | the loop's `skipped_detetions`; the pipeline itself starved. |
-| 4 | `pd_coeff_p.x` | — | after the final clamp into `[p_min, p_max]`. |
-| 5 | `pd_coeff_p.y` | — | " |
-| 6 | commanded roll | `0.0` | verbatim, as passed to `DroneMover`, pre-clamp. **Units vary — see below.** |
-| 7 | commanded pitch | `0.0` | " |
-| 8 | commanded thrust | `0.0` | " |
-| 9 | detection centre x | `0.0` | ← detection block. Normalised `[0, 1]`. |
-| 10 | detection centre y | `0.0` | " |
-| 11 | detection width | `0.0` | " |
-| 12 | detection height | `0.0` | " |
-| 13 | detection confidence | `0.0` | " |
-| 14–57 | reserved | `0.0` | always trimmed on the wire. |
+| 0 | format version | — | `2`. Non-zero, so a message can never truncate to nothing. |
+| 1 | frame id | — | the **most recent** frame of the interval; the one in our log prefix `frame=#0123`. |
+| 2 | frames with no viable detection | `0` | **count over the interval**: frames that arrived carrying no usable target. |
+| 3 | iterations with no frame at all | `0` | **count over the interval**: the pipeline itself starved. |
+| 4 | frame history, newest 6 frames | `0` | 4 bits per frame, newest at bits 0–3. |
+| 5 | frame history, previous 6 | `0` | " |
+| 6 | `pd_coeff_p.x` | — | in force at send time, after the final clamp into `[p_min, p_max]`. |
+| 7 | `pd_coeff_p.y` | — | " |
+| 8 | commanded roll | `0.0` | verbatim, as passed to `DroneMover`, pre-clamp. **Units vary — see below.** |
+| 9 | commanded pitch | `0.0` | " |
+| 10 | commanded thrust | `0.0` | " |
+| 11 | detection centre x | `0.0` | ← detection block. The **last viable** detection of the interval. Normalised `[0, 1]`. |
+| 12 | detection centre y | `0.0` | " |
+| 13 | detection width | `0.0` | " |
+| 14 | detection height | `0.0` | " |
+| 15 | detection confidence | `0.0` | " |
+| 16–57 | reserved | `0.0` | always trimmed on the wire. |
 
 Slots 2 and 3 are two different starvation modes and neither implies the other.
 Slot 2 rising means vision lost the ball while frames kept coming. Slot 3 rising
@@ -76,12 +108,42 @@ means the camera/inference pipeline itself starved and the controller had nothin
 act on. Post-crash you cannot distinguish those from either counter alone, and the
 distinction points at completely different root causes, so both are recorded.
 
+### The frame history (slots 4–5)
+
+Each frame's outcome is one of:
+
+| value | outcome |
+|---:|---|
+| 0 | `NO_DATA` — padding: the interval had fewer frames than the history holds |
+| 1 | `NO_FRAME` — the loop got no frame at all; the pipeline starved |
+| 2 | `NO_DETECTIONS` — a frame arrived, the detector found nothing |
+| 3 | `NO_VIABLE` — a frame arrived with detections, none good enough to act on |
+| 4 | `VIABLE` — a frame arrived and we picked a target |
+
+**4 bits per frame, not 2.** Four outcomes would fit in 2 bits, but then a
+partially-filled slot's padding zeros would be indistinguishable from genuine `NO_FRAME`
+starvation, and every short interval would read as though the pipeline had died. A
+distinct `NO_DATA` removes that ambiguity, and leaves 11 spare outcomes. The cost is
+history depth: 12 frames rather than 24.
+
+**24 bits per slot, deliberately.** A float32 represents integers exactly only up to
+2²⁴, so 24 bits (6 frames × 4) is the widest field that survives the trip intact.
+Anything wider would silently round in the log.
+
+**Newest first**: index 0 is the frame the record was emitted on. Overflow (an interval
+longer than 12 frames) drops the *oldest* — the counts still cover everything, so only
+per-frame detail is lost, and only for the frames furthest from the record.
+
+The widths are **fixed by the format version**. A decoder reads the version from slot 0
+and knows the layout; changing any of them means bumping it.
+
 ### Why the detection block goes last
 
 MAVLink 2 trims trailing zero bytes from the payload on the wire. Putting the
-detection fields at the end means a no-detection tick physically shrinks, and the 44
-reserved slots trim away on *every* message (~180 bytes each). Wire cost at 5 Hz:
-~84 B/msg with a detection, ~64 B/msg without, against 264 B untrimmed.
+detection fields at the end means an interval with no viable detection physically
+shrinks, and the 42 reserved slots trim away on *every* message. Measured over the
+2026-04-27 UAE dive replay: **85 B/msg mean, against 264 B untrimmed** (~375 B/s at
+5 Hz).
 
 Note this saves link bandwidth only. The ulog still records all 58 floats, because
 the `debug_array` uORB struct is fixed-size.
@@ -135,24 +197,39 @@ ids.
 
 ### `BDD/ulog_trace.py` (new)
 
-- `TRACE_FORMAT_VERSION`, `TRACE_NAME`, and the slot indices, in one place.
+- `TRACE_FORMAT_VERSION`, `TRACE_NAME`, the history widths, and the slot indices, in
+  one place — so the packer, the tests and any decoder share one definition.
+- `FrameOutcome` — the 5-value enum packed into the history (`NO_DATA`, `NO_FRAME`,
+  `NO_DETECTIONS`, `NO_VIABLE`, `VIABLE`).
+- `pack_history()` / `unpack_history()` — the bit layout, and its inverse. The decoder
+  exists so the tests, and anyone reading a real ulog, never re-derive it by hand.
 - `UlogTraceSample` — a frozen dataclass of the fields above, with `to_floats()`
   returning the 58-slot list. Pure, trivially testable.
-- `UlogTracer(send_fn, rate_hz, enabled, now_fn=time.monotonic)`.
+- `TraceAccumulator` — gathers the interval between two SENT records: the counts, the
+  history ring, and the last viable detection. **Kept separate from `UlogTracer` and
+  free of asyncio**, because the aggregation rules are the part with the interesting
+  behaviour and they should be testable without an event loop.
+  - `reset()` happens on **dispatch**, not when a record becomes due. A skipped send
+    therefore extends the interval rather than discarding it.
+  - `reset()` also clears the detection: if it survived, an interval that saw nothing
+    would keep re-reporting an old target as though it were still in view.
+- `UlogTracer(send_fn, rate_hz, name, array_id, now_fn=time.monotonic)`.
   - `send_fn` is an **explicit parameter**, an async callable
     `(name: str, array_id: int, data: list[float]) -> None`. It is a live object and
     so must never travel inside a config dict (project rule: `control_config` is
     values-only).
-  - `submit(sample)` is the hot path, called from the control loop. Synchronous and
-    cheap: if disabled, return. If less than `1 / rate_hz` has elapsed since the last
-    send, return. Otherwise fire `send_fn` as a detached `asyncio` task and return
-    immediately — it never awaits the send.
-  - If a previous send is still in flight, drop the sample and count it. A stalled
-    link can then never build a backlog nor stall the control loop.
+  - `note(frame_id, outcome, pd_p, cmd, detection)` is the hot path, called once per
+    control-loop iteration. Synchronous and cheap: if disabled, return. Otherwise fold
+    the iteration into the accumulator; then, if `1 / rate_hz` has elapsed, build the
+    record, reset, and fire `send_fn` as a detached `asyncio` task. It never awaits the
+    send.
+  - If a previous send is still in flight, skip *the send* and count it — but keep
+    accumulating. A stalled link can then never build a backlog nor stall the control
+    loop, and equally never loses the frames it was too slow to report.
   - Send exceptions are caught and counted, logged once and thereafter periodically.
     A broken trace degrades to no trace; it never propagates into the control loop.
     (Project rule: on the control path, degrade — never hard-fail.)
-  - Counters (`sent`, `dropped`, `failed`) are exposed for the shutdown summary.
+  - Counters (`sent`, `skipped`, `failed`) are exposed for the shutdown summary.
 
 ### `BDD/drone.py` — `DroneMover`
 
@@ -169,7 +246,7 @@ ids.
     duplicating it. `idle()` funnels through this method, so it is covered for free.
   - `standstill(thrust)` stores `(0.0, 0.0, thrust)` — the only other attitude path.
   - `move_to_target_ned` is a *position* command with no roll/pitch/thrust; it stores
-    `NaN`s. That mode is off on the rig (`follow_target_position_ned: false`), and a
+    zeros. That mode is off on the rig (`follow_target_position_ned: false`), and a
     stale-but-plausible attitude would be worse than an honest "no attitude command".
 - `last_attitude_command()` returns the stored triple. (Distinct from the existing
   `last_command()`, which returns a formatted *string* from the `debug_collect_call_info`
@@ -180,13 +257,25 @@ ids.
 
 ### `BDD/drone_controller.py`
 
-- Build the tracer once, before the loop, from `control_config.ulog_trace` plus the
-  live `drone`, and call `tracer.submit(...)` at exactly one site: immediately after
-  `command_sent_ns = time.monotonic_ns()`.
+Build the tracer once, before the loop, from `control_config.ulog_trace` plus the live
+`drone`. Then `note()` **every** iteration, from two sites:
 
-  That point is **after** the awaited command has already gone out, so the trace adds
-  nothing to capture→command latency — the metric this project optimises above all
-  others. Every field is also in scope there regardless of which branch ran.
+1. Immediately after `command_sent_ns = time.monotonic_ns()`, classifying the frame:
+   `VIABLE` if a target was picked, `NO_DETECTIONS` if the detector returned nothing at
+   all, `NO_VIABLE` if it returned detections but none good enough to act on. (The
+   classification is exact: `_pick_target_detection` already filters by
+   `confidence_min`, so `picked is not None` *is* viability.)
+
+   That point is **after** the awaited command has gone out, so the trace adds nothing
+   to capture→command latency — the metric this project optimises above all others.
+
+2. From the **starved path**, as `NO_FRAME`, before its `continue`. If the vision
+   pipeline dies outright the loop never reaches site 1, and the trace would simply
+   fall silent — losing the one datum that says *why*. Here it keeps beating with a
+   rising starvation count, which names the failure.
+
+Because the tracer aggregates, both sites just record an outcome; the record is built
+and sent on whichever `note()` happens to cross the period boundary.
 
 ### `BDD/config.py` + `config.yaml`
 
@@ -229,9 +318,10 @@ discovered post-crash, which is the one moment it cannot be fixed.
 | failure | behaviour |
 |---|---|
 | `mavlink_direct` unsupported by the running `mavsdk_server` | first send raises; counted, warned once, tracer keeps no-oping. Flight unaffected. |
-| link saturated / send stalls | next `submit` sees the in-flight task, drops the sample, counts it. Loop never blocks. |
+| link saturated / send stalls | `note()` sees the in-flight task and skips *the send*, but keeps accumulating. The loop never blocks, and the frames it was too slow to report are not lost — the next record covers them. |
 | `SDLOG_PROFILE` Debug bit clear | messages still sent (harmless); loud WARNING at startup naming the fix. |
 | `ulog_trace` section absent | tracer disabled, zero overhead. |
+| interval longer than the 12-frame history | the oldest per-frame outcomes are dropped; the counts still cover the whole interval, so nothing aggregate is lost. |
 | PX4 not connected / MockDroneMover | `send_fn` records or no-ops; replay harness runs clean. |
 
 Nothing in this feature can abort the control loop. A stalled control loop can wreck
@@ -239,28 +329,50 @@ the hardware, and a *debugging* feature must never be the thing that stalls it.
 
 ## Testing
 
-**Host unit tests** — `BDD/test_ulog_trace.py`, with a fake async `send_fn`:
+**Host unit tests** — `BDD/test_ulog_trace.py`, 22 of them:
 
-- `to_floats()` puts each field in its documented slot; the array is exactly 58 long;
-  the format version is slot 0; unused slots are zero.
-- Absent detection → `0.0` in slots 9–13, so that everything from slot 9 on is zero
-  and the payload trims. Absent command → `NaN` in slots 6–8.
-- Rate limiting: submitting at 20 Hz against `rate_hz=5` sends ~1 in 4 (driven by an
-  injected `now_fn`, so the test is deterministic and does not sleep).
-- Drop-on-inflight: with a send that never completes, subsequent submits are dropped
-  and counted, and `submit` still returns promptly.
-- A raising `send_fn` is swallowed, counted, and does not propagate.
-- `enabled: false` → `send_fn` is never called.
+*Layout* — `to_floats()` puts each field in its documented slot; the array is exactly 58
+long; the format version is slot 0 and **is 2**; reserved slots are zero; a no-detection
+interval zeroes everything from slot 11 on so the payload trims; non-finite values are
+clamped.
+
+*History packing* — round-trips newest-first; a short interval pads with `NO_DATA` and
+**not** `NO_FRAME` (the whole reason the field is 4 bits wide); a full history stays
+exactly representable in float32; overflow drops the *oldest*.
+
+*Aggregation* — the rules that actually changed, tested directly against
+`TraceAccumulator` with no event loop:
+
+- the worked example from the task: 2 no-viable + 1 no-frame then a detection →
+  `frames_no_detection = 2`, `frames_without_frame = 1`, detection present;
+- **a detection on the first of six frames survives five later misses** — the case a
+  snapshot design gets wrong, and the reason for this whole change;
+- the *last* viable detection of an interval wins;
+- `reset()` clears the detection, so an interval that saw nothing reports zeros rather
+  than re-reporting a target already logged;
+- `pd_p` and the command are the values in force at the end of the interval.
+
+*Tracer* — one record per period summarising every frame between; **a stalled send does
+not lose the frames it could not report** (the interval keeps growing and the next record
+accounts for all of them); the history reaches the wire; a raising `send_fn` is swallowed
+and counted; disabled → never sends; `note()` from a thread with no event loop does not
+raise.
 
 **Config test** — `ulog_trace` parses, defaults apply when the section is absent, and
 an out-of-range `rate_hz` is rejected. Mirrored in `TestConfig`.
 
-**Replay, off-rig** — run `debug_drone_controller.py` against the 39 m/s UAE dive log
-(`uae-replay-log-corpus`) with a capturing fake `send_fn`; assert the trace count
-matches ~5 Hz over the log's duration, that slot 0 is the format version on every
-sample, and that commanded roll/pitch/thrust match what the controller passed to
-`MockDroneMover`. This is the check that the wiring is real rather than merely
-well-unit-tested.
+**Replay, off-rig** — drive the REAL control thread against the 39 m/s UAE dive log
+(`uae-replay-log-corpus`) with a capturing fake `send_fn`. This is the check that the
+wiring is real rather than merely well-unit-tested, and it produced the decisive
+number: over the 1655-frame dive,
+
+    1012 counted in slots 2+3  +  643 VIABLE frames in the histories  =  1655
+
+**every single control-loop iteration is accounted for**, with none double-counted and
+none lost between records. Median 5 frames per record (max 5, inside the 12-frame
+history). 20 records carry a detection whose *newest* frame was a miss — under the old
+snapshot design all 20 would have logged `det = 0`. Records carrying a detection rose
+141 → 161.
 
 **On-rig, against the real Auterion PX4** (`bdd-sd9-mandarin`, 2026-07-13) — DONE:
 
