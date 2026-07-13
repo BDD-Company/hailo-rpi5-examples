@@ -470,6 +470,12 @@ class Config:
         the Debug bit (32) set, and it reads that param at boot. DroneMover warns at
         startup when it is clear.
 
+        `rate_hz = 0` means UNCAPPED: one record per control-loop iteration, each
+        covering exactly one frame. That is the finest resolution the ulog can hold, and
+        it is safe — at 20-30 fps it sits far below the flight controller's logger
+        ceiling (below), costs ~5 kB/s of log, and perturbs neither the control loop nor
+        the telemetry streams (measured).
+
         The 50 Hz ceiling is measured, not arbitrary. Stress-tested on the rig's real
         PX4 (2026-07-13): the USB link and PX4 itself accept 2200+ msg/s happily, but
         the FC's LOGGER only persists ~195 records/s — beyond that it silently keeps
@@ -478,7 +484,9 @@ class Config:
         writing a stream full of invisible holes. Raising this bound means re-measuring
         that ceiling, not just editing the number.
         """
-        rate_hz: Annotated[float, Range(0.1, 50.0)] = 5.0
+        # 0 = uncapped (every frame). Otherwise a real rate, capped at the measured
+        # point where the FC's logger starts silently dropping records.
+        rate_hz: Annotated[float, Range(0.0, 50.0)] = 5.0
     ulog_trace: Optional[UlogTrace] = None
 
     # Runtime-only fields: set programmatically, NEVER read from the config

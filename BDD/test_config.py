@@ -1064,10 +1064,18 @@ def test_ulog_trace_is_off_when_disabled_or_absent():
 
 
 def test_ulog_trace_rate_is_bounded():
+    # 50 Hz is where the FC's logger starts silently dropping records, so it is a hard
+    # ceiling, not a style preference.
     with pytest.raises(ConfigError, match="rate_hz"):
         _shipped_config(ulog_trace={'rate_hz': 99.0})
     with pytest.raises(ConfigError, match="rate_hz"):
-        _shipped_config(ulog_trace={'rate_hz': 0.0})
+        _shipped_config(ulog_trace={'rate_hz': -1.0})
+
+
+def test_ulog_trace_rate_zero_means_uncapped_and_is_allowed():
+    # 0 is not "off" (that is `enabled: false` / an absent section) — it means one
+    # record per control-loop iteration.
+    assert _shipped_config(ulog_trace={'rate_hz': 0.0}).ulog_trace.rate_hz == 0.0
 
 
 # ===========================================================================

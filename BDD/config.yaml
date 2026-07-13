@@ -274,4 +274,10 @@ bytetrack:
 #   flight-controller params itself.
 ulog_trace:
   enabled: true
+  # Records per second. Each record SUMMARISES the interval since the last one (counts,
+  # a per-frame history, and the last viable detection), so lowering this loses
+  # resolution, never whole frames.
+  #   0    = uncapped: one record per control-loop iteration (one frame each).
+  #   <=50 = every record is written by the FC in full.
+  # Above ~195/s the PX4 logger silently discards most of them — see config.py.
   rate_hz: 5.0

@@ -14,8 +14,12 @@ entirely. So each record carries, for the whole interval SINCE THE LAST SENT REC
 
   * counts     - how many frames arrived with no viable target, and how many
                  iterations got no frame at all;
-  * a history  - the per-frame outcome of the last 12 frames, packed into 2 slots;
+  * a history  - the per-frame outcome of up to 21 frames, packed into 2 slots with an
+                 explicit frame count;
   * the LAST VIABLE DETECTION seen in the interval, not merely the last frame's.
+
+Set `rate_hz: 0` for UNCAPPED mode: one record per control-loop iteration, each
+covering exactly one frame. Measured safe on the rig (see the design doc).
 
 Two rules govern everything here, because this sits on the control path:
 
@@ -31,15 +35,15 @@ Debug bit (32) set, and reads that param at boot. `DroneMover` warns at startup 
 it is clear. Measured ceiling: the FC's logger persists only ~195 records/s and lies
 about it (`dropouts: 0` while discarding the rest), so keep the rate modest.
 
-Slot layout, FORMAT VERSION 2 (see the design doc; v1 had no history and momentary
-counters, and is not upward-compatible — hence the version bump):
+Slot layout, FORMAT VERSION 3 (see the design doc; every version changed the layout
+incompatibly, which is exactly what slot 0 exists to disambiguate):
 
-     0  format version (=2)              8  commanded roll     <- deg OR deg/s
+     0  format version (=3)              8  commanded roll     <- deg OR deg/s
      1  frame id (most recent)           9  commanded pitch    <- ditto
      2  frames with no viable detection 10  commanded thrust
      3  iterations with no frame at all
-     4  frame history, newest 6 frames  11  detection centre x
-     5  frame history, previous 6       12  detection centre y
+     4  frame history: count + frames   11  detection centre x
+     5  frame history: more frames      12  detection centre y
      6  pd_coeff_p.x                    13  detection width
      7  pd_coeff_p.y                    14  detection height
                                         15  detection confidence
@@ -53,7 +57,6 @@ import asyncio
 import logging
 import math
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Awaitable, Callable
@@ -69,8 +72,11 @@ logger = logging.getLogger(__name__)
 #
 #   v1 - momentary snapshot, no frame history.
 #   v2 - interval summary: counts since the last sent record, a packed per-frame
-#        history, and the last VIABLE detection of the interval.
-TRACE_FORMAT_VERSION = 2
+#        history (4 bits/frame, NO_DATA padding), and the last VIABLE detection.
+#   v3 - the history carries an explicit count of the frames it holds. That makes the
+#        NO_DATA padding value redundant, so an outcome needs only 2 bits, which nearly
+#        doubles the depth (21 frames, same 2 slots).
+TRACE_FORMAT_VERSION = 3
 
 # MAVLink DEBUG_FLOAT_ARRAY carries data[58]; `name` is char[10].
 TRACE_SLOTS    = 58
@@ -79,32 +85,44 @@ TRACE_ARRAY_ID = 0
 
 
 class FrameOutcome(IntEnum):
-    """What became of one control-loop iteration. Packed 4 bits at a time into the
-    history slots, so the values must stay in 0..15.
+    """What became of one control-loop iteration. Packed 2 bits at a time into the
+    history, so the values must stay in 0..3.
 
-    NO_DATA is why this is 4 bits wide and not 2. Four *outcomes* would fit in 2 bits,
-    but then a partially-filled history slot would pad with zeros that are
-    indistinguishable from genuine NO_FRAME starvation. A distinct "nothing here"
-    value costs a bit and removes the ambiguity — and leaves 11 spare outcomes.
+    Two bits is enough because the history stores an explicit frame COUNT. Without it a
+    partially-filled slot's padding zeros would be indistinguishable from genuine
+    NO_FRAME starvation, and we would need a fifth "no data here" value (v2 did, at
+    4 bits/frame). The count removes the ambiguity and buys back the depth.
     """
-    NO_DATA        = 0   # padding: the interval had fewer frames than the history holds
-    NO_FRAME       = 1   # the control loop got no frame at all — the pipeline starved
-    NO_DETECTIONS  = 2   # a frame arrived, the detector found nothing
-    NO_VIABLE      = 3   # a frame arrived with detections, none good enough to act on
-    VIABLE         = 4   # a frame arrived and we picked a target
+    NO_FRAME       = 0   # the control loop got no frame at all — the pipeline starved
+    NO_DETECTIONS  = 1   # a frame arrived, the detector found nothing
+    NO_VIABLE      = 2   # a frame arrived with detections, none good enough to act on
+    VIABLE         = 3   # a frame arrived and we picked a target
 
 
-# History packing, FIXED BY THE FORMAT VERSION. A decoder reads these off the version
-# in slot 0, so they must never change without bumping it.
-HISTORY_BITS_PER_FRAME  = 4
+# History packing, FIXED BY THE FORMAT VERSION. A decoder reads these off the version in
+# slot 0, so none of it may change without bumping the version.
+#
+# 24 bits per slot, deliberately: a float32 represents integers exactly only up to 2**24,
+# so 24 bits is the widest field that survives the trip intact. Anything wider would
+# silently round in the log — and a rounded bitfield decodes to garbage, not to an
+# obviously-wrong number.
+#
+#   slot 0:  bits  0..5   frame count (how many outcomes this history holds)
+#            bits  6..23  9 outcomes, 2 bits each   -> interval frames 0..8
+#   slot 1:  bits  0..23  12 outcomes, 2 bits each  -> interval frames 9..20
+#
+# No outcome straddles the slot boundary, so a decoder never has to stitch two floats.
+_SLOT_BITS              = 24
+HISTORY_BITS_PER_FRAME  = 2
+HISTORY_COUNT_BITS      = 6                                       # 0..63, capacity fits
 HISTORY_SLOTS           = 2
-HISTORY_FRAMES_PER_SLOT = 24 // HISTORY_BITS_PER_FRAME              # 6
-HISTORY_FRAMES          = HISTORY_SLOTS * HISTORY_FRAMES_PER_SLOT   # 12
+HISTORY_FRAMES_SLOT_0   = (_SLOT_BITS - HISTORY_COUNT_BITS) // HISTORY_BITS_PER_FRAME  # 9
+HISTORY_FRAMES_SLOT_1   = _SLOT_BITS // HISTORY_BITS_PER_FRAME                          # 12
+HISTORY_FRAMES          = HISTORY_FRAMES_SLOT_0 + HISTORY_FRAMES_SLOT_1                 # 21
 
-# 24 bits per slot, deliberately: a float32 represents integers exactly only up to
-# 2**24, so a 24-bit field is the widest that survives the trip intact. 6 frames * 4
-# bits = 24. Anything wider would silently round in the log.
-_MAX_SLOT_VALUE = (1 << 24) - 1
+_MAX_SLOT_VALUE   = (1 << _SLOT_BITS) - 1
+_OUTCOME_MASK     = (1 << HISTORY_BITS_PER_FRAME) - 1
+_COUNT_MASK       = (1 << HISTORY_COUNT_BITS) - 1
 
 # Slot indices, so the packer, the tests and any decoder agree on one definition.
 SLOT_FORMAT_VERSION       = 0
@@ -142,37 +160,50 @@ def _finite(value) -> float:
     return value if math.isfinite(value) else 0.0
 
 
+def _outcome_shift(index: int) -> tuple[int, int]:
+    """Where interval frame `index` lives: (slot, bit offset within that slot)."""
+    if index < HISTORY_FRAMES_SLOT_0:
+        return 0, HISTORY_COUNT_BITS + HISTORY_BITS_PER_FRAME * index
+    return 1, HISTORY_BITS_PER_FRAME * (index - HISTORY_FRAMES_SLOT_0)
+
+
 def pack_history(outcomes) -> list[float]:
-    """Pack per-frame outcomes, NEWEST FIRST, into HISTORY_SLOTS float32 slots.
+    """Pack per-frame outcomes, OLDEST FIRST, into HISTORY_SLOTS float32 slots, with the
+    number of frames stored in the low bits of slot 0.
 
-    `outcomes[0]` is the frame this record was emitted on, `outcomes[i]` the frame i
-    before it. Within a slot, frame i sits at bits `4*i .. 4*i+3`. Entries beyond the
-    interval's length are NO_DATA (0), so a decoder can tell "nothing here" from a real
-    NO_FRAME.
+    `outcomes[0]` is the FIRST frame of the interval. The explicit count is what lets a
+    decoder know where the data ends, so no padding value is needed and an outcome fits
+    in 2 bits.
 
-    More frames than the history holds: the OLDEST are dropped. The counts in slots 2
-    and 3 still cover the whole interval, so no aggregate information is lost — only
-    the per-frame detail of the frames furthest from the record, which are the least
-    interesting ones after a crash.
+    More frames than the history holds: the LATEST that do not fit are simply not
+    recorded, and the count reports what was. The counts in slots 2 and 3 still cover the
+    WHOLE interval, so nothing aggregate is lost — only per-frame detail, and only when
+    the send rate is set so low that an interval exceeds 21 frames.
     """
-    slots = [0.0] * HISTORY_SLOTS
-    for i, outcome in enumerate(list(outcomes)[:HISTORY_FRAMES]):
-        packed = int(outcome) & 0xF
-        slot, within = divmod(i, HISTORY_FRAMES_PER_SLOT)
-        slots[slot] = float(int(slots[slot]) | (packed << (HISTORY_BITS_PER_FRAME * within)))
-    for v in slots:
-        assert 0 <= v <= _MAX_SLOT_VALUE, "history slot must stay inside float32's exact-integer range"
-    return slots
+    stored = list(outcomes)[:HISTORY_FRAMES]
+    raw = [len(stored) & _COUNT_MASK, 0]
+    for index, outcome in enumerate(stored):
+        slot, shift = _outcome_shift(index)
+        raw[slot] |= (int(outcome) & _OUTCOME_MASK) << shift
+
+    for v in raw:
+        assert 0 <= v <= _MAX_SLOT_VALUE, (
+            "a history slot must stay inside float32's exact-integer range, "
+            "or it decodes to garbage rather than to an obviously-wrong number")
+    return [float(v) for v in raw]
 
 
 def unpack_history(slots) -> list[FrameOutcome]:
-    """Inverse of pack_history. Provided so the tests — and anyone reading a real ulog —
-    have one authoritative decoder rather than re-deriving the bit layout by hand."""
+    """Inverse of pack_history: returns exactly the frames the history holds, oldest
+    first. Provided so the tests — and anyone reading a real ulog — have one
+    authoritative decoder rather than re-deriving the bit layout by hand."""
+    raw = [int(slots[0]), int(slots[1])]
+    count = min(raw[0] & _COUNT_MASK, HISTORY_FRAMES)
+
     out = []
-    for slot_index in range(HISTORY_SLOTS):
-        raw = int(slots[slot_index])
-        for within in range(HISTORY_FRAMES_PER_SLOT):
-            out.append(FrameOutcome((raw >> (HISTORY_BITS_PER_FRAME * within)) & 0xF))
+    for index in range(count):
+        slot, shift = _outcome_shift(index)
+        out.append(FrameOutcome((raw[slot] >> shift) & _OUTCOME_MASK))
     return out
 
 
@@ -271,7 +302,7 @@ class TraceAccumulator:
     """
 
     def __init__(self):
-        self._history = deque(maxlen=HISTORY_FRAMES)   # newest first
+        self._history : list[FrameOutcome] = []        # oldest first, capped
         self.reset()
 
     def reset(self) -> None:
@@ -295,7 +326,11 @@ class TraceAccumulator:
              cmd: tuple, detection: Detection | None = None) -> None:
         """Fold one control-loop iteration into the interval."""
         self._notes += 1
-        self._history.appendleft(outcome)       # newest first
+        # Oldest first, and once the history is full the LATEST frames are simply not
+        # recorded. The COUNTS below still take every frame, so the aggregate stays
+        # exact no matter how long the interval runs.
+        if len(self._history) < HISTORY_FRAMES:
+            self._history.append(outcome)
         self._frame_id = frame_id
         self._pd_p = pd_p
         self._cmd = cmd
@@ -341,6 +376,12 @@ class UlogTracer:
     `send_fn` is passed explicitly rather than pulled out of a config dict: it is a live
     object, and config here carries values only.
 
+    `rate_hz = 0` means UNCAPPED: emit a record on every control-loop iteration. Each
+    record then covers exactly one frame, which is the finest resolution the ulog can
+    hold. Measured safe on the rig — at 20-30 fps this is far below the FC logger's
+    ~195 records/s ceiling, costs ~5 kB/s of log, and does not perturb the control loop
+    or the telemetry streams.
+
     Pass `send_fn=None` to disable — `note()` then costs one attribute test.
     """
 
@@ -355,6 +396,7 @@ class UlogTracer:
         self._name     = name
         self._array_id = array_id
         self._now      = now_fn
+        # 0 => uncapped: the period test below can never hold anything back.
         self._period_s = (1.0 / rate_hz) if rate_hz > 0 else 0.0
 
         self._acc = TraceAccumulator()

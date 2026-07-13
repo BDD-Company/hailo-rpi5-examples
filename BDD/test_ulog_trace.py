@@ -65,10 +65,11 @@ class TestSampleLayout(unittest.TestCase):
         self.assertEqual(data[SLOT_DET_X], 0.5)
         self.assertEqual(data[SLOT_DET_CONF], 0.9)
 
-    def test_the_format_version_is_2(self):
-        # v1 was a momentary snapshot with no history. A decoder must be able to tell
-        # the layouts apart from the log alone, so the version MUST move with the layout.
-        self.assertEqual(TRACE_FORMAT_VERSION, 2)
+    def test_the_format_version_is_3(self):
+        # Every version changed the layout incompatibly (v1 snapshot, v2 4-bit history,
+        # v3 counted 2-bit history). A decoder must be able to tell them apart from the
+        # log alone, so the version MUST move with the layout.
+        self.assertEqual(TRACE_FORMAT_VERSION, 3)
 
     def test_reserved_slots_are_zero(self):
         data = _sample().to_floats()
@@ -97,43 +98,51 @@ class TestSampleLayout(unittest.TestCase):
 
 class TestHistoryPacking(unittest.TestCase):
 
-    def test_round_trips_newest_first(self):
+    def test_round_trips_oldest_first(self):
         outcomes = [FrameOutcome.VIABLE, FrameOutcome.NO_FRAME, FrameOutcome.NO_VIABLE,
                     FrameOutcome.NO_DETECTIONS, FrameOutcome.VIABLE, FrameOutcome.NO_FRAME,
                     FrameOutcome.VIABLE]
-        decoded = unpack_history(pack_history(outcomes))
+        self.assertEqual(unpack_history(pack_history(outcomes)), outcomes)
 
-        self.assertEqual(decoded[:len(outcomes)], outcomes)
+    def test_the_count_is_what_bounds_the_history(self):
+        # v3's whole trick: an explicit count, so no padding value is needed and an
+        # outcome fits in 2 bits. Decoding must return exactly what was stored — no
+        # phantom trailing frames.
+        for n in range(0, HISTORY_FRAMES + 1):
+            decoded = unpack_history(pack_history([FrameOutcome.VIABLE] * n))
+            self.assertEqual(len(decoded), n, f"{n} frames in, {len(decoded)} out")
 
-    def test_short_intervals_pad_with_NO_DATA_not_NO_FRAME(self):
-        # THE reason the field is 4 bits and not 2. With 2 bits the padding zeros would
-        # be indistinguishable from real NO_FRAME starvation, and every record would
-        # look like the pipeline had died.
-        decoded = unpack_history(pack_history([FrameOutcome.VIABLE, FrameOutcome.VIABLE]))
+    def test_all_NO_FRAME_is_not_confused_with_an_empty_history(self):
+        # NO_FRAME is 0, so a starved interval packs its outcome bits as zeros. Only the
+        # count distinguishes "3 starved frames" from "nothing recorded". This is the
+        # exact ambiguity v2 needed a 5th enum value to avoid.
+        starved = pack_history([FrameOutcome.NO_FRAME] * 3)
+        empty   = pack_history([])
 
-        self.assertEqual(decoded[0], FrameOutcome.VIABLE)
-        self.assertEqual(decoded[1], FrameOutcome.VIABLE)
-        self.assertTrue(all(o is FrameOutcome.NO_DATA for o in decoded[2:]))
-        self.assertNotEqual(FrameOutcome.NO_DATA, FrameOutcome.NO_FRAME)
+        self.assertEqual(unpack_history(starved), [FrameOutcome.NO_FRAME] * 3)
+        self.assertEqual(unpack_history(empty), [])
+        self.assertNotEqual(starved, empty)
 
     def test_a_full_history_stays_exactly_representable_as_float32(self):
-        # 6 frames * 4 bits = 24 bits per slot, and float32 holds integers exactly only
-        # to 2**24. A wider field would silently round in the log.
-        worst = [FrameOutcome(15 if False else 4)] * HISTORY_FRAMES
+        # 24 bits per slot, and float32 holds integers exactly only to 2**24. A wider
+        # field would silently round — and a rounded bitfield decodes to garbage, not to
+        # an obviously-wrong number.
         slots = pack_history([FrameOutcome.VIABLE] * HISTORY_FRAMES)
         for v in slots:
             self.assertEqual(v, float(int(v)))
-            self.assertLessEqual(v, float(2 ** 24))
-        self.assertEqual(unpack_history(slots), worst)
+            self.assertLess(v, float(2 ** 24))
+        self.assertEqual(unpack_history(slots), [FrameOutcome.VIABLE] * HISTORY_FRAMES)
 
-    def test_overflow_drops_the_OLDEST_frames(self):
-        # More frames than the history holds: keep the ones nearest the record. The
-        # counts still cover the whole interval, so only per-frame detail is lost.
-        outcomes = [FrameOutcome.VIABLE] + [FrameOutcome.NO_FRAME] * (HISTORY_FRAMES + 5)
+    def test_overflow_drops_the_LATEST_frames_that_do_not_fit(self):
+        # As specified: when an interval is longer than the history holds, the frames
+        # that cannot fit are simply not recorded. The counts (slots 2/3) still cover the
+        # whole interval, so only per-frame detail is lost.
+        outcomes = ([FrameOutcome.VIABLE] * HISTORY_FRAMES) + [FrameOutcome.NO_FRAME] * 5
         decoded = unpack_history(pack_history(outcomes))
 
         self.assertEqual(len(decoded), HISTORY_FRAMES)
-        self.assertEqual(decoded[0], FrameOutcome.VIABLE)   # newest survived
+        self.assertEqual(decoded, [FrameOutcome.VIABLE] * HISTORY_FRAMES)
+        self.assertNotIn(FrameOutcome.NO_FRAME, decoded, "the overflow tail was recorded")
 
 
 class TestAccumulator(unittest.TestCase):
@@ -180,16 +189,27 @@ class TestAccumulator(unittest.TestCase):
 
         self.assertEqual(self.acc.build().det_conf, 0.95)
 
-    def test_history_is_newest_first_and_covers_every_iteration(self):
+    def test_history_is_oldest_first_and_covers_every_iteration(self):
         self._note(FrameOutcome.NO_FRAME,      frame_id=1)
         self._note(FrameOutcome.NO_DETECTIONS, frame_id=1)
         self._note(FrameOutcome.VIABLE,        frame_id=2, detection=_detection())
 
         decoded = unpack_history(pack_history(self.acc.build().history))
-        self.assertEqual(decoded[0], FrameOutcome.VIABLE)         # most recent
-        self.assertEqual(decoded[1], FrameOutcome.NO_DETECTIONS)
-        self.assertEqual(decoded[2], FrameOutcome.NO_FRAME)
-        self.assertEqual(decoded[3], FrameOutcome.NO_DATA)
+        self.assertEqual(decoded, [FrameOutcome.NO_FRAME,          # first of the interval
+                                   FrameOutcome.NO_DETECTIONS,
+                                   FrameOutcome.VIABLE])           # most recent
+
+    def test_the_history_stops_recording_past_capacity_but_the_counts_do_not(self):
+        # A pathologically low rate_hz makes an interval longer than the history holds.
+        # Per spec the frames that cannot fit are simply not recorded — but the AGGREGATE
+        # must stay exact, or the record lies about how starved the interval was.
+        for i in range(HISTORY_FRAMES + 9):
+            self._note(FrameOutcome.NO_FRAME, frame_id=1)
+
+        s = self.acc.build()
+        self.assertEqual(len(s.history), HISTORY_FRAMES, "history is capped")
+        self.assertEqual(s.frames_without_frame, HISTORY_FRAMES + 9,
+                         "the COUNT must still cover every frame of the interval")
 
     def test_reset_clears_the_detection_so_an_empty_interval_reports_zeros(self):
         # If the detection survived a reset, a window with nothing viable in it would
@@ -337,9 +357,9 @@ class TestTracer(unittest.IsolatedAsyncioTestCase):
 
         data = sender.calls[-1][2]
         decoded = unpack_history([data[SLOT_HISTORY_0], data[SLOT_HISTORY_1]])
-        self.assertEqual(decoded[0], FrameOutcome.NO_DETECTIONS)   # newest
-        self.assertEqual(decoded[1], FrameOutcome.VIABLE)
-        self.assertEqual(decoded[2], FrameOutcome.NO_FRAME)
+        self.assertEqual(decoded, [FrameOutcome.NO_FRAME,          # oldest first
+                                   FrameOutcome.VIABLE,
+                                   FrameOutcome.NO_DETECTIONS])
         self.assertEqual(data[SLOT_DET_CONF], 0.7, "the viable detection is not erased")
 
     async def test_a_failing_send_is_swallowed_and_counted(self):
@@ -373,6 +393,77 @@ class TestTracer(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tracer.sent, 0)
         self.assertEqual(tracer.failed, 1)
+
+
+class TestRateVsLoopRate(unittest.IsolatedAsyncioTestCase):
+    """Frames-per-record must actually track BOTH knobs: the configured send rate
+    (explicit) and the control-loop rate (implicit — the loop slows when the hardware
+    thermally throttles). If it did not, a throttled flight would silently log a
+    different amount of history than we think, and every record would misrepresent how
+    much of the flight it covers."""
+
+    async def _run(self, *, loop_fps: float, rate_hz: float, seconds: float = 4.0):
+        sender = _FakeSender()
+        clock = _FakeClock()
+        tracer = UlogTracer(sender, rate_hz=rate_hz, now_fn=clock)
+
+        n_frames = int(loop_fps * seconds)
+        for i in range(n_frames):
+            clock.now = round((i + 1) / loop_fps, 9)
+            tracer.note(frame_id=i, outcome=FrameOutcome.NO_DETECTIONS,
+                        pd_p=XY(1.0, 1.0), cmd=(0.0, 0.0, 0.5))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        records = [d for _n, _a, d in sender.calls]
+        frames_in = [len(unpack_history([d[SLOT_HISTORY_0], d[SLOT_HISTORY_1]]))
+                     for d in records]
+        counted = sum(d[SLOT_FRAMES_NO_DETECTION] + d[SLOT_FRAMES_WITHOUT_FRAME]
+                      for d in records)
+        return records, frames_in, counted, n_frames
+
+    async def test_lowering_the_send_rate_puts_more_frames_in_each_record(self):
+        # Same 30 fps loop, three send rates. Frames per record must scale as fps/rate.
+        for rate_hz, expected in ((15.0, 2), (5.0, 6), (3.0, 10)):
+            _rec, frames_in, _c, _n = await self._run(loop_fps=30.0, rate_hz=rate_hz)
+            typical = sorted(frames_in)[len(frames_in) // 2]
+            self.assertAlmostEqual(
+                typical, expected, delta=1,
+                msg=f"at 30 fps / {rate_hz} Hz a record should cover ~{expected} frames, got {typical}")
+
+    async def test_a_slower_control_loop_puts_fewer_frames_in_each_record(self):
+        # Same 5 Hz send rate, three loop rates — this is the THROTTLING case: the
+        # hardware slows the loop down and nobody reconfigures anything.
+        for loop_fps, expected in ((30.0, 6), (15.0, 3), (10.0, 2)):
+            _rec, frames_in, _c, _n = await self._run(loop_fps=loop_fps, rate_hz=5.0)
+            typical = sorted(frames_in)[len(frames_in) // 2]
+            self.assertAlmostEqual(
+                typical, expected, delta=1,
+                msg=f"at {loop_fps} fps / 5 Hz a record should cover ~{expected} frames, got {typical}")
+
+    async def test_every_frame_is_accounted_for_at_every_rate(self):
+        # The conservation law. Whatever the two rates, the counts across all records
+        # must add up to exactly the number of iterations the loop ran — nothing lost
+        # between records, nothing double-counted.
+        for loop_fps in (10.0, 30.0, 60.0):
+            for rate_hz in (0.0, 3.0, 5.0, 15.0):
+                _rec, _f, counted, n_frames = await self._run(loop_fps=loop_fps, rate_hz=rate_hz)
+                # The final partial interval has not been dispatched yet, so it is not in
+                # any record. Everything before it must be.
+                self.assertLessEqual(counted, n_frames)
+                self.assertGreaterEqual(
+                    counted, n_frames - int(loop_fps / rate_hz) - 1 if rate_hz else n_frames - 1,
+                    f"frames went missing at {loop_fps} fps / {rate_hz} Hz: "
+                    f"{counted} counted of {n_frames}")
+
+    async def test_uncapped_rate_writes_one_record_per_frame(self):
+        # rate_hz = 0 => a record per control-loop iteration, each covering exactly one
+        # frame. The finest resolution the ulog can hold.
+        records, frames_in, counted, n_frames = await self._run(loop_fps=30.0, rate_hz=0.0,
+                                                                seconds=2.0)
+        self.assertEqual(len(records), n_frames, "one record per frame")
+        self.assertEqual(set(frames_in), {1}, "each record covers exactly one frame")
+        self.assertEqual(counted, n_frames)
 
 
 if __name__ == "__main__":

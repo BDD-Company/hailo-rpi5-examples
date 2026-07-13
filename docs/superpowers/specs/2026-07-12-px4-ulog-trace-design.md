@@ -64,8 +64,8 @@ So every field is aggregated over the interval **since the last record was SENT*
 
 - **counts** — how many frames arrived carrying no viable target, and how many
   iterations got no frame at all;
-- **a per-frame history** — the outcome of each of the last 12 frames, packed into 2
-  slots;
+- **a per-frame history** — the outcome of up to 21 frames, packed into 2 slots with an
+  explicit frame count;
 - **the LAST VIABLE DETECTION of the interval**, not the last frame's.
 
 The accumulator resets on **dispatch**, not when a record merely becomes due. If a send
@@ -80,16 +80,16 @@ computed from it.
 
 ## Trace layout
 
-`DEBUG_FLOAT_ARRAY`, `name = "BDD"`, `array_id = 0`. **Format version 2.**
+`DEBUG_FLOAT_ARRAY`, `name = "BDD"`, `array_id = 0`. **Format version 3.**
 
 | slot | field | absent / idle | notes |
 |-----:|-------|---------------|-------|
-| 0 | format version | — | `2`. Non-zero, so a message can never truncate to nothing. |
+| 0 | format version | — | `3`. Non-zero, so a message can never truncate to nothing. |
 | 1 | frame id | — | the **most recent** frame of the interval; the one in our log prefix `frame=#0123`. |
 | 2 | frames with no viable detection | `0` | **count over the interval**: frames that arrived carrying no usable target. |
 | 3 | iterations with no frame at all | `0` | **count over the interval**: the pipeline itself starved. |
-| 4 | frame history, newest 6 frames | `0` | 4 bits per frame, newest at bits 0–3. |
-| 5 | frame history, previous 6 | `0` | " |
+| 4 | frame history: count + frames 0–8 | `0` | count in bits 0–5, then 2 bits per frame. |
+| 5 | frame history: frames 9–20 | `0` | 2 bits per frame. |
 | 6 | `pd_coeff_p.x` | — | in force at send time, after the final clamp into `[p_min, p_max]`. |
 | 7 | `pd_coeff_p.y` | — | " |
 | 8 | commanded roll | `0.0` | verbatim, as passed to `DroneMover`, pre-clamp. **Units vary — see below.** |
@@ -110,32 +110,44 @@ distinction points at completely different root causes, so both are recorded.
 
 ### The frame history (slots 4–5)
 
-Each frame's outcome is one of:
+Each frame's outcome is one of four, so **2 bits each**:
 
 | value | outcome |
 |---:|---|
-| 0 | `NO_DATA` — padding: the interval had fewer frames than the history holds |
-| 1 | `NO_FRAME` — the loop got no frame at all; the pipeline starved |
-| 2 | `NO_DETECTIONS` — a frame arrived, the detector found nothing |
-| 3 | `NO_VIABLE` — a frame arrived with detections, none good enough to act on |
-| 4 | `VIABLE` — a frame arrived and we picked a target |
+| 0 | `NO_FRAME` — the loop got no frame at all; the pipeline starved |
+| 1 | `NO_DETECTIONS` — a frame arrived, the detector found nothing |
+| 2 | `NO_VIABLE` — a frame arrived with detections, none good enough to act on |
+| 3 | `VIABLE` — a frame arrived and we picked a target |
 
-**4 bits per frame, not 2.** Four outcomes would fit in 2 bits, but then a
-partially-filled slot's padding zeros would be indistinguishable from genuine `NO_FRAME`
-starvation, and every short interval would read as though the pipeline had died. A
-distinct `NO_DATA` removes that ambiguity, and leaves 11 spare outcomes. The cost is
-history depth: 12 frames rather than 24.
+**The history carries its own frame count.** Without it, a partially-filled slot's
+padding zeros would be indistinguishable from genuine `NO_FRAME` starvation (`NO_FRAME`
+*is* zero), and every short interval would read as though the pipeline had died. v2
+solved that with a fifth `NO_DATA` value at 4 bits per frame; the explicit count solves it
+for 6 bits total and buys back the depth — **21 frames instead of 12**, in the same two
+slots.
 
-**24 bits per slot, deliberately.** A float32 represents integers exactly only up to
-2²⁴, so 24 bits (6 frames × 4) is the widest field that survives the trip intact.
-Anything wider would silently round in the log.
+Bit layout, fixed by the format version:
 
-**Newest first**: index 0 is the frame the record was emitted on. Overflow (an interval
-longer than 12 frames) drops the *oldest* — the counts still cover everything, so only
-per-frame detail is lost, and only for the frames furthest from the record.
+```
+slot 4:  bits  0..5    frame count (0..63; capacity is 21)
+         bits  6..23   9 outcomes, 2 bits each   -> interval frames 0..8
+slot 5:  bits  0..23   12 outcomes, 2 bits each  -> interval frames 9..20
+```
 
-The widths are **fixed by the format version**. A decoder reads the version from slot 0
-and knows the layout; changing any of them means bumping it.
+No outcome straddles the slot boundary, so a decoder never stitches two floats.
+
+**24 bits per slot, deliberately.** A float32 represents integers exactly only up to 2²⁴,
+so that is the widest field that survives the trip intact. Anything wider would silently
+round — and a rounded bitfield decodes to *garbage*, not to an obviously-wrong number.
+
+**Oldest first**: index 0 is the first frame of the interval. On overflow — an interval
+longer than 21 frames, which needs `rate_hz` set very low — the **latest** frames that do
+not fit are simply not recorded, and the count reports what was. The counts in slots 2 and
+3 still cover the whole interval, so this loses detail, never data.
+
+(The tradeoff is worth naming: in the final record before a crash, the newest frames are
+the ones nearest impact. It only bites at pathologically low rates — at 0.1 Hz on a 30 fps
+loop an interval is 300 frames — and the aggregate stays exact regardless.)
 
 ### Why the detection block goes last
 
@@ -312,6 +324,38 @@ is a new and invasive capability for a benefit — a trace that only starts work
 after the next reboot anyway — that does not justify it. The startup warning is what
 stops a *differently* configured FC (a swapped board, a params reset) from being
 discovered post-crash, which is the one moment it cannot be fixed.
+
+## Rate: uncapped, and what a record covers
+
+`ulog_trace.rate_hz` sets records per second. **`0` means uncapped**: one record per
+control-loop iteration, each covering exactly one frame — the finest resolution the ulog
+can hold. That is *not* the same as "off" (an absent section, or `enabled: false`).
+
+Frames per record must track **both** knobs — the configured rate (explicit) and the
+control-loop rate (implicit: the loop slows when the hardware thermally throttles, and
+nobody reconfigures anything). Swept against the 39 m/s UAE dive, varying the log rate and
+decimating the log's frames to simulate a throttled loop:
+
+| loop fps | rate Hz | records | frames/record | accounted | lost |
+|---:|---:|---:|---:|---:|---:|
+| 20.0 | **0 (uncapped)** | 1655 | **1** | 1655 / 1655 | 0 |
+| 20.0 | 2.0 | 158 | 11 | 1652 / 1655 | 3 |
+| 20.0 | 5.0 | 366 | 5 | 1655 / 1655 | 0 |
+| 20.0 | 20.0 | 1023 | 2 | 1655 / 1655 | 0 |
+| **10.0** (throttled) | 5.0 | 322 | **3** | 827 / 828 | 1 |
+| **6.7** (throttled) | 5.0 | 276 | **2** | 551 / 552 | 1 |
+
+Both knobs move it, and **nothing is ever lost**: at every combination the accounted-for
+iterations equal the frames the loop ran, minus only the final interval still sitting in
+the accumulator when the loop stopped. (In a crash the process dies mid-interval and that
+tail is unrecoverable anyway — there is nothing to flush it to.)
+
+A record covers `floor(fps / rate) + 1` frames, not `fps / rate`: the frame that
+*triggers* the send is itself part of the interval it reports.
+
+Uncapped is safe on this rig — at 20–30 fps it sits far below the flight controller's
+~195 records/s logger ceiling (see the stress test), costs ~5 kB/s of log, and perturbs
+neither the control loop nor the telemetry streams.
 
 ## Failure modes
 

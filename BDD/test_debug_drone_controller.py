@@ -238,9 +238,27 @@ def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log
         unpack_history([d[SLOT_HISTORY_0], d[SLOT_HISTORY_1]])
         for _n, _a, d in drone.debug_arrays
     ]
-    real_frames = [sum(1 for o in h if o is not FrameOutcome.NO_DATA) for h in histories]
-    assert max(real_frames) > 1, "every record covered a single frame — aggregation is not happening"
+    assert max(len(h) for h in histories) > 1, \
+        "every record covered a single frame — aggregation is not happening"
     assert any(FrameOutcome.VIABLE in h for h in histories), "no viable frame ever recorded"
+
+    # THE conservation law: every control-loop iteration must appear exactly once, either
+    # in a count or as a VIABLE frame in a history. Frames lost BETWEEN records would be
+    # invisible in the log, which is the failure this whole design exists to prevent.
+    #
+    # The only iterations legitimately missing are those of the final interval, which is
+    # still sitting in the accumulator when the loop stops — it was never dispatched. (In
+    # the case that actually matters, a crash, the process dies mid-interval and that tail
+    # is lost regardless; there is nothing to flush it to.)
+    counted = sum(d[2] + d[3] for _n, _a, d in drone.debug_arrays)
+    viable  = sum(1 for h in histories for o in h if o is FrameOutcome.VIABLE)
+    accounted = counted + viable
+    tail = len(frames) - accounted
+
+    assert tail >= 0, f"{accounted:.0f} iterations accounted for, but the loop only ran {len(frames)} — double-counted"
+    assert tail <= max(len(h) for h in histories) + 1, (
+        f"{tail} iterations went missing; only the final undispatched interval may be absent"
+    )
 
     # The commanded attitude in the trace must be a command the loop really issued.
     commanded = {
