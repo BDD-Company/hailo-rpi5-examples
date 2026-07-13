@@ -1038,6 +1038,38 @@ def test_config_parse_and_load_forwarders():
     assert isinstance(Config.load(CONFIG_YAML), Config)
 
 
+def _shipped_config(**mutate) -> Config:
+    """Parse the shipped config.yaml, with the HEF path pointed at a file that is
+    always present so these run on a dev host too. `mutate` patches ulog_trace;
+    pass ulog_trace=None to drop the section entirely."""
+    raw = yaml.safe_load(CONFIG_YAML.read_text())
+    raw['inference']['hef_model_path'] = str(CONFIG_YAML)   # ExistingFile: any real file
+    for key, value in mutate.items():
+        if value is None:
+            raw.pop(key, None)
+        else:
+            raw[key] = value
+    return Config.parse(raw)
+
+
+def test_shipped_config_enables_ulog_trace():
+    assert _shipped_config().ulog_trace == Config.UlogTrace(rate_hz=5.0)
+
+
+def test_ulog_trace_is_off_when_disabled_or_absent():
+    # `enabled` is a file-only toggle on an Optional section — never a dataclass
+    # field. Consumers must test `is None`, not `.enabled`.
+    assert _shipped_config(ulog_trace={'enabled': False, 'rate_hz': 5.0}).ulog_trace is None
+    assert _shipped_config(ulog_trace=None).ulog_trace is None
+
+
+def test_ulog_trace_rate_is_bounded():
+    with pytest.raises(ConfigError, match="rate_hz"):
+        _shipped_config(ulog_trace={'rate_hz': 99.0})
+    with pytest.raises(ConfigError, match="rate_hz"):
+        _shipped_config(ulog_trace={'rate_hz': 0.0})
+
+
 # ===========================================================================
 # Consumer contract (real controllers): a feature backed by an Optional section
 # must be gated on `section is not None`, NEVER on `section.enabled`. The

@@ -454,6 +454,25 @@ class Config:
             return {k: v for k, v in asdict(self).items() if k not in controller_only}
     bytetrack: Optional[ByteTrack]
 
+    @dataclass(slots=True, kw_only=True, frozen=True)
+    class UlogTrace:
+        """Mirror a slice of the decision pipeline into the PX4's persistent ulog.
+
+        Post-crash the Pi's SD card may be unreadable; the flight controller's log
+        survives. One MAVLink DEBUG_FLOAT_ARRAY per tick carries the frame id, both
+        starvation counters, the PD gain in force, the commanded attitude and the
+        selected detection. See ulog_trace.py for the slot layout.
+
+        An absent section (or `enabled: false`) means the feature is off: check
+        `config.ulog_trace is not None`.
+
+        NOTE: PX4 only writes these into the log when its `SDLOG_PROFILE` param has
+        the Debug bit (32) set, and it reads that param at boot. DroneMover warns at
+        startup when it is clear.
+        """
+        rate_hz: Annotated[float, Range(0.1, 50.0)] = 5.0
+    ulog_trace: Optional[UlogTrace] = None
+
     # Runtime-only fields: set programmatically, NEVER read from the config
     # file (providing them in the file is reported as an unknown key).
     DEBUG:                bool = field(default=False, metadata={'runtime': True})
