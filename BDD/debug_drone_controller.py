@@ -340,6 +340,10 @@ class MockDroneMover:
         self._last_attitude_command: tuple[float, float, float] = (0.0, 0.0, 0.0)
         # Every DEBUG_FLOAT_ARRAY the tracer produced, recorded instead of sent.
         self.debug_arrays: list[tuple[str, int, list[float]]] = []
+        # Mirrors DroneMover: the controller gates the tracer on this. A replay has no FC
+        # to read SDLOG_PROFILE from, so default to enabled — we WANT the replay to
+        # exercise the real trace path.
+        self.ulog_debug_logging_enabled: bool = True
         logger.info("MockDroneMover created (connection_string=%s)", drone_connection_string)
 
     def last_attitude_command(self) -> tuple[float, float, float]:

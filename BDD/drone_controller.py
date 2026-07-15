@@ -712,9 +712,16 @@ async def drone_controlling_thread_async(
     # Trace the decision pipeline into the PX4's own persistent ulog, so a crash that
     # destroys the Pi's SD card still leaves a record. Absent config section -> off.
     # `send_fn` is passed explicitly: it is a live object, and config carries values only.
+    #
+    # Two gates, both required. The config section must be present, AND the FC must
+    # actually be configured to WRITE the trace (SDLOG_PROFILE debug bit, checked during
+    # startup_sequence above). When the bit is off, PX4 would receive every message and
+    # silently discard it, so there is no point streaming: pass send_fn=None and the
+    # tracer becomes a no-op (its note() returns immediately — the null-object path).
     ULOG_TRACE = control_config.ulog_trace
+    ulog_enabled = bool(ULOG_TRACE) and drone.ulog_debug_logging_enabled
     ulog_tracer = UlogTracer(
-        drone.send_debug_array if ULOG_TRACE else None,
+        drone.send_debug_array if ulog_enabled else None,
         rate_hz = ULOG_TRACE.rate_hz if ULOG_TRACE else 0.0,
         # Rate-limit on the SAME clock the control loop runs on. In production that is
         # time.monotonic; under the replay harness `time` is a mock driven by the log's
@@ -722,7 +729,12 @@ async def drone_controlling_thread_async(
         # a handful of samples because it replayed 2 minutes of flight in 3 seconds.
         now_fn = lambda: time.monotonic_ns() / 1e9,
     )
-    logger.info("ulog trace: %s", f"ON at {ULOG_TRACE.rate_hz} Hz" if ULOG_TRACE else "OFF")
+    if not ULOG_TRACE:
+        logger.info("ulog trace: OFF (no config section)")
+    elif not drone.ulog_debug_logging_enabled:
+        logger.warning("ulog trace: DISABLED — the FC is not set to log debug topics")
+    else:
+        logger.info("ulog trace: ON at %s Hz", ULOG_TRACE.rate_hz)
 
     def note_ulog_trace(outcome : FrameOutcome, picked_detection : Detection | None = None):
         """Fold this iteration into the PX4 trace. Cheap and non-raising: it accumulates,

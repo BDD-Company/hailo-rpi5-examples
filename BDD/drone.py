@@ -144,6 +144,13 @@ class DroneMover():
         # whole trace message — verified against a real mavsdk_server.
         self._last_attitude_command : tuple[float, float, float] = (0.0, 0.0, 0.0)
 
+        # Whether PX4 will actually WRITE our ulog trace (SDLOG_PROFILE debug bit), set by
+        # _check_ulog_debug_logging() during startup. Optimistic default: if we never got
+        # to check, or the read failed, keep tracing — a transient param-read glitch must
+        # not silently disable a post-crash forensic feature. Only a positive "bit is off"
+        # reading flips it, and then the controller skips tracing entirely.
+        self.ulog_debug_logging_enabled : bool = True
+
     @staticmethod
     def _log_background_task_result(task: asyncio.Task) -> None:
         try:
@@ -377,7 +384,7 @@ class DroneMover():
 
         await self._configure_telemetry_rates()
         await self._ensure_telemetry_cache()
-        await self._warn_if_ulog_debug_topics_are_off()
+        await self._check_ulog_debug_logging()
         # await self.start_upside_down_monitor()
 
         return
@@ -429,10 +436,16 @@ class DroneMover():
             )
         )
 
-    async def _warn_if_ulog_debug_topics_are_off(self) -> None:
-        """PX4 drops our trace on the floor unless SDLOG_PROFILE has the Debug bit, and
-        it reads that param at boot — so a misconfigured FC would only be discovered
-        post-crash, which is the one moment it cannot be fixed. Check and say so.
+    async def _check_ulog_debug_logging(self) -> bool:
+        """PX4 only WRITES our trace when SDLOG_PROFILE has the Debug bit, and it reads
+        that param at boot — so a misconfigured FC would only be discovered post-crash,
+        the one moment it cannot be fixed. Read it, and set
+        `self.ulog_debug_logging_enabled` so the controller can SKIP tracing entirely
+        rather than stream messages PX4 will silently drop.
+
+        Returns the flag too, for callers/tests. Only a positive "bit is off" reading
+        disables tracing; an unreadable param leaves it enabled (see __init__ — a
+        transient glitch must not kill a forensic feature).
 
         We deliberately do NOT write the param: that would give the vision app the power
         to mutate flight-controller configuration, for a fix that could not take effect
@@ -441,19 +454,24 @@ class DroneMover():
         try:
             profile = await self.drone.param.get_param_int("SDLOG_PROFILE")
         except Exception as e:
-            logger.warning("Could not read SDLOG_PROFILE, ulog trace may not be logged: %s", e)
-            return
+            logger.warning("Could not read SDLOG_PROFILE; assuming ulog trace is logged: %s", e)
+            self.ulog_debug_logging_enabled = True
+            return self.ulog_debug_logging_enabled
 
         if profile & self.SDLOG_PROFILE_DEBUG_BIT:
             logger.info("SDLOG_PROFILE=%d has the debug bit: ulog trace will be logged.", profile)
-            return
-
-        logger.warning(
-            "SDLOG_PROFILE=%d lacks the debug bit (%d): PX4 will RECEIVE the ulog trace "
-            "and NOT write it to the log. Fix: set SDLOG_PROFILE=%d on the flight "
-            "controller and reboot it.",
-            profile, self.SDLOG_PROFILE_DEBUG_BIT, profile | self.SDLOG_PROFILE_DEBUG_BIT,
-        )
+            self.ulog_debug_logging_enabled = True
+        else:
+            logger.warning(
+                "SDLOG_PROFILE=%d lacks the debug bit (%d): PX4 would RECEIVE the ulog "
+                "trace and NOT write it, so tracing is DISABLED for this flight — the "
+                "launch continues. To fix, run `BDD/enable_px4_ulog_debug.py` and REBOOT "
+                "the flight controller before the next flight (PX4 only reads "
+                "SDLOG_PROFILE at boot, so it cannot be enabled for the current session).",
+                profile, self.SDLOG_PROFILE_DEBUG_BIT,
+            )
+            self.ulog_debug_logging_enabled = False
+        return self.ulog_debug_logging_enabled
 
 
     async def _configure_telemetry_rates(self, rates_hz: dict[str, float] | None = None) -> None:

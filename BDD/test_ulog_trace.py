@@ -531,5 +531,57 @@ class TestRateVsLoopRate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data[SLOT_HISTORY_1], 0.0)
 
 
+class TestSdlogDebugGate(unittest.IsolatedAsyncioTestCase):
+    """DroneMover._check_ulog_debug_logging decides whether to trace at all: PX4 only
+    WRITES the trace when SDLOG_PROFILE has the debug bit, so streaming to an FC without
+    it is pure waste. The controller reads `ulog_debug_logging_enabled` and, when False,
+    hands the tracer send_fn=None — the null-object path."""
+
+    def _mover(self, param_result):
+        # A DroneMover with just enough faked out to call the check. param_result is either
+        # an int (the SDLOG_PROFILE value) or an Exception to raise.
+        from drone import DroneMover
+
+        class _FakeParam:
+            async def get_param_int(self, name):
+                if isinstance(param_result, Exception):
+                    raise param_result
+                return param_result
+
+        class _FakeSystem:
+            param = _FakeParam()
+
+        mover = DroneMover.__new__(DroneMover)      # skip __init__ / MAVSDK connect
+        mover.ulog_debug_logging_enabled = True
+        mover.drone = _FakeSystem()
+        return mover
+
+    async def test_debug_bit_set_enables_tracing(self):
+        from drone import DroneMover
+        mover = self._mover(1024 | DroneMover.SDLOG_PROFILE_DEBUG_BIT | 1)   # the rig's 1057
+        self.assertTrue(await mover._check_ulog_debug_logging())
+        self.assertTrue(mover.ulog_debug_logging_enabled)
+
+    async def test_debug_bit_clear_disables_tracing(self):
+        mover = self._mover(1)      # default profile, no debug bit
+        self.assertFalse(await mover._check_ulog_debug_logging())
+        self.assertFalse(mover.ulog_debug_logging_enabled)
+
+    async def test_unreadable_param_leaves_tracing_enabled(self):
+        # A transient param-read glitch (seen on the real link) must NOT silently kill a
+        # post-crash forensic feature. Degrade toward keeping it.
+        mover = self._mover(RuntimeError("timeout"))
+        self.assertTrue(await mover._check_ulog_debug_logging())
+        self.assertTrue(mover.ulog_debug_logging_enabled)
+
+    async def test_a_disabled_mover_makes_the_tracer_a_no_op(self):
+        # This is the wiring the controller does: send_fn=None when the gate is closed.
+        mover = self._mover(1)
+        await mover._check_ulog_debug_logging()
+        enabled = mover.ulog_debug_logging_enabled
+        tracer = UlogTracer(mover.send_debug_array if enabled else None, rate_hz=5.0)
+        self.assertFalse(tracer.enabled)
+
+
 if __name__ == "__main__":
     unittest.main()
