@@ -326,6 +326,17 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             detection.get_confidence(),
         ))
 
+    # feat/bytetrack-locking-eval: log the RAW (pre-tracker) detections every frame
+    # so a --vision-only run (no control thread => no GOT DETECTIONS line) still
+    # captures the full detection stream. Faithful for offline switch analysis AND
+    # for re-running BYTETracker with swept params. xyxy + confidence per detection.
+    logger.debug(
+        "frame=#%04d !!! RAWDETS n=%d %s",
+        frame_id, len(raw_dets),
+        [(round(r.left_edge, 4), round(r.top_edge, 4), round(r.right_edge, 4),
+          round(r.bottom_edge, 4), round(c, 4)) for r, c in raw_dets],
+    )
+
     # Run ByteTracker to assign stable track IDs
     if raw_dets:
         dets_array = np.array([
