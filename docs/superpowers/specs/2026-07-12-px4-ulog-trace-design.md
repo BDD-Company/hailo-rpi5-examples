@@ -62,8 +62,8 @@ post-crash trace must never do.
 
 So every field is aggregated over the interval **since the last record was SENT**:
 
-- **counts** — how many frames arrived carrying no viable target, and how many
-  iterations got no frame at all;
+- **counts** — three separate: frames whose detector found nothing, frames with
+  detections but none viable, and iterations that got no frame at all;
 - **a per-frame history** — the outcome of up to 21 frames, packed into 2 slots with an
   explicit frame count;
 - **the LAST VIABLE DETECTION of the interval**, not the last frame's.
@@ -80,14 +80,15 @@ computed from it.
 
 ## Trace layout
 
-`DEBUG_FLOAT_ARRAY`, `name = "BDD"`, `array_id = 0`. **Format version 4.**
+`DEBUG_FLOAT_ARRAY`, `name = "BDD1"`, `array_id = 0`. The **format version is the numeric
+suffix of the name** — currently **1** — not a data slot; see "Versioning" below.
 
 | slot | field | absent / idle | notes |
 |-----:|-------|---------------|-------|
-| 0 | format version | — | `4`. Non-zero, so a message can never truncate to nothing. |
-| 1 | frame id | — | the **most recent** frame of the interval; the one in our log prefix `frame=#0123`. |
-| 2 | frames with no viable detection | `0` | **count over the interval**: frames that arrived carrying no usable target. |
-| 3 | iterations with no frame at all | `0` | **count over the interval**: the pipeline itself starved. |
+| 0 | frame id | — | the **most recent** frame of the interval; the one in our log prefix `frame=#0123`. |
+| 1 | frames: no detection at all | `0` | **count over the interval**: `NO_DETECTIONS` — the detector returned nothing. |
+| 2 | frames: detections, none viable | `0` | **count over the interval**: `NO_VIABLE` — detections present, none good enough. |
+| 3 | frames: no frame at all | `0` | **count over the interval**: `NO_FRAME` — the pipeline itself starved. |
 | 4 | `pd_coeff_p.x` | — | in force at send time, after the final clamp into `[p_min, p_max]`. |
 | 5 | `pd_coeff_p.y` | — | " |
 | 6 | commanded roll | `0.0` | verbatim, as passed to `DroneMover`, pre-clamp. **Units vary — see below.** |
@@ -102,11 +103,26 @@ computed from it.
 | 15 | frame history: frames 9–20 | `0` | 2 bits per frame. |
 | 16–57 | reserved | `0.0` | always trimmed on the wire. |
 
-Slots 2 and 3 are two different starvation modes and neither implies the other.
-Slot 2 rising means vision lost the ball while frames kept coming. Slot 3 rising
-means the camera/inference pipeline itself starved and the controller had nothing to
-act on. Post-crash you cannot distinguish those from either counter alone, and the
-distinction points at completely different root causes, so both are recorded.
+Slots 1–3 are **three** distinct starvation modes, none implying another: the detector
+saw nothing (`NO_DETECTIONS`), it saw detections but none worth acting on (`NO_VIABLE`),
+or no frame reached the loop at all (`NO_FRAME` — the pipeline itself starved). They point
+at completely different root causes, so each gets its own count. Splitting the first two
+(they were one merged count in development) is also what makes uncapped mode lossless —
+see "Versioning".
+
+### Versioning: the format version lives in the name
+
+The version is the numeric suffix of the MAVLink `name` (`"BDD" + version` = `"BDD1"`), not
+a `data` slot. Two reasons. It costs **no data float** — the `name` field (char[10]) is
+part of every `DEBUG_FLOAT_ARRAY` regardless — and, because the wire field order is
+`time_usec, array_id, name, data`, `name` sits *before* `data`, so a non-zero name does
+**not** block MAVLink 2 from trimming the zero tail of `data`. (Verified with pymavlink:
+`name="BDD1"` with all-zero data still packs to 26 B.) A decoder reads it back with
+`version_from_name()` — `int(name[3:])`.
+
+Earlier in-development formats (a momentary snapshot; then 4-bit, then 2-bit histories;
+then the history-last reorder) **never shipped or merged**, so the version resets to **1**
+for the first real format rather than carrying that history forward.
 
 ### The frame history (slots 14–15)
 
@@ -344,11 +360,15 @@ discovered post-crash, which is the one moment it cannot be fixed.
 control-loop iteration, each covering exactly one frame — the finest resolution the ulog
 can hold. That is *not* the same as "off" (an absent section, or `enabled: false`).
 
-An uncapped record **drops the frame history**. A one-frame history is redundant: the
-frame's outcome is already implied by the counts and the detection block — with the sole
-exception of the `NO_DETECTIONS`-vs-`NO_VIABLE` distinction, which the merged
-`frames_no_detection` count cannot carry, an accepted loss for this mode. Dropping it lets
-the record trim to nothing on the wire (68–88 B) and compress away in a gzipped `.ulg`.
+An uncapped record **drops the frame history**, losslessly. A one-frame history is
+redundant: with the three counts kept separate, each of the four outcomes maps to a
+distinct signature — `NO_FRAME` / `NO_DETECTIONS` / `NO_VIABLE` each raise their own count,
+`VIABLE` shows as a present detection — so the frame's outcome is fully recoverable from
+the counts and detection block alone. Dropping the history lets the record trim to nothing
+on the wire (68–88 B) and compress away in a gzipped `.ulg`. (This is why the counts were
+split; the merged count of development could not tell `NO_DETECTIONS` from `NO_VIABLE`
+here.) Confirmed on the dive replay: 1012 counts + 643 detections = every one of the 1655
+frames, each record exactly one outcome.
 
 Frames per record must track **both** knobs — the configured rate (explicit) and the
 control-loop rate (implicit: the loop slows when the hardware thermally throttles, and
@@ -392,12 +412,14 @@ the hardware, and a *debugging* feature must never be the thing that stalls it.
 
 ## Testing
 
-**Host unit tests** — `BDD/test_ulog_trace.py`, 30 of them:
+**Host unit tests** — `BDD/test_ulog_trace.py`, 32 of them:
 
 *Layout* — `to_floats()` puts each field in its documented slot; the array is exactly 58
-long; the format version is slot 0 and **is 4**; the history is the last used block;
-reserved slots are zero; a no-detection interval zeroes everything from the detection block
-on so the payload trims; non-finite values are clamped.
+long; the **version rides in the name** (`version_from_name` round-trips, rejects foreign
+and unversioned names) and is **not** a data slot; the history is the last used block; the
+three starvation counts are separate; reserved slots are zero; a no-detection interval
+zeroes everything from the detection block on so the payload trims; non-finite values are
+clamped.
 
 *History packing* — round-trips oldest-first; the explicit count bounds the decode (no
 phantom trailing frames); all-`NO_FRAME` is not confused with an empty history (the reason
@@ -407,8 +429,11 @@ overflow drops the *latest*.
 *Aggregation* — the rules that actually changed, tested directly against
 `TraceAccumulator` with no event loop:
 
-- the worked example from the task: 2 no-viable + 1 no-frame then a detection →
-  `frames_no_detection = 2`, `frames_without_frame = 1`, detection present;
+- the worked example from the task, with the counts now split: no-detections + no-viable +
+  no-frame then a detection → `frames_no_detection = 1`, `frames_no_viable = 1`,
+  `frames_without_frame = 1`, detection present;
+- **uncapped single-frame outcomes are all distinguishable from counts + detection** — the
+  four map to four distinct signatures, so dropping the history loses nothing;
 - **a detection on the first of six frames survives five later misses** — the case a
   snapshot design gets wrong, and the reason for this whole change;
 - the *last* viable detection of an interval wins;
