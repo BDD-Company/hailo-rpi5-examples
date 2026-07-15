@@ -30,7 +30,7 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QGroupBox,
     QPushButton, QSlider, QLabel, QPlainTextEdit, QTextEdit,
-    QSizePolicy, QCheckBox, QSpinBox, QDialog, QListWidget,
+    QSizePolicy, QCheckBox, QSpinBox, QDialog, QListWidget, QComboBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal, QObject, QPoint
 from PyQt6.QtGui import (
@@ -48,6 +48,8 @@ from matplotlib.lines import Line2D
 
 from debug_telemetry_position import FramePose, Pose, parse_telemetry_log
 from telemetry_position import Quaternion, rotate_frd_to_ned
+from helpers import Detection, Rect
+from debug_output import draw_detection, DETECTED_OBJECT_COLOR
 
 import logging
 
@@ -77,6 +79,33 @@ FRAME_RE = re.compile(r"frame=#(\d+)")
 TARGET_RE = re.compile(r"frame=#(\d+).*?!!! target : XY\(([^,]+),\s*([^)]+)\)")
 TARGET_ESTIMATE_RE = re.compile(r"frame=#(\d+).*?!!!.*estimated new target pos XY\(([^,]+),\s*([^)]+)\)")
 ESTIMATED_DISTANCE_RE = re.compile(r"frame=#(\d+).*?estimated distance:\s*\([^,@]+[,@]\s*([\.\d]+)m?\)")
+LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})")
+DETECTIONS_LINE_RE = re.compile(r"frame=#(\d+).*?GOT DETECTIONS")
+_NUM = r"[-+\d.eEna]+"   # also matches 'nan'
+# track_id / class_id are optional: logs written before those fields existed print
+# a shorter Detection repr, and requiring them would silently drop every detection.
+DETECTION_RE = re.compile(
+    rf"Detection\(bbox=Rect\(x=({_NUM}), y=({_NUM}), w=({_NUM}), h=({_NUM})\),\s*"
+    rf"confidence=({_NUM})"
+    rf"(?:,\s*track_id=(None|\d+))?"
+    rf"(?:,\s*class_id=(None|\d+))?\)"
+)
+
+# Canvas used to draw detections on when the recording has no video for a frame.
+# Detections are in normalized coordinates, so only the aspect ratio matters.
+NO_VIDEO_FRAME_SIZE = (720, 1280)   # (height, width)
+
+# Which recording to show first when a session has several. "debug" is the
+# pipeline's own annotated output and is frame-exact against the log, so it wins;
+# "RAW" is the pre-inference tap and is the fallback when no debug video exists.
+VIDEO_SOURCE_PREFERENCE = ("debug", "RAW")
+
+
+def preferred_source(sources: dict[str, list[Path]]) -> str | None:
+    for name in VIDEO_SOURCE_PREFERENCE:
+        if sources.get(name):
+            return name
+    return next((name for name, files in sources.items() if files), None)
 
 
 # Drone body geometry (FRD frame) — arms at 45° for X-shaped quad
@@ -191,6 +220,68 @@ def parse_target_distance(lines: list[str]) -> dict[int, float]:
             distance_meters = float(m.group(2))
             distances[fid] = distance_meters
     return distances
+
+
+def parse_detections(lines: list[str]) -> dict[int, list[Detection]]:
+    """Extract the detections the controller saw, per frame, from 'GOT DETECTIONS' lines.
+
+    ``Rect.__repr__`` prints x/y as the *centre* (see ``Rect.to_xywh``), while
+    ``Rect.from_xywh`` takes x/y as the top-left corner — so the repr has to be
+    converted through xyxy, not fed back into ``from_xywh``.
+    """
+    detections: dict[int, list[Detection]] = {}
+    for line in lines:
+        m = DETECTIONS_LINE_RE.search(line)
+        if not m:
+            continue
+        fid = int(m.group(1))
+        frame_detections: list[Detection] = []
+        for d in DETECTION_RE.finditer(line, m.end()):
+            cx, cy, w, h, conf = (float(d.group(i)) for i in range(1, 6))
+            track_id = int(d.group(6)) if (d.group(6) or "None") != "None" else None
+            class_id = int(d.group(7)) if (d.group(7) or "None") != "None" else None
+            frame_detections.append(Detection(
+                bbox=Rect.from_xyxy(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2),
+                confidence=conf,
+                track_id=track_id,
+                class_id=class_id,
+            ))
+        detections[fid] = frame_detections
+    return detections
+
+
+def _line_timestamp(line: str) -> datetime | None:
+    m = LOG_TIMESTAMP_RE.match(line)
+    return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f") if m else None
+
+
+def build_frame_timeline(frames: list[FramePose], lines: list[str],
+                         frame_to_lines: dict[int, list[int]]) -> list[FramePose]:
+    """One timeline entry per frame the log mentions — not just the telemetried ones.
+
+    Telemetry is logged less often than frames arrive, so stepping over
+    ``parse_telemetry_log()`` output skips frames (and, with it, video frames).
+    A frame with no ``telemetry:`` line reuses the previous frame's pose: that
+    pose is simply the last one the drone knew about, so it is the one that was
+    in effect for this frame. Frames ahead of the first telemetry line borrow
+    the first known pose — there is nothing earlier to carry forward.
+    """
+    if not frames:
+        return []
+    by_id = {fp.frame_id: fp for fp in frames}
+    timeline: list[FramePose] = []
+    last_pose = frames[0].pose
+    for fid in sorted(frame_to_lines):
+        fp = by_id.get(fid)
+        if fp is not None:
+            last_pose = fp.pose
+            timeline.append(fp)
+            continue
+        ts = _line_timestamp(lines[frame_to_lines[fid][0]])
+        if ts is None:
+            ts = timeline[-1].timestamp if timeline else frames[0].timestamp
+        timeline.append(FramePose(timestamp=ts, frame_id=fid, pose=last_pose))
+    return timeline
 
 
 class VideoReader:
@@ -516,29 +607,102 @@ class LogView(QWidget):
 # ===========================================================================
 
 class VideoView(QWidget):
-    """Displays one video frame, scaled to fit the widget."""
+    """Displays one video frame, scaled to fit the widget.
 
-    def __init__(self, reader: VideoReader):
+    A recording holds several videos of the same flight — ``debug_`` (the
+    pipeline's own annotated output) and ``RAW_`` (tapped before inference) —
+    so the view keeps them all and lets the user switch between them. Only the
+    selected source is open: the readers cache every decoded frame, so holding
+    two of them would double an already large memory footprint.
+
+    Frame offset: the timeline index is used directly as the video frame index,
+    which is exact for ``debug_`` (it holds exactly the frames the pipeline
+    processed). ``RAW_`` is tapped before inference, so it also holds the frames
+    inference skipped and it slides progressively out of step — measured at up
+    to ~24 frames over a 1655-frame flight. Nothing in the log records which
+    frames were skipped, so that drift cannot be derived; the offset spinner is
+    the manual nudge.
+    """
+
+    def __init__(self, sources: dict[str, list[Path]] | None = None,
+                 frame_offset: int = 0):
         super().__init__()
-        self._reader = reader
+        self._sources = {name: files for name, files in (sources or {}).items()
+                         if files}
+        self._reader = VideoReader(None)
+        self._source_name: str | None = None
+        self._offset = frame_offset
         self._current_rgb: np.ndarray | None = None
+        self._last_idx = 0
 
-        lo = QVBoxLayout(self)
-        lo.setContentsMargins(0, 0, 0, 0)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
         self._label = QLabel("No video")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setSizePolicy(QSizePolicy.Policy.Ignored,
                                   QSizePolicy.Policy.Ignored)
         self._label.setMinimumSize(1, 1)
         self._label.setStyleSheet("background: black; color: white;")
-        lo.addWidget(self._label)
+        self._layout.addWidget(self._label)
+
+        self._controls = QHBoxLayout()
+        self._controls.setContentsMargins(4, 0, 4, 2)
+        self._layout.addLayout(self._controls)
+
+        if self._sources:
+            self._combo = QComboBox()
+            self._combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            for name, files in self._sources.items():
+                self._combo.addItem(
+                    f"{name}  ({len(files)} clip{'s' if len(files) != 1 else ''})",
+                    userData=name)
+            self._combo.currentIndexChanged.connect(
+                lambda i: self._select_source(self._combo.itemData(i)))
+            self._controls.addWidget(QLabel("Source:"))
+            self._controls.addWidget(self._combo)
+
+            self._spin_offset = QSpinBox()
+            self._spin_offset.setRange(-10000, 10000)
+            self._spin_offset.setValue(frame_offset)
+            self._spin_offset.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._spin_offset.valueChanged.connect(self._on_offset_changed)
+            self._controls.addWidget(QLabel("Frame offset:"))
+            self._controls.addWidget(self._spin_offset)
+
+        self._controls.addStretch()
+
+        initial = preferred_source(self._sources)
+        if initial is not None:
+            self._select_source(initial)
+            self._combo.setCurrentIndex(
+                self._combo.findData(initial))
+
+    def _select_source(self, name: str | None):
+        """Open *name* as the video source, closing whichever was open before."""
+        if name == self._source_name:
+            return
+        self._reader.close()
+        self._source_name = name
+        self._reader = VideoReader(self._sources.get(name) if name else None)
+        self.update_frame(self._last_idx)
+
+    def _on_offset_changed(self, value: int):
+        self._offset = value
+        self.update_frame(self._last_idx)
+
+    def close(self):
+        self._reader.close()
 
     def update_frame(self, idx: int):
-        vid_idx = idx
-        self._current_rgb = (
-            self._reader.read(vid_idx) if self._reader.available else None
-        )
+        self._last_idx = idx
+        self._current_rgb = self._compose(idx)
         self._display()
+
+    def _compose(self, idx: int) -> np.ndarray | None:
+        """Build the RGB image shown for timeline index *idx*."""
+        if not self._reader.available:
+            return None
+        return self._reader.read(idx + self._offset)
 
     def _display(self):
         if self._current_rgb is None:
@@ -559,6 +723,57 @@ class VideoView(QWidget):
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self._display()
+
+
+class DetectionVideoView(VideoView):
+    """Video view that draws the frame's logged detections over the picture.
+
+    Uses ``debug_output.draw_detection`` — the very same call the live pipeline
+    makes when it renders the debug video — so a bbox here looks exactly like a
+    bbox there. When the recording has no video, detections are drawn on a blank
+    canvas instead, which is still the useful half of the picture.
+
+    DETECTION_COLOR is the pipeline's colour for *un*-selected detections, which
+    is what the log gives us (it records the detection list before selection).
+    It is deliberately dark — legible over daylight sky, dim over the blank
+    canvas; change it here if you want it louder.
+    """
+
+    DETECTION_COLOR = DETECTED_OBJECT_COLOR
+    LINE_THICKNESS = 1
+
+    def __init__(self, sources: dict[str, list[Path]], frames: list[FramePose],
+                 detections: dict[int, list[Detection]],
+                 frame_offset: int = 0, show_detections: bool = True):
+        self._frames = frames
+        self._detections = detections
+        self._cb_detections = QCheckBox("Detections")
+        self._cb_detections.setChecked(show_detections)
+        self._cb_detections.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Set up before super().__init__(), which renders the first frame through
+        # our _compose() and so needs the checkbox and detections to already exist.
+        super().__init__(sources, frame_offset=frame_offset)
+
+        self._cb_detections.toggled.connect(
+            lambda _: self.update_frame(self._last_idx))
+        self._controls.insertWidget(0, self._cb_detections)
+
+    def _compose(self, idx: int) -> np.ndarray | None:
+        frame = super()._compose(idx)
+        if not self._cb_detections.isChecked():
+            return frame
+
+        detections = self._detections.get(self._frames[idx].frame_id, [])
+        if frame is None:
+            frame = np.zeros((*NO_VIDEO_FRAME_SIZE, 3), dtype=np.uint8)
+        else:
+            # VideoReader caches its frames; never annotate one in place.
+            frame = frame.copy()
+
+        for detection in detections:
+            draw_detection(frame, detection, self.DETECTION_COLOR,
+                           line_thickness=self.LINE_THICKNESS)
+        return frame
 
 
 # ===========================================================================
@@ -1144,20 +1359,23 @@ def _titled(title: str, widget: QWidget) -> QGroupBox:
 class FlightDebugger(QWidget):
     def __init__(self, frames: list[FramePose], log_lines: list[str],
                  frame_to_lines: dict[int, list[int]],
-                 video: VideoReader, log_path: Path,
-                 video_path: Path | None = None,
-                 pairs: list[tuple[Path, list[Path]]] | None = None):
+                 video_sources: dict[str, list[Path]], log_path: Path,
+                 frame_offset: int = 0,
+                 pairs: list[tuple[Path, dict[str, list[Path]]]] | None = None):
         super().__init__()
         self.setWindowTitle("Flight Debugger")
         self.showMaximized()
         self._pairs = pairs
         self._current_log_path = log_path
+        self._frame_offset = frame_offset
 
         self._ctrl = FrameController(len(frames))
 
         # ---- views ----
         self._log_view = LogView(log_lines, frame_to_lines, frames)
-        self._video_view = VideoView(video)
+        self._video_view = DetectionVideoView(video_sources, frames,
+                                              parse_detections(log_lines),
+                                              frame_offset=frame_offset)
 
         pos, vel, acc, mag = precompute_telemetry(frames)
         target_xy = parse_target_xy(log_lines)
@@ -1170,13 +1388,11 @@ class FlightDebugger(QWidget):
                                   show_switch=bool(pairs))
 
         # ---- layout: splitters ----
-        vid_title = f"Video — {video_path.name}" if video_path else "Video"
-
         self._settings = QSettings("FlightDebugger", "FlightDebugger")
 
         # Top row: video | telemetry (horizontal splitter)
         self._top_split = QSplitter(Qt.Orientation.Horizontal)
-        self._top_split.addWidget(_titled(vid_title, self._video_view))
+        self._top_split.addWidget(_titled("Video", self._video_view))
         self._top_split.addWidget(_titled("Telemetry 3D", self._telem_view))
 
         # Main: top_split / log (vertical splitter)
@@ -1252,16 +1468,16 @@ class FlightDebugger(QWidget):
         self._current_log_path = result[0]
         self._load_session(*result)
 
-    def _load_session(self, log_path: Path, vid_files: list[Path]):
+    def _load_session(self, log_path: Path, video_sources: dict[str, list[Path]]):
         """Load a new log + video pair into all views."""
-        frames = parse_telemetry_log(log_path)
+        log_lines, frame_to_lines = parse_log_lines(log_path)
+        frames = build_frame_timeline(parse_telemetry_log(log_path),
+                                      log_lines, frame_to_lines)
         if not frames:
             return
-        log_lines, frame_to_lines = parse_log_lines(log_path)
-        new_video = VideoReader(vid_files or None)
 
         # Tear down old state
-        self._video_view._reader.close()
+        self._video_view.close()
         # Disconnect only the three view slots; leave nav's connection
         # intact so that nav.reload() can disconnect it properly.
         self._ctrl.frame_changed.disconnect(self._log_view.update_frame)
@@ -1271,7 +1487,9 @@ class FlightDebugger(QWidget):
         # New controller and views
         self._ctrl = FrameController(len(frames))
         self._log_view = LogView(log_lines, frame_to_lines, frames)
-        self._video_view = VideoView(new_video)
+        self._video_view = DetectionVideoView(video_sources, frames,
+                                              parse_detections(log_lines),
+                                              frame_offset=self._frame_offset)
         pos, vel, acc, mag = precompute_telemetry(frames)
         target_xy = parse_target_xy(log_lines)
         target_estimate_xy = parse_target_estimate_xy(log_lines)
@@ -1282,9 +1500,8 @@ class FlightDebugger(QWidget):
         top_sizes = self._top_split.sizes()
         main_sizes = self._main_split.sizes()
 
-        vid_title = f"Video \u2014 {vid_files[0].name}" if vid_files else "Video"
         for idx, new_box in [
-            (0, _titled(vid_title, self._video_view)),
+            (0, _titled("Video", self._video_view)),
             (1, _titled("Telemetry 3D", self._telem_view)),
         ]:
             old = self._top_split.widget(idx)
@@ -1345,11 +1562,29 @@ def _extract_video_timestamp(path: Path) -> datetime | None:
     return None
 
 
-def discover_pairs(directory: Path) -> list[tuple[Path, list[Path]]]:
+def group_videos_by_prefix(files: list[Path]) -> dict[str, list[Path]]:
+    """Group video clips by their filename prefix — "debug", "RAW", … .
+
+    The prefix names the recording *source*, and every source is kept: the
+    debugger lets the user switch between them rather than picking one here.
+    """
+    sources: dict[str, list[Path]] = {}
+    for f in sorted(files):
+        m = _VID_PREFIX_RE.match(f.stem)
+        sources.setdefault(m.group(1) if m else "video", []).append(f)
+    # Preferred sources first, so the combo box lists debug before RAW.
+    ordered = {name: sources.pop(name)
+               for name in VIDEO_SOURCE_PREFERENCE if name in sources}
+    ordered.update(sources)
+    return ordered
+
+
+def discover_pairs(directory: Path) -> list[tuple[Path, dict[str, list[Path]]]]:
     """Scan *directory* for .log + video pairs, matched by filename timestamp.
 
-    Returns a list of ``(log_path, [video_files])`` sorted by log timestamp.
-    Prefers ``debug_`` videos when both ``debug_`` and ``RAW_`` exist.
+    Returns a list of ``(log_path, {source_name: [video_files]})`` sorted by log
+    timestamp. Every recording of a flight is kept — ``debug_`` *and* ``RAW_`` —
+    so the video view can switch between them.
     """
     logs = sorted(
         (p for p in directory.iterdir()
@@ -1361,36 +1596,22 @@ def discover_pairs(directory: Path) -> list[tuple[Path, list[Path]]]:
         if p.suffix in (".mkv", ".mp4")
     )
 
-    # Group video files by (prefix, timestamp_key).
-    # prefix = "debug", "RAW", "clip", etc.  ts_key = "YYYYMMDD-HHMMSS".
-    vid_groups: dict[str, dict[str, list[Path]]] = {}   # ts_key → prefix → files
+    # Group video files by timestamp_key ("YYYYMMDD-HHMMSS"), then by source.
+    vid_groups: dict[str, list[Path]] = {}
     for v in videos:
         ts_m = _VID_TS_RE.search(v.stem)
-        pref_m = _VID_PREFIX_RE.match(v.stem)
         if not ts_m:
             continue
-        ts_key = ts_m.group(1)
-        prefix = pref_m.group(1) if pref_m else ""
-        vid_groups.setdefault(ts_key, {}).setdefault(prefix, []).append(v)
-
-    # For each timestamp pick the best prefix (prefer "debug").
-    best_videos: dict[str, list[Path]] = {}
-    for ts_key, by_prefix in vid_groups.items():
-        for pref in ("debug", "RAW"):
-            if pref in by_prefix:
-                best_videos[ts_key] = sorted(by_prefix[pref])
-                break
-        else:
-            best_videos[ts_key] = sorted(next(iter(by_prefix.values())))
+        vid_groups.setdefault(ts_m.group(1), []).append(v)
 
     vid_entries = sorted(
-        ((datetime.strptime(k, "%Y%m%d-%H%M%S"), k) for k in best_videos),
+        ((datetime.strptime(k, "%Y%m%d-%H%M%S"), k) for k in vid_groups),
         key=lambda x: x[0],
     )
 
     # Match each log to the closest video group where video_time >= log_time.
     used: set[str] = set()
-    pairs: list[tuple[Path, list[Path]]] = []
+    pairs: list[tuple[Path, dict[str, list[Path]]]] = []
     for log_path in logs:
         log_ts = _extract_log_timestamp(log_path)
         best_key: str | None = None
@@ -1402,9 +1623,9 @@ def discover_pairs(directory: Path) -> list[tuple[Path, list[Path]]]:
                 best_key = ts_key
         if best_key is not None:
             used.add(best_key)
-            pairs.append((log_path, best_videos[best_key]))
+            pairs.append((log_path, group_videos_by_prefix(vid_groups[best_key])))
         else:
-            pairs.append((log_path, []))
+            pairs.append((log_path, {}))
 
     return pairs
 
@@ -1423,15 +1644,17 @@ class SessionPicker(QDialog):
         self._list = QListWidget()
         self._list.setFont(QFont("Monospace", 10))
 
-        for log_path, vid_files in pairs:
+        for log_path, video_sources in pairs:
             log_ts = _extract_log_timestamp(log_path)
             ts_str = log_ts.strftime("%Y-%m-%d %H:%M:%S") if log_ts else "?"
             log_mb = log_path.stat().st_size / (1024 * 1024)
-            if vid_files:
-                base = vid_files[0].stem.rsplit("_", 1)[0]
-                n = len(vid_files)
-                vid_mb = sum(f.stat().st_size for f in vid_files) / (1024 * 1024)
-                vid_info = f"{base}  ({n} clip{'s' if n != 1 else ''}, {vid_mb:.1f} MB)"
+            if video_sources:
+                parts = []
+                for name, files in video_sources.items():
+                    mb = sum(f.stat().st_size for f in files) / (1024 * 1024)
+                    parts.append(f"{name} ({len(files)} clip"
+                                 f"{'s' if len(files) != 1 else ''}, {mb:.1f} MB)")
+                vid_info = " + ".join(parts)
             else:
                 vid_info = "(no video)"
             self._list.addItem(
@@ -1478,19 +1701,20 @@ def main():
     parser.add_argument("log_file", nargs="?", type=Path, default=None,
                         help="Path to BDD .log file")
     parser.add_argument("--video", type=Path, default=None,
-                        help="Video file or directory of MP4s")
+                        help="Video file, or directory of videos: every "
+                             "debug_/RAW_ recording found is offered as a source")
     parser.add_argument("--dir", type=Path, default=None,
                         help="Directory with log + video files; "
                              "auto-discovers pairs and shows a picker")
     parser.add_argument("--video-offset", type=int, default=0,
-                        help="Video frame offset: video_idx = frame_idx + offset")
+                        help="Initial video frame offset: video_idx = frame_idx + "
+                             "offset (also adjustable in the UI)")
     parser.add_argument("--allow-no-video", type=bool, default=False,
                         help="Do not error if video can't be loaded")
     args = parser.parse_args()
 
     # --dir mode: scan directory, show picker, then fall through to common path
-    video_source: Path | list[Path] | None = args.video
-    video_display_path: Path | None = args.video
+    video_sources: dict[str, list[Path]] = {}
     pairs = None
 
     if args.dir:
@@ -1509,30 +1733,31 @@ def main():
         result = dlg.selected_pair()
         if result is None:
             sys.exit(0)
-        args.log_file, vid_files = result
-        video_source = vid_files or None
-        video_display_path = vid_files[0] if vid_files else None
+        args.log_file, video_sources = result
     else:
         if args.log_file is None:
             parser.error("log_file is required (or use --dir)")
         app = QApplication(sys.argv)
+        if args.video is not None:
+            files = (sorted(args.video.glob("*.mp4")) + sorted(args.video.glob("*.mkv"))
+                     if args.video.is_dir()
+                     else ([args.video] if args.video.exists() else []))
+            video_sources = group_videos_by_prefix(files)
 
     logger.info(f"Loading log: {args.log_file}")
-    frames = parse_telemetry_log(args.log_file)
+    telemetry_frames = parse_telemetry_log(args.log_file)
     log_lines, frame_to_lines = parse_log_lines(args.log_file)
-    logger.info(f"  {len(frames)} telemetry frames, {len(log_lines)} log lines")
+    frames = build_frame_timeline(telemetry_frames, log_lines, frame_to_lines)
+    logger.info(f"  {len(frames)} frames ({len(telemetry_frames)} with telemetry), "
+                f"{len(log_lines)} log lines")
 
     if not frames:
         logger.error("no telemetry frames found in log file.")
         sys.exit(1)
 
-    video = VideoReader(video_source)
-    if video.available:
-        logger.info(f"  {video.total} video frames")
-        if video.has_time_sync:
-            logger.info(f"  video start: {video._video_start} (auto-detected from filename)")
-        else:
-            logger.warning("could not detect video start time; using frame offset")
+    if video_sources:
+        for name, files in video_sources.items():
+            logger.info(f"  video source '{name}': {len(files)} clip(s)")
     else:
         if not args.dir and not args.allow_no_video:
             logger.error(f"Can't load video from {args.video}")
@@ -1540,10 +1765,10 @@ def main():
         logger.info("  (no video)")
 
     win = FlightDebugger(frames, log_lines, frame_to_lines,
-                         video, args.log_file, video_display_path,
-                         pairs=pairs)
+                         video_sources, args.log_file,
+                         frame_offset=args.video_offset, pairs=pairs)
     ret = app.exec()
-    video.close()
+    win._video_view.close()
     sys.exit(ret)
 
 
