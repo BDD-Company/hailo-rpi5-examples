@@ -4,11 +4,13 @@ import asyncio
 # import nest_asyncio
 import dataclasses
 from enum import Enum
+import json
 from math import nan, cos, radians, acos, atan2, degrees, copysign, hypot
 import time
 
 from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed, Attitude, VelocityNedYaw, AttitudeRate, OffboardError
 from mavsdk import System
+from mavsdk.mavlink_direct import MavlinkMessage
 from mavsdk.telemetry import Telemetry, EulerAngle, LandedState
 
 from helpers import MoveCommand, dotdict, XY, debug_collect_call_info
@@ -128,6 +130,26 @@ class DroneMover():
         self._telemetry_ready : dict[str, asyncio.Event] = {}
         self._telemetry_latest : dict[str, object] = {}
         self._telemetry_dict_cache : dict[str, object] = {}
+
+        # The last attitude command as the CONTROLLER handed it over: recorded before
+        # the upside-down veto and before any clamping, so it is the decision the
+        # vision pipeline made rather than what the FC ultimately flew. The latter is
+        # already in the ulog's own attitude topics, so this adds information instead
+        # of duplicating it. Read by the ulog trace.
+        #
+        # All-zero means "no attitude command issued". That is unambiguous: a real
+        # command always carries non-zero thrust (even idle() uses IDLE_THRUST / 2).
+        # NaN would be the more obvious sentinel, but MAVSDK serialises message fields
+        # as JSON and its parser REJECTS a bare NaN token, silently costing us the
+        # whole trace message — verified against a real mavsdk_server.
+        self._last_attitude_command : tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+        # Whether PX4 will actually WRITE our ulog trace (SDLOG_PROFILE debug bit), set by
+        # _check_ulog_debug_logging() during startup. Optimistic default: if we never got
+        # to check, or the read failed, keep tracing — a transient param-read glitch must
+        # not silently disable a post-crash forensic feature. Only a positive "bit is off"
+        # reading flips it, and then the controller skips tracing entirely.
+        self.ulog_debug_logging_enabled : bool = True
 
     @staticmethod
     def _log_background_task_result(task: asyncio.Task) -> None:
@@ -362,9 +384,94 @@ class DroneMover():
 
         await self._configure_telemetry_rates()
         await self._ensure_telemetry_cache()
+        await self._check_ulog_debug_logging()
         # await self.start_upside_down_monitor()
 
         return
+
+
+    # ---------------------------------------------------------------------
+    # ulog trace (see ulog_trace.py)
+    # ---------------------------------------------------------------------
+
+    # SDLOG_PROFILE bit that makes PX4's logger record the debug_* uORB topics,
+    # debug_array among them. Without it PX4 receives our DEBUG_FLOAT_ARRAY, publishes
+    # it, and never writes it to the log.
+    SDLOG_PROFILE_DEBUG_BIT = 32
+
+    def last_attitude_command(self) -> tuple[float, float, float]:
+        """(roll_deg, pitch_deg, thrust) as the controller passed them in — before the
+        upside-down veto and before any clamping. All-zero if no attitude command has
+        been issued (nothing yet, or the last one was a NED position command).
+
+        Sticky by design: an offboard setpoint stays in force in PX4 until it is
+        replaced, so on a tick that issues no command the last one is still what the FC
+        is flying. That is a fact about the aircraft, not a stale reading.
+
+        NOT to be confused with `last_command()`, which returns a formatted *string*
+        from the debug_collect_call_info proxy and carries no usable numbers."""
+        return self._last_attitude_command
+
+    async def send_debug_array(self, name: str, array_id: int, data: list[float]) -> None:
+        """Send one MAVLink DEBUG_FLOAT_ARRAY over the link MAVSDK already holds.
+
+        Raises on failure — UlogTracer is what swallows and counts it, so that a dead
+        link degrades to 'no trace' instead of touching the control loop.
+
+        mavlink_direct is the only way to emit an arbitrary MAVLink message here: the
+        Python bindings have no mavlink_passthrough, and the rig's link is serial-USB
+        which mavsdk_server opens exclusively, so a second pymavlink connection to the
+        same port is impossible.
+        """
+        await self.drone.mavlink_direct.send_message(
+            MavlinkMessage(
+                "DEBUG_FLOAT_ARRAY",
+                0, 0, 0, 0,     # system/component ids: 0 lets MAVSDK fill in its own
+                json.dumps({
+                    "time_usec": int(time.time() * 1e6),
+                    "name":      name[:10],     # char[10] in the message definition
+                    "array_id":  array_id,
+                    "data":      data,
+                }),
+            )
+        )
+
+    async def _check_ulog_debug_logging(self) -> bool:
+        """PX4 only WRITES our trace when SDLOG_PROFILE has the Debug bit, and it reads
+        that param at boot — so a misconfigured FC would only be discovered post-crash,
+        the one moment it cannot be fixed. Read it, and set
+        `self.ulog_debug_logging_enabled` so the controller can SKIP tracing entirely
+        rather than stream messages PX4 will silently drop.
+
+        Returns the flag too, for callers/tests. Only a positive "bit is off" reading
+        disables tracing; an unreadable param leaves it enabled (see __init__ — a
+        transient glitch must not kill a forensic feature).
+
+        We deliberately do NOT write the param: that would give the vision app the power
+        to mutate flight-controller configuration, for a fix that could not take effect
+        until the next reboot anyway. Setting it is a one-time provisioning step.
+        """
+        try:
+            profile = await self.drone.param.get_param_int("SDLOG_PROFILE")
+        except Exception as e:
+            logger.warning("Could not read SDLOG_PROFILE; assuming ulog trace is logged: %s", e)
+            self.ulog_debug_logging_enabled = True
+            return self.ulog_debug_logging_enabled
+
+        if profile & self.SDLOG_PROFILE_DEBUG_BIT:
+            logger.info("SDLOG_PROFILE=%d has the debug bit: ulog trace will be logged.", profile)
+            self.ulog_debug_logging_enabled = True
+        else:
+            logger.warning(
+                "SDLOG_PROFILE=%d lacks the debug bit (%d): PX4 would RECEIVE the ulog "
+                "trace and NOT write it, so tracing is DISABLED for this flight — the "
+                "launch continues. To fix, run `BDD/enable_px4_ulog_debug.py` and REBOOT "
+                "the flight controller before the next flight (PX4 only reads "
+                "SDLOG_PROFILE at boot, so it cannot be enabled for the current session).",
+                profile, self.SDLOG_PROFILE_DEBUG_BIT,
+            )
+            self.ulog_debug_logging_enabled = False
+        return self.ulog_debug_logging_enabled
 
 
     async def _configure_telemetry_rates(self, rates_hz: dict[str, float] | None = None) -> None:
@@ -479,6 +586,11 @@ class DroneMover():
         if target_position_ned is None:
             logger.warning("No NED target provided, ignoring command")
             return
+
+        # A POSITION command: there is no roll/pitch/thrust to record. Zeros rather
+        # than a stale-but-plausible attitude — post-crash, an honest "no attitude
+        # command was issued" beats a lie that reads as real.
+        self._last_attitude_command = (0.0, 0.0, 0.0)
 
         current_telemetry = current_telemetry or self.get_telemetry_dict_cached()
         # it is not critical if we can't get yaw
@@ -634,6 +746,10 @@ class DroneMover():
         return yaw_rate
 
     async def move_to_target_zenith_async(self, roll_degree : float, pitch_degree : float, thrust : float = 0.0, current_telemetry = None) -> None:
+        # Record VERBATIM, before the upside-down veto and before _clamp_tilt_for_lift:
+        # the ulog trace logs what the pipeline decided, not what survived the clamps.
+        self._last_attitude_command = (roll_degree, pitch_degree, thrust)
+
         if self.upside_down_state:
             logger.warning("drone is UPSIDE-DOWN, ignoring command")
             return
@@ -682,6 +798,9 @@ class DroneMover():
         # )
 
     async def standstill(self, thrust = IDLE_THRUST * 2) -> None:
+        # The only attitude path that does not funnel through move_to_target_zenith_async
+        # (idle() does), so it has to record for the ulog trace itself.
+        self._last_attitude_command = (0.0, 0.0, thrust)
         # await self.move_to_target_zenith_async(0, 0, thrust)
         await self.drone.offboard.set_attitude(
             Attitude(

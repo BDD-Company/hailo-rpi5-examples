@@ -193,6 +193,90 @@ def test_replay_leaves_no_monkeypatches_behind(synthetic_log):
     assert (dc.DroneMover, dc.time) == before
 
 
+def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log):
+    """The ulog trace only earns its keep if it is actually wired into the loop. Drive
+    the real control thread and check the records that reached DroneMover.send_debug_array:
+    right name, right format version, and a command that matches what the loop commanded."""
+    from ulog_trace import (
+        SLOT_CMD_ROLL, SLOT_CMD_PITCH, SLOT_CMD_THRUST,
+        SLOT_FRAMES_NO_DETECTION, SLOT_FRAMES_NO_VIABLE, SLOT_FRAMES_WITHOUT_FRAME,
+        SLOT_HISTORY_0, SLOT_HISTORY_1,
+        TRACE_FORMAT_VERSION, TRACE_NAME, FrameOutcome, unpack_history, version_from_name,
+    )
+
+    cfg = ddc.load_replay_config(CONFIG_YAML)
+    assert cfg.ulog_trace is not None, "config.yaml should ship with the trace enabled"
+
+    _config_dict, frames, base_ns = ddc.parse_log(synthetic_log)
+    replay_queue = ddc.ReplayQueue(ddc.build_detections_list(frames, None), auto_advance=True)
+
+    drone = ddc.run_replay(cfg, replay_queue, frames, base_ns)
+
+    assert drone.debug_arrays, "the control loop emitted no ulog trace at all"
+
+    for name, array_id, data in drone.debug_arrays:
+        assert name == TRACE_NAME
+        assert version_from_name(name) == TRACE_FORMAT_VERSION   # version rides in the name
+        assert array_id == 0
+        assert len(data) == 58
+        # A NaN here would be silently rejected by MAVSDK's JSON parser, costing the
+        # whole message. Nothing non-finite may ever reach the wire.
+        assert all(math.isfinite(v) for v in data)
+
+    # The trace is rate-limited on the control loop's clock, which the replay drives from
+    # the log's timestamps — so the count should track 5 Hz of FLIGHT time, not wall time.
+    stamps = sorted(fd["timestamp_ns"] for fd in frames.values() if fd.get("timestamp_ns"))
+    flight_s = (stamps[-1] - stamps[0]) / 1e9
+    expected = flight_s * cfg.ulog_trace.rate_hz
+    assert 0.5 * expected <= len(drone.debug_arrays) <= 1.5 * expected + 2, (
+        f"{len(drone.debug_arrays)} traces over {flight_s:.1f}s of flight, "
+        f"expected ~{expected:.0f} at {cfg.ulog_trace.rate_hz} Hz"
+    )
+
+    # Each record must summarise a real interval, not a single frame: at ~20 fps and
+    # 5 Hz there should be several frames of history behind every record.
+    histories = [
+        unpack_history([d[SLOT_HISTORY_0], d[SLOT_HISTORY_1]])
+        for _n, _a, d in drone.debug_arrays
+    ]
+    assert max(len(h) for h in histories) > 1, \
+        "every record covered a single frame — aggregation is not happening"
+    assert any(FrameOutcome.VIABLE in h for h in histories), "no viable frame ever recorded"
+
+    # THE conservation law: every control-loop iteration must appear exactly once, either
+    # in a count or as a VIABLE frame in a history. Frames lost BETWEEN records would be
+    # invisible in the log, which is the failure this whole design exists to prevent.
+    #
+    # The only iterations legitimately missing are those of the final interval, which is
+    # still sitting in the accumulator when the loop stops — it was never dispatched. (In
+    # the case that actually matters, a crash, the process dies mid-interval and that tail
+    # is lost regardless; there is nothing to flush it to.)
+    counted = sum(d[SLOT_FRAMES_NO_DETECTION] + d[SLOT_FRAMES_NO_VIABLE] + d[SLOT_FRAMES_WITHOUT_FRAME]
+                  for _n, _a, d in drone.debug_arrays)
+    viable  = sum(1 for h in histories for o in h if o is FrameOutcome.VIABLE)
+    accounted = counted + viable
+    tail = len(frames) - accounted
+
+    assert tail >= 0, f"{accounted:.0f} iterations accounted for, but the loop only ran {len(frames)} — double-counted"
+    assert tail <= max(len(h) for h in histories) + 1, (
+        f"{tail} iterations went missing; only the final undispatched interval may be absent"
+    )
+
+    # The commanded attitude in the trace must be a command the loop really issued.
+    commanded = {
+        (round(roll, 4), round(pitch, 4), round(thrust, 4))
+        for kind, _frame, roll, pitch, thrust in
+        (c for c in drone.commands if c[0] == "move_to_target_zenith")
+    }
+    traced = {
+        (round(d[SLOT_CMD_ROLL], 4), round(d[SLOT_CMD_PITCH], 4), round(d[SLOT_CMD_THRUST], 4))
+        for _n, _a, d in drone.debug_arrays
+    }
+    traced.discard((0.0, 0.0, 0.0))     # "no command issued yet" — before the first one
+    assert traced, "every traced command was empty"
+    assert traced <= commanded, f"traced commands the loop never issued: {traced - commanded}"
+
+
 def test_the_replayed_speeds_reach_the_control_loop(synthetic_log):
     """Speed-dependent code (e.g. the PD speed reduction) is the main reason this harness
     exists — on the bench everything sits at 0 m/s. Prove the telemetry actually lands."""

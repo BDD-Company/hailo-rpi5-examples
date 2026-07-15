@@ -18,13 +18,13 @@ follow_target_position_ned: false
 
 # Record the camera feed to ./_DEBUG/RAW_*.mkv (software x264enc, ~1 CPU core).
 # Set false (or pass --no-record) to free CPU for inference/tiling.
-record_videos: true
+record_videos: false
 
 # Hailo inference: detection model + NMS post-processing. hef_model_path must
 # point to an EXISTING .hef on the machine running the app (deployed under
 # /home/bdd/models on the Pi; absent on dev hosts). labels_json is optional.
 inference:
-  hef_model_path: /home/bdd/models/2026-04-09_11n_ball_v3_nv12_h8.hef
+  hef_model_path: /home/bdd/models/2026-06-02_red-plate_v3.2_NV12+H8.hef
   nms_score_threshold: 0.3
   nms_iou_threshold: 0.45
   # labels_json: /home/bdd/models/labels.json
@@ -95,10 +95,10 @@ tiling:
   stall_cooldown_s: 30.0
 
 thrust:
-  cruise: 0.53
-  hover: 0.4
+  cruise: 0.9
+  hover: 0.5
   min: 0.4
-  max: 0.9
+  max: 0.95
 
   dynamic: false
   # Optional sub-section: set `enabled: false` to disable (section still validated).
@@ -141,7 +141,7 @@ optical_refinement:
 pd_coeff:
   p: [8, 2]          # per-axis P gain (x, y)
   d: 0
-  p_min: [0.5, 0.5]
+  p_min: [0.5, 0.25]
   p_max: [4, 2]
 
   # Dynamically adjust P coeff based on target size.
@@ -262,3 +262,22 @@ bytetrack:
   recovery_max_dist: null
   nms_thresh: 0.3
   nms_dist_thresh: 0.06
+
+# Trace the decision pipeline into the PX4's own persistent ulog, so a crash that
+# destroys the Pi's SD card still leaves a record of what we saw and what we
+# commanded. One MAVLink DEBUG_FLOAT_ARRAY named "BDD" per tick; see ulog_trace.py
+# for the slot layout.
+#
+# REQUIRES on the flight controller (one-time, needs an FC reboot to take effect):
+#   SDLOG_PROFILE must have the Debug bit (32) set, or PX4 receives these and
+#   silently discards them. The app checks and warns at startup; it never writes
+#   flight-controller params itself.
+ulog_trace:
+  enabled: true
+  # Records per second. Each record SUMMARISES the interval since the last one (counts,
+  # a per-frame history, and the last viable detection), so lowering this loses
+  # resolution, never whole frames.
+  #   0    = uncapped: one record per control-loop iteration (one frame each).
+  #   <=50 = every record is written by the FC in full.
+  # Above ~195/s the PX4 logger silently discards most of them — see config.py.
+  rate_hz: 5.0
