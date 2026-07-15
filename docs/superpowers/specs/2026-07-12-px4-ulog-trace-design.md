@@ -292,14 +292,18 @@ ids.
 - `last_attitude_command()` returns the stored triple. (Distinct from the existing
   `last_command()`, which returns a formatted *string* from the `debug_collect_call_info`
   proxy and carries no usable numbers.)
-- At the end of `startup_sequence`, read the `SDLOG_PROFILE` param and log a loud
-  WARNING naming the exact fix if the Debug bit (32) is clear. The app never *writes*
-  flight-controller params — see "Provisioning".
+- `_check_ulog_debug_logging()`, called at the end of `startup_sequence`, reads
+  `SDLOG_PROFILE` and sets `ulog_debug_logging_enabled` — so the controller can gate the
+  tracer, not merely warn. The app never *writes* flight-controller params — see
+  "Provisioning".
 
 ### `BDD/drone_controller.py`
 
 Build the tracer once, before the loop, from `control_config.ulog_trace` plus the live
-`drone`. Then `note()` **every** iteration, from two sites:
+`drone` — gated on **both** the config section being present **and**
+`drone.ulog_debug_logging_enabled` (the FC will actually log it). When either is false,
+`send_fn=None` and the tracer is a no-op. Then `note()` **every** iteration, from two
+sites:
 
 1. Immediately after `command_sent_ns = time.monotonic_ns()`, classifying the frame:
    `VIABLE` if a target was picked, `NO_DETECTIONS` if the detector returned nothing at
@@ -328,8 +332,16 @@ ulog_trace:
   rate_hz: 5.0        # [0.1 .. 50]
 ```
 
-Absent or `enabled: false` → the tracer is a no-op and nothing is sent. Mirrored into
-`test_config.py`'s `TestConfig` with a test, per the project's config-mirror rule.
+Absent or `enabled: false` → the tracer is a no-op and nothing is sent. `rate_hz: 0`
+means uncapped. Mirrored into `test_config.py`'s `TestConfig` with a test, per the
+project's config-mirror rule.
+
+### `BDD/enable_px4_ulog_debug.py` (new)
+
+Run-before-flying provisioning: connect (reusing `DroneMover._resolve_connection_string`
+for USB auto-discovery, no arming), set `SDLOG_PROFILE |= 32`, verify, print a reboot
+instruction. Idempotent; `--dry-run` reports only. This is the *only* place the param is
+written — see "Provisioning".
 
 ### `BDD/debug_drone_controller.py`
 
@@ -342,17 +354,29 @@ PX4 only writes `debug_array` into the ulog when `SDLOG_PROFILE` has its Debug b
 (32) set, and the logger reads that param at startup — so a change needs an FC reboot
 and cannot help the flight during which it is made.
 
-**On the rig this is already satisfied.** Checked against the real Auterion PX4 on
-`bdd-sd9-mandarin` (2026-07-13): `SDLOG_PROFILE = 1057` = 1024 (internal temperature
-sensors) + **32 (debug)** + 1 (default). So no param change and no FC reboot are
-needed — the trace will be logged as soon as the app sends it.
+The app **checks at startup and gates on the result**, but never writes the param
+itself. `DroneMover._check_ulog_debug_logging()` reads `SDLOG_PROFILE` during
+`startup_sequence` and sets `ulog_debug_logging_enabled`; the controller passes
+`send_fn=None` when the bit is clear, so the tracer becomes a no-op (the null-object
+path) rather than streaming messages PX4 would silently discard. The launch itself
+**always proceeds** — a disabled trace never blocks the flight, it just logs a warning.
 
-The app nonetheless **checks and warns, but never writes**. Auto-setting the param
-would give the vision app the power to mutate flight-controller configuration, which
-is a new and invasive capability for a benefit — a trace that only starts working
-after the next reboot anyway — that does not justify it. The startup warning is what
-stops a *differently* configured FC (a swapped board, a params reset) from being
-discovered post-crash, which is the one moment it cannot be fixed.
+Only a positive "bit is off" reading disables it. If the param cannot be read (a
+transient link glitch — observed on the real link), tracing stays **enabled**: a
+forensic feature must degrade toward staying on, not toward silently switching off.
+
+Enabling it is a **run-before-flying** step, `BDD/enable_px4_ulog_debug.py`, not an
+in-app param write. Two reasons. PX4 reads `SDLOG_PROFILE` only at boot, so setting it
+from the running app genuinely cannot help the current session — a reboot is required
+regardless. And keeping the flight app read-only w.r.t. FC configuration is the safe
+default; provisioning is an explicit action the operator runs knowingly. The script
+sets `SDLOG_PROFILE |= 32`, verifies, and prints a reboot instruction; it is idempotent
+(no-ops if already set) and has a `--dry-run`.
+
+**On the rig this is already satisfied.** `SDLOG_PROFILE = 1057` = 1024 (internal
+temperature sensors) + **32 (debug)** + 1 (default), so no change is needed — verified
+both by the script (reports "already set", exit 0) and the app-side check
+(`enabled = True`) against the real Auterion PX4.
 
 ## Rate: uncapped, and what a record covers
 
@@ -402,7 +426,8 @@ neither the control loop nor the telemetry streams.
 |---|---|
 | `mavlink_direct` unsupported by the running `mavsdk_server` | first send raises; counted, warned once, tracer keeps no-oping. Flight unaffected. |
 | link saturated / send stalls | `note()` sees the in-flight task and skips *the send*, but keeps accumulating. The loop never blocks, and the frames it was too slow to report are not lost — the next record covers them. |
-| `SDLOG_PROFILE` Debug bit clear | messages still sent (harmless); loud WARNING at startup naming the fix. |
+| `SDLOG_PROFILE` Debug bit clear | tracer DISABLED at startup (no-op), so nothing is streamed to an FC that would not log it; loud WARNING names the fix script; the flight proceeds. |
+| `SDLOG_PROFILE` unreadable (transient) | tracer stays ENABLED — a link glitch must not silently kill the trace. |
 | `ulog_trace` section absent | tracer disabled, zero overhead. |
 | interval longer than the 21-frame history | the latest per-frame outcomes that do not fit are dropped; the counts still cover the whole interval, so nothing aggregate is lost. |
 | PX4 not connected / MockDroneMover | `send_fn` records or no-ops; replay harness runs clean. |
@@ -412,7 +437,7 @@ the hardware, and a *debugging* feature must never be the thing that stalls it.
 
 ## Testing
 
-**Host unit tests** — `BDD/test_ulog_trace.py`, 32 of them:
+**Host unit tests** — `BDD/test_ulog_trace.py`, 36 of them:
 
 *Layout* — `to_floats()` puts each field in its documented slot; the array is exactly 58
 long; the **version rides in the name** (`version_from_name` round-trips, rejects foreign
@@ -451,6 +476,10 @@ not lose the frames it could not report** (the interval keeps growing and the ne
 accounts for all of them); the history reaches the wire; a raising `send_fn` is swallowed
 and counted; disabled → never sends; `note()` from a thread with no event loop does not
 raise.
+
+*SDLOG gate* — `_check_ulog_debug_logging()` against a faked param plugin: debug bit set →
+enabled; clear → disabled; unreadable → stays enabled (transient glitch must not kill it);
+and a disabled mover wired into a tracer yields `send_fn=None` (the no-op).
 
 **Config test** — `ulog_trace` parses, defaults apply when the section is absent, and
 an out-of-range `rate_hz` is rejected. Mirrored in `TestConfig`.
