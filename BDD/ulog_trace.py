@@ -35,22 +35,27 @@ Debug bit (32) set, and reads that param at boot. `DroneMover` warns at startup 
 it is clear. Measured ceiling: the FC's logger persists only ~195 records/s and lies
 about it (`dropouts: 0` while discarding the rest), so keep the rate modest.
 
-Slot layout, FORMAT VERSION 3 (see the design doc; every version changed the layout
+Slot layout, FORMAT VERSION 4 (see the design doc; every version changed the layout
 incompatibly, which is exactly what slot 0 exists to disambiguate):
 
-     0  format version (=3)              8  commanded roll     <- deg OR deg/s
-     1  frame id (most recent)           9  commanded pitch    <- ditto
-     2  frames with no viable detection 10  commanded thrust
+     0  format version (=4)              6  commanded roll     <- deg OR deg/s
+     1  frame id (most recent)           7  commanded pitch    <- ditto
+     2  frames with no viable detection  8  commanded thrust
      3  iterations with no frame at all
-     4  frame history: count + frames   11  detection centre x
-     5  frame history: more frames      12  detection centre y
-     6  pd_coeff_p.x                    13  detection width
-     7  pd_coeff_p.y                    14  detection height
-                                        15  detection confidence
+     4  pd_coeff_p.x                     9  detection centre x
+     5  pd_coeff_p.y                    10  detection centre y
+                                        11  detection width
+                                        12  detection height
+                                        13  detection confidence
+                                        14  frame history: count + frames 0..8
+                                        15  frame history: frames 9..20
                                      16-57  reserved (zero)
 
-The detection block is LAST so that a no-detection interval is all-zero from slot 11
-on and MAVLink 2 trims it off the wire.
+The frame history is LAST of the used slots. When it is empty — uncapped mode, where
+a record covers one frame and the history is redundant — the record is all-zero from
+slot 14 on, so MAVLink 2 trims it off the wire and a gzipped .ulg compresses it away.
+When the history IS present it is non-zero (the frame count fills the low bits), so it
+must go last or nothing below it could trim.
 """
 
 import asyncio
@@ -76,7 +81,9 @@ logger = logging.getLogger(__name__)
 #   v3 - the history carries an explicit count of the frames it holds. That makes the
 #        NO_DATA padding value redundant, so an outcome needs only 2 bits, which nearly
 #        doubles the depth (21 frames, same 2 slots).
-TRACE_FORMAT_VERSION = 3
+#   v4 - the history moves to the LAST used slots, and uncapped mode drops it entirely
+#        (redundant for a one-frame interval) so its record trims to nothing on the wire.
+TRACE_FORMAT_VERSION = 4
 
 # MAVLink DEBUG_FLOAT_ARRAY carries data[58]; `name` is char[10].
 TRACE_SLOTS    = 58
@@ -129,18 +136,23 @@ SLOT_FORMAT_VERSION       = 0
 SLOT_FRAME_ID             = 1
 SLOT_FRAMES_NO_DETECTION  = 2
 SLOT_FRAMES_WITHOUT_FRAME = 3
-SLOT_HISTORY_0            = 4
-SLOT_HISTORY_1            = 5
-SLOT_PD_P_X               = 6
-SLOT_PD_P_Y               = 7
-SLOT_CMD_ROLL             = 8
-SLOT_CMD_PITCH            = 9
-SLOT_CMD_THRUST           = 10
-SLOT_DET_X                = 11
-SLOT_DET_Y                = 12
-SLOT_DET_W                = 13
-SLOT_DET_H                = 14
-SLOT_DET_CONF             = 15
+SLOT_PD_P_X               = 4
+SLOT_PD_P_Y               = 5
+SLOT_CMD_ROLL             = 6
+SLOT_CMD_PITCH            = 7
+SLOT_CMD_THRUST           = 8
+SLOT_DET_X                = 9
+SLOT_DET_Y                = 10
+SLOT_DET_W                = 11
+SLOT_DET_H                = 12
+SLOT_DET_CONF             = 13
+# The frame history is LAST of the used slots so that when it is empty (uncapped
+# mode, below) the record is all-zero from slot 14 on and MAVLink 2 trims it off the
+# wire — and a later gzip of the .ulg compresses those runs to almost nothing. (The
+# raw record on the FC's SD card is fixed-size regardless; that is a property of the
+# uORB struct, not something a layout can change.)
+SLOT_HISTORY_0            = 14
+SLOT_HISTORY_1            = 15
 
 # How many failures to swallow silently between log lines, once the first has been
 # reported. A dead link must not turn into a per-tick log flood.
@@ -231,7 +243,8 @@ class UlogTraceSample:
     frames_no_detection  : int = 0   # frames that arrived carrying no viable target
     frames_without_frame : int = 0   # iterations where no frame arrived at all
 
-    # Per-frame outcomes, newest first. Packed into HISTORY_SLOTS slots.
+    # Per-frame outcomes, oldest first. Packed into the LAST used slots. Empty in
+    # uncapped mode, where a one-frame history would be redundant.
     history : tuple = ()
 
     # The gain in force at send time, after the final clamp into [p_min, p_max].
@@ -271,11 +284,6 @@ class UlogTraceSample:
         data[SLOT_FRAME_ID]             = _finite(self.frame_id)
         data[SLOT_FRAMES_NO_DETECTION]  = _finite(self.frames_no_detection)
         data[SLOT_FRAMES_WITHOUT_FRAME] = _finite(self.frames_without_frame)
-
-        history = pack_history(self.history)
-        data[SLOT_HISTORY_0] = history[0]
-        data[SLOT_HISTORY_1] = history[1]
-
         data[SLOT_PD_P_X]    = _finite(self.pd_p.x)
         data[SLOT_PD_P_Y]    = _finite(self.pd_p.y)
         data[SLOT_CMD_ROLL]   = _finite(self.cmd_roll)
@@ -286,6 +294,15 @@ class UlogTraceSample:
         data[SLOT_DET_W]    = _finite(self.det_w)
         data[SLOT_DET_H]    = _finite(self.det_h)
         data[SLOT_DET_CONF] = _finite(self.det_conf)
+
+        # LAST of the used slots. An empty history packs to (0, 0), so an uncapped
+        # record (one frame, history intentionally dropped) is all-zero from here on and
+        # the payload trims. When the history IS present it is non-zero — the frame
+        # count occupies the low bits — so nothing below it can trim, which is why it
+        # goes last.
+        history = pack_history(self.history)
+        data[SLOT_HISTORY_0] = history[0]
+        data[SLOT_HISTORY_1] = history[1]
         return data
 
 
@@ -344,7 +361,17 @@ class TraceAccumulator:
         else:
             self.frames_no_detection += 1
 
-    def build(self) -> UlogTraceSample:
+    def build(self, *, include_history: bool = True) -> UlogTraceSample:
+        """Snapshot the interval as a sample.
+
+        `include_history=False` drops the per-frame history. Used for uncapped mode,
+        where the interval is a single frame: that frame's outcome is already implied by
+        the counts and the detection, so the history is redundant, and dropping it lets
+        the record trim to nothing on the wire (and compress away in a gzipped .ulg).
+        The one thing lost is the NO_DETECTIONS-vs-NO_VIABLE distinction, which the
+        merged `frames_no_detection` count cannot carry — an accepted trade for the
+        one-record-per-frame mode.
+        """
         d = self._detection
         bbox = d.bbox if d is not None else None
         roll, pitch, thrust = self._cmd
@@ -352,7 +379,7 @@ class TraceAccumulator:
             frame_id             = self._frame_id,
             frames_no_detection  = self.frames_no_detection,
             frames_without_frame = self.frames_without_frame,
-            history              = tuple(self._history),
+            history              = tuple(self._history) if include_history else (),
             pd_p                 = self._pd_p,
             cmd_roll             = roll,
             cmd_pitch            = pitch,
@@ -396,7 +423,10 @@ class UlogTracer:
         self._name     = name
         self._array_id = array_id
         self._now      = now_fn
-        # 0 => uncapped: the period test below can never hold anything back.
+        # 0 => uncapped: the period test below can never hold anything back, and each
+        # record covers a single frame — so its history is redundant and gets dropped,
+        # letting the record trim away on the wire.
+        self._uncapped = (rate_hz <= 0)
         self._period_s = (1.0 / rate_hz) if rate_hz > 0 else 0.0
 
         self._acc = TraceAccumulator()
@@ -439,7 +469,7 @@ class UlogTracer:
             self._note_failure("no running event loop to send the ulog trace from")
             return
 
-        data = self._acc.build().to_floats()
+        data = self._acc.build(include_history=not self._uncapped).to_floats()
         self._acc.reset()                       # reset on DISPATCH — see TraceAccumulator
         self._inflight = loop.create_task(self._send(data))
         self._last_sent_at = now

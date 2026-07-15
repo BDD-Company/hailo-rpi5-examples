@@ -65,11 +65,18 @@ class TestSampleLayout(unittest.TestCase):
         self.assertEqual(data[SLOT_DET_X], 0.5)
         self.assertEqual(data[SLOT_DET_CONF], 0.9)
 
-    def test_the_format_version_is_3(self):
+    def test_the_format_version_is_4(self):
         # Every version changed the layout incompatibly (v1 snapshot, v2 4-bit history,
-        # v3 counted 2-bit history). A decoder must be able to tell them apart from the
-        # log alone, so the version MUST move with the layout.
-        self.assertEqual(TRACE_FORMAT_VERSION, 3)
+        # v3 counted 2-bit history, v4 history moved last + dropped when uncapped). A
+        # decoder must be able to tell them apart from the log alone, so the version MUST
+        # move with the layout.
+        self.assertEqual(TRACE_FORMAT_VERSION, 4)
+
+    def test_the_history_is_the_last_used_block(self):
+        # It must sit after the detection block, or an empty (uncapped) history could not
+        # trim, and a present history would block the detection block from trimming.
+        self.assertGreater(SLOT_HISTORY_0, SLOT_DET_CONF)
+        self.assertEqual(SLOT_HISTORY_1, SLOT_HISTORY_0 + 1)
 
     def test_reserved_slots_are_zero(self):
         data = _sample().to_floats()
@@ -456,14 +463,34 @@ class TestRateVsLoopRate(unittest.IsolatedAsyncioTestCase):
                     f"frames went missing at {loop_fps} fps / {rate_hz} Hz: "
                     f"{counted} counted of {n_frames}")
 
-    async def test_uncapped_rate_writes_one_record_per_frame(self):
-        # rate_hz = 0 => a record per control-loop iteration, each covering exactly one
-        # frame. The finest resolution the ulog can hold.
+    async def test_uncapped_rate_writes_one_record_per_frame_with_no_history(self):
+        # rate_hz = 0 => a record per control-loop iteration. The single frame's outcome
+        # is redundant with the counts + detection, so the history is DROPPED: the record
+        # trims to nothing on the wire. Every frame is still accounted for by the counts.
         records, frames_in, counted, n_frames = await self._run(loop_fps=30.0, rate_hz=0.0,
                                                                 seconds=2.0)
         self.assertEqual(len(records), n_frames, "one record per frame")
-        self.assertEqual(set(frames_in), {1}, "each record covers exactly one frame")
-        self.assertEqual(counted, n_frames)
+        self.assertEqual(set(frames_in), {0}, "uncapped records carry no history")
+        self.assertEqual(counted, n_frames, "but the counts still cover every frame")
+
+    async def test_uncapped_no_detection_record_trims_to_the_counts(self):
+        # The point of moving the history last: a no-detection frame in uncapped mode is
+        # all-zero from the detection block on, so the wire payload trims away.
+        sender = _FakeSender()
+        clock = _FakeClock()
+        tracer = UlogTracer(sender, rate_hz=0.0, now_fn=clock)
+
+        tracer.note(frame_id=1, outcome=FrameOutcome.NO_DETECTIONS,
+                    pd_p=XY(1.0, 1.0), cmd=(0.0, 0.0, 0.5))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        data = sender.calls[-1][2]
+        # Detection block (9-13) and history (14-15) are all zero -> everything from the
+        # detection block on trims.
+        self.assertEqual(data[SLOT_DET_X:], [0.0] * (TRACE_SLOTS - SLOT_DET_X))
+        self.assertEqual(data[SLOT_HISTORY_0], 0.0)
+        self.assertEqual(data[SLOT_HISTORY_1], 0.0)
 
 
 if __name__ == "__main__":
