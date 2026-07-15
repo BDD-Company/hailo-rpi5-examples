@@ -259,9 +259,14 @@ bytetrack:
   track_thresh: 0.3
   det_thresh: 0.35
   match_thresh: 0.3
-  track_buffer: 30
+  # 30 (1s) was SHORTER than the detector dropouts seen on 192.168.8.89 (up to
+  # ~62 frames / 2s), so every dropout expired the true ball's lost track and
+  # minted a new id, clearing the lock. 90 (3s) bridges them: offline replay of
+  # a live run (validated 100% id-repro) took true-track coverage 50%->98% and
+  # the lock switch 1->0. See docs/experiments/bytetrack-locking-eval-2026-07-15.md.
+  track_buffer: 90
   frame_rate: 30
-  match_max_dist: 0.2
+  match_max_dist: 0.2   # secondary recommendation: 0.4 improves fast-ball re-assoc (true% 46->78) but has a density risk; validate on-rig before adopting
   recovery_max_dist: null
   nms_thresh: 0.3
   nms_dist_thresh: 0.06
