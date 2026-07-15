@@ -167,6 +167,70 @@ been captured.
 
 ```
 cd docs/experiments/bytetrack_eval
-python3 harness.py logs/runA.txt "RUN A"   # per-run switch analysis
-python3 sweep.py                            # param sweep, both runs
+python3 harness.py logs/runA.txt.gz "RUN A"   # per-run switch analysis
+python3 sweep.py                               # param sweep, runs A & B
+python3 compare.py "[('logs/runA.txt.gz','OLD-A'),('logs/runC.txt.gz','NEW-C')]"  # hardware compare
 ```
+
+Runs A/B were captured on the box's **old CPU config (2 cores + an SC16IS752 IRQ
+storm)**; runs C/D after the fix (see next section).
+
+---
+
+# Addendum — hardware comparison (2-core → 4-core), 2026-07-15
+
+The box's CPU config was fixed between run sets: `isolcpus` dropped (2 → **4
+usable cores**) and the SC16IS752 SPI-UART IRQ storm (which had eaten ~87 % of a
+core) removed. I recaptured two live runs (C, D) with the identical setup and
+compared the **detection stream** — the clean hardware signal — plus locking.
+
+| run | cores | fps | frame-drops | blackout blank% | longest blackout |
+|-----|-------|-----|-------------|-----------------|------------------|
+| A | 2 | 27.4 | **2.70 %** | 1.8 % | 1.4 s |
+| B | 2 | 28.4 | **1.47 %** | 1.3 % | 2.2 s |
+| C | 4 | 30.0 | **0.04 %** | 0.5 % | 0.6 s |
+| D | 4 | 30.0 | **0.00 %** | 2.2 % | 0.7 s |
+
+- **fps** rises to the 30 fps camera cap (was 27–28, CPU-starved).
+- **Frame drops** — captured frames that never reached inference — collapse from
+  1.5–2.7 % to ~0 %. This is the cleanest, most robust hardware effect: the fix
+  removed the CPU-pressure frame loss.
+- **Worst-case blackout** (longest run of frames with zero detections) shrinks
+  from 1.4–2.2 s to 0.6–0.7 s. Overall blackout % stays scene-dependent (D hit a
+  busier segment).
+
+**Locking counts are NOT directly comparable across the two sets** — the filmed
+video loops at a random phase, so each run samples a different scene density
+(C hit a crowded 6–13-balls/frame segment → 15 reacquisitions / 3 false; the
+calmer A/B → 1–3 / 0–1). The switch metric is dominated by how many noise balls
+happen to be present, which swamps the hardware effect. Treat the detection-stream
+metrics above as the hardware verdict; use the offline param sweep (same footage,
+params varied) for locking conclusions.
+
+**Caveat that motivated the next step:** because the filmed scene is a looped
+video at a random phase, neither the scene content nor the exact frame timing is
+controlled between runs — so run-to-run locking numbers carry scene noise. That
+is exactly what deterministic **file input** would remove.
+
+---
+
+# File-input methodology — attempted, blocked (see handoff)
+
+To make measurements faithful and repeatable (and to get exact ground truth from
+the noise-free video), we tried feeding the source `.mp4` to the app instead of
+the camera. It is **blocked** by two independent walls — full write-up and
+resume plan in
+[`file-input-handoff-2026-07-15.md`](file-input-handoff-2026-07-15.md):
+
+1. **Detector domain gap (fundamental).** The model was tuned on the camera's
+   view of a *screen in a room* with washed-out colors
+   ([handoff_assets/camera_view_of_screen.png](bytetrack_eval/handoff_assets/camera_view_of_screen.png)).
+   Fed pristine digital frames it detects ~0.5 % of frames vs ~100 % on camera;
+   zoom and resolution don't help.
+2. **Flaky file decode.** Playback intermittently wedges at frame 1
+   (`libav: co located POCs unavailable` → EOS → the app's loop-rewind stalls);
+   box-state-dependent, not clip-dependent.
+
+The file path *does* ingest `-i file.mp4` with **deterministic sequential
+frame_ids** and auto-loops — so once a clean-domain detector (or in-domain
+footage + a decode fix) is available, the ground-truth plan is ready to run.
