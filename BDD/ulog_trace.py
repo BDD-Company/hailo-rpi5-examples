@@ -35,13 +35,13 @@ Debug bit (32) set, and reads that param at boot. `DroneMover` warns at startup 
 it is clear. Measured ceiling: the FC's logger persists only ~195 records/s and lies
 about it (`dropouts: 0` while discarding the rest), so keep the rate modest.
 
-Slot layout, FORMAT VERSION 4 (see the design doc; every version changed the layout
-incompatibly, which is exactly what slot 0 exists to disambiguate):
+The FORMAT VERSION rides in the MAVLink name ("BDD" + version = "BDD1"), not in a data
+slot. Slot layout (see the design doc):
 
-     0  format version (=4)              6  commanded roll     <- deg OR deg/s
-     1  frame id (most recent)           7  commanded pitch    <- ditto
-     2  frames with no viable detection  8  commanded thrust
-     3  iterations with no frame at all
+     0  frame id (most recent)           6  commanded roll     <- deg OR deg/s
+     1  frames: no detection at all      7  commanded pitch    <- ditto
+     2  frames: detections, none viable  8  commanded thrust
+     3  frames: no frame at all
      4  pd_coeff_p.x                     9  detection centre x
      5  pd_coeff_p.y                    10  detection centre y
                                         11  detection width
@@ -52,10 +52,11 @@ incompatibly, which is exactly what slot 0 exists to disambiguate):
                                      16-57  reserved (zero)
 
 The frame history is LAST of the used slots. When it is empty — uncapped mode, where
-a record covers one frame and the history is redundant — the record is all-zero from
-slot 14 on, so MAVLink 2 trims it off the wire and a gzipped .ulg compresses it away.
-When the history IS present it is non-zero (the frame count fills the low bits), so it
-must go last or nothing below it could trim.
+a record covers one frame and the history is redundant (the three counts + detection
+already pin down the frame's outcome) — the record is all-zero from slot 14 on, so
+MAVLink 2 trims it off the wire and a gzipped .ulg compresses it away. When the history
+IS present it is non-zero (the frame count fills the low bits), so it must go last or
+nothing below it could trim.
 """
 
 import asyncio
@@ -71,24 +72,33 @@ from helpers import XY, Detection
 logger = logging.getLogger(__name__)
 
 
-# Bump when the slot layout changes, so a decoder can tell the layouts apart from the
-# log alone. Slot 0 carries it; being non-zero it also stops a message from ever
-# truncating away to nothing on the wire.
+# The format version rides in the MAVLink message NAME, not in a data slot: the name is
+# `TRACE_NAME_PREFIX + str(version)` = "BDD1". Two reasons. It costs no data float — the
+# `name` field (char[10]) is part of every DEBUG_FLOAT_ARRAY regardless — and, because on
+# the wire `name` sits BEFORE `data` (order: time_usec, array_id, name, data), a non-zero
+# name does not block MAVLink 2 from trimming the zero tail of `data`. A decoder reads the
+# version off the name suffix: `int(name[len(TRACE_NAME_PREFIX):])`.
 #
-#   v1 - momentary snapshot, no frame history.
-#   v2 - interval summary: counts since the last sent record, a packed per-frame
-#        history (4 bits/frame, NO_DATA padding), and the last VIABLE detection.
-#   v3 - the history carries an explicit count of the frames it holds. That makes the
-#        NO_DATA padding value redundant, so an outcome needs only 2 bits, which nearly
-#        doubles the depth (21 frames, same 2 slots).
-#   v4 - the history moves to the LAST used slots, and uncapped mode drops it entirely
-#        (redundant for a one-frame interval) so its record trims to nothing on the wire.
-TRACE_FORMAT_VERSION = 4
+# Bump when the slot layout changes, so a decoder can tell the layouts apart. Earlier
+# in-development formats (a momentary snapshot, then 4-bit and 2-bit histories, then the
+# history-last reorder) never shipped, so the version is reset to 1 for the first real
+# format rather than carrying that history forward.
+TRACE_FORMAT_VERSION = 1
 
 # MAVLink DEBUG_FLOAT_ARRAY carries data[58]; `name` is char[10].
-TRACE_SLOTS    = 58
-TRACE_NAME     = "BDD"
-TRACE_ARRAY_ID = 0
+TRACE_SLOTS        = 58
+TRACE_NAME_PREFIX  = "BDD"
+TRACE_NAME         = f"{TRACE_NAME_PREFIX}{TRACE_FORMAT_VERSION}"   # "BDD1"
+TRACE_ARRAY_ID     = 0
+
+
+def version_from_name(name: str) -> int | None:
+    """Read the format version out of a record's MAVLink name, or None if it is not one
+    of ours. The authoritative decode, so tooling never re-derives the convention."""
+    if not name.startswith(TRACE_NAME_PREFIX):
+        return None
+    suffix = name[len(TRACE_NAME_PREFIX):]
+    return int(suffix) if suffix.isdigit() else None
 
 
 class FrameOutcome(IntEnum):
@@ -106,17 +116,17 @@ class FrameOutcome(IntEnum):
     VIABLE         = 3   # a frame arrived and we picked a target
 
 
-# History packing, FIXED BY THE FORMAT VERSION. A decoder reads these off the version in
-# slot 0, so none of it may change without bumping the version.
+# History packing, FIXED BY THE FORMAT VERSION (which rides in the name). None of it may
+# change without bumping the version.
 #
 # 24 bits per slot, deliberately: a float32 represents integers exactly only up to 2**24,
 # so 24 bits is the widest field that survives the trip intact. Anything wider would
 # silently round in the log — and a rounded bitfield decodes to garbage, not to an
 # obviously-wrong number.
 #
-#   slot 0:  bits  0..5   frame count (how many outcomes this history holds)
-#            bits  6..23  9 outcomes, 2 bits each   -> interval frames 0..8
-#   slot 1:  bits  0..23  12 outcomes, 2 bits each  -> interval frames 9..20
+#   history slot A:  bits  0..5   frame count (how many outcomes this history holds)
+#                    bits  6..23  9 outcomes, 2 bits each   -> interval frames 0..8
+#   history slot B:  bits  0..23  12 outcomes, 2 bits each  -> interval frames 9..20
 #
 # No outcome straddles the slot boundary, so a decoder never has to stitch two floats.
 _SLOT_BITS              = 24
@@ -131,11 +141,18 @@ _MAX_SLOT_VALUE   = (1 << _SLOT_BITS) - 1
 _OUTCOME_MASK     = (1 << HISTORY_BITS_PER_FRAME) - 1
 _COUNT_MASK       = (1 << HISTORY_COUNT_BITS) - 1
 
-# Slot indices, so the packer, the tests and any decoder agree on one definition.
-SLOT_FORMAT_VERSION       = 0
-SLOT_FRAME_ID             = 1
-SLOT_FRAMES_NO_DETECTION  = 2
-SLOT_FRAMES_WITHOUT_FRAME = 3
+# Slot indices, so the packer, the tests and any decoder agree on one definition. The
+# format version is NOT here — it rides in the name (above), freeing slot 0 for data.
+#
+# The three starvation counts are separate, not merged. Splitting NO_DETECTIONS (detector
+# saw nothing) from NO_VIABLE (detections present, none good enough) makes an UNCAPPED
+# record — one frame, history dropped — fully reconstructable: each of the four outcomes
+# now maps to a distinct (count, detection) signature, so no information is lost when the
+# history is omitted.
+SLOT_FRAME_ID                  = 0
+SLOT_FRAMES_NO_DETECTION       = 1   # NO_DETECTIONS: the detector returned nothing
+SLOT_FRAMES_NO_VIABLE          = 2   # NO_VIABLE: detections present, none good enough
+SLOT_FRAMES_WITHOUT_FRAME      = 3   # NO_FRAME: no frame reached the loop at all
 SLOT_PD_P_X               = 4
 SLOT_PD_P_Y               = 5
 SLOT_CMD_ROLL             = 6
@@ -239,9 +256,11 @@ class UlogTraceSample:
     # The most recent frame in the interval.
     frame_id : int = 0
 
-    # Counts SINCE THE LAST SENT RECORD, not momentary values.
-    frames_no_detection  : int = 0   # frames that arrived carrying no viable target
-    frames_without_frame : int = 0   # iterations where no frame arrived at all
+    # Counts SINCE THE LAST SENT RECORD, not momentary values. Three separate starvation
+    # modes — kept apart so an uncapped (history-less) record stays fully reconstructable.
+    frames_no_detection  : int = 0   # NO_DETECTIONS: the detector returned nothing
+    frames_no_viable     : int = 0   # NO_VIABLE: detections present, none good enough
+    frames_without_frame : int = 0   # NO_FRAME: no frame reached the loop at all
 
     # Per-frame outcomes, oldest first. Packed into the LAST used slots. Empty in
     # uncapped mode, where a one-frame history would be redundant.
@@ -279,10 +298,11 @@ class UlogTraceSample:
     det_conf : float = 0.0
 
     def to_floats(self) -> list[float]:
+        # The format version is NOT written here — it rides in the MAVLink name.
         data = [0.0] * TRACE_SLOTS
-        data[SLOT_FORMAT_VERSION]       = float(TRACE_FORMAT_VERSION)
         data[SLOT_FRAME_ID]             = _finite(self.frame_id)
         data[SLOT_FRAMES_NO_DETECTION]  = _finite(self.frames_no_detection)
+        data[SLOT_FRAMES_NO_VIABLE]     = _finite(self.frames_no_viable)
         data[SLOT_FRAMES_WITHOUT_FRAME] = _finite(self.frames_without_frame)
         data[SLOT_PD_P_X]    = _finite(self.pd_p.x)
         data[SLOT_PD_P_Y]    = _finite(self.pd_p.y)
@@ -324,6 +344,7 @@ class TraceAccumulator:
 
     def reset(self) -> None:
         self.frames_no_detection = 0
+        self.frames_no_viable = 0
         self.frames_without_frame = 0
         self._history.clear()
         # Cleared on every dispatch: if the next interval sees nothing viable, the record
@@ -354,23 +375,24 @@ class TraceAccumulator:
 
         if outcome is FrameOutcome.NO_FRAME:
             self.frames_without_frame += 1
+        elif outcome is FrameOutcome.NO_DETECTIONS:
+            self.frames_no_detection += 1
+        elif outcome is FrameOutcome.NO_VIABLE:
+            self.frames_no_viable += 1
         elif outcome is FrameOutcome.VIABLE:
             # Last viable WINS: a later miss must never erase it.
             if detection is not None:
                 self._detection = detection
-        else:
-            self.frames_no_detection += 1
 
     def build(self, *, include_history: bool = True) -> UlogTraceSample:
         """Snapshot the interval as a sample.
 
         `include_history=False` drops the per-frame history. Used for uncapped mode,
-        where the interval is a single frame: that frame's outcome is already implied by
-        the counts and the detection, so the history is redundant, and dropping it lets
-        the record trim to nothing on the wire (and compress away in a gzipped .ulg).
-        The one thing lost is the NO_DETECTIONS-vs-NO_VIABLE distinction, which the
-        merged `frames_no_detection` count cannot carry — an accepted trade for the
-        one-record-per-frame mode.
+        where the interval is a single frame: that frame's outcome is already fully
+        implied by the three separate counts and the detection (NO_FRAME / NO_DETECTIONS
+        / NO_VIABLE each have their own count; VIABLE shows as a present detection), so
+        the history is redundant and dropping it lets the record trim to nothing on the
+        wire and compress away in a gzipped .ulg. Nothing is lost.
         """
         d = self._detection
         bbox = d.bbox if d is not None else None
@@ -378,6 +400,7 @@ class TraceAccumulator:
         return UlogTraceSample(
             frame_id             = self._frame_id,
             frames_no_detection  = self.frames_no_detection,
+            frames_no_viable     = self.frames_no_viable,
             frames_without_frame = self.frames_without_frame,
             history              = tuple(self._history) if include_history else (),
             pd_p                 = self._pd_p,

@@ -199,8 +199,9 @@ def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log
     right name, right format version, and a command that matches what the loop commanded."""
     from ulog_trace import (
         SLOT_CMD_ROLL, SLOT_CMD_PITCH, SLOT_CMD_THRUST,
+        SLOT_FRAMES_NO_DETECTION, SLOT_FRAMES_NO_VIABLE, SLOT_FRAMES_WITHOUT_FRAME,
         SLOT_HISTORY_0, SLOT_HISTORY_1,
-        TRACE_FORMAT_VERSION, TRACE_NAME, FrameOutcome, unpack_history,
+        TRACE_FORMAT_VERSION, TRACE_NAME, FrameOutcome, unpack_history, version_from_name,
     )
 
     cfg = ddc.load_replay_config(CONFIG_YAML)
@@ -215,9 +216,9 @@ def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log
 
     for name, array_id, data in drone.debug_arrays:
         assert name == TRACE_NAME
+        assert version_from_name(name) == TRACE_FORMAT_VERSION   # version rides in the name
         assert array_id == 0
         assert len(data) == 58
-        assert data[0] == float(TRACE_FORMAT_VERSION)
         # A NaN here would be silently rejected by MAVSDK's JSON parser, costing the
         # whole message. Nothing non-finite may ever reach the wire.
         assert all(math.isfinite(v) for v in data)
@@ -250,7 +251,8 @@ def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log
     # still sitting in the accumulator when the loop stops — it was never dispatched. (In
     # the case that actually matters, a crash, the process dies mid-interval and that tail
     # is lost regardless; there is nothing to flush it to.)
-    counted = sum(d[2] + d[3] for _n, _a, d in drone.debug_arrays)
+    counted = sum(d[SLOT_FRAMES_NO_DETECTION] + d[SLOT_FRAMES_NO_VIABLE] + d[SLOT_FRAMES_WITHOUT_FRAME]
+                  for _n, _a, d in drone.debug_arrays)
     viable  = sum(1 for h in histories for o in h if o is FrameOutcome.VIABLE)
     accounted = counted + viable
     tail = len(frames) - accounted

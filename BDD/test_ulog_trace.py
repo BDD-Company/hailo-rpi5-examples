@@ -13,14 +13,16 @@ from ulog_trace import (
     SLOT_CMD_THRUST,
     SLOT_DET_CONF,
     SLOT_DET_X,
-    SLOT_FORMAT_VERSION,
     SLOT_FRAMES_NO_DETECTION,
+    SLOT_FRAMES_NO_VIABLE,
     SLOT_FRAMES_WITHOUT_FRAME,
     SLOT_FRAME_ID,
     SLOT_HISTORY_0,
     SLOT_HISTORY_1,
     SLOT_PD_P_X,
     TRACE_FORMAT_VERSION,
+    TRACE_NAME,
+    TRACE_NAME_PREFIX,
     TRACE_SLOTS,
     FrameOutcome,
     TraceAccumulator,
@@ -28,6 +30,7 @@ from ulog_trace import (
     UlogTraceSample,
     pack_history,
     unpack_history,
+    version_from_name,
 )
 
 
@@ -57,7 +60,6 @@ class TestSampleLayout(unittest.TestCase):
         data = _sample().to_floats()
 
         self.assertEqual(len(data), TRACE_SLOTS)
-        self.assertEqual(data[SLOT_FORMAT_VERSION], float(TRACE_FORMAT_VERSION))
         self.assertEqual(data[SLOT_FRAME_ID], 42.0)
         self.assertEqual(data[SLOT_PD_P_X], 3.0)
         self.assertEqual(data[SLOT_CMD_ROLL], -1.5)
@@ -65,12 +67,17 @@ class TestSampleLayout(unittest.TestCase):
         self.assertEqual(data[SLOT_DET_X], 0.5)
         self.assertEqual(data[SLOT_DET_CONF], 0.9)
 
-    def test_the_format_version_is_4(self):
-        # Every version changed the layout incompatibly (v1 snapshot, v2 4-bit history,
-        # v3 counted 2-bit history, v4 history moved last + dropped when uncapped). A
-        # decoder must be able to tell them apart from the log alone, so the version MUST
-        # move with the layout.
-        self.assertEqual(TRACE_FORMAT_VERSION, 4)
+    def test_the_version_rides_in_the_name_not_a_data_slot(self):
+        # The version is NOT a float in the payload: it is the numeric suffix of the
+        # MAVLink name ("BDD1"). That frees a data slot and, because `name` precedes
+        # `data` on the wire, does not block the data tail from trimming.
+        self.assertEqual(TRACE_NAME, f"{TRACE_NAME_PREFIX}{TRACE_FORMAT_VERSION}")
+        self.assertEqual(version_from_name(TRACE_NAME), TRACE_FORMAT_VERSION)
+        self.assertEqual(version_from_name("BDD1"), 1)
+        self.assertIsNone(version_from_name("OTHER"), "a foreign name is not ours")
+        self.assertIsNone(version_from_name("BDD"), "no suffix -> not a versioned record")
+        # No data slot equals the version by coincidence-proof: slot 0 is the frame id.
+        self.assertEqual(_sample(frame_id=7).to_floats()[0], 7.0)
 
     def test_the_history_is_the_last_used_block(self):
         # It must sit after the detection block, or an empty (uncapped) history could not
@@ -83,10 +90,19 @@ class TestSampleLayout(unittest.TestCase):
         self.assertEqual(data[16:], [0.0] * (TRACE_SLOTS - 16))
 
     def test_no_detection_zeroes_the_whole_tail(self):
-        # The detection block is last precisely so a no-detection interval is nothing
-        # but zeros from slot 11 on: MAVLink 2 then trims those bytes off the wire.
+        # With no viable detection and the history empty, everything from the detection
+        # block on is zero, so MAVLink 2 trims those bytes off the wire.
         data = UlogTraceSample(frame_id=7, frames_no_detection=3).to_floats()
         self.assertEqual(data[SLOT_DET_X:], [0.0] * (TRACE_SLOTS - SLOT_DET_X))
+
+    def test_the_three_starvation_counts_are_separate(self):
+        # Splitting NO_DETECTIONS from NO_VIABLE is what makes an uncapped (history-less)
+        # record lossless — each outcome has its own count.
+        data = _sample(frames_no_detection=2, frames_no_viable=3,
+                       frames_without_frame=1).to_floats()
+        self.assertEqual(data[SLOT_FRAMES_NO_DETECTION], 2.0)
+        self.assertEqual(data[SLOT_FRAMES_NO_VIABLE], 3.0)
+        self.assertEqual(data[SLOT_FRAMES_WITHOUT_FRAME], 1.0)
 
     def test_non_finite_values_are_zeroed(self):
         # MAVSDK serialises the fields as JSON and its parser REJECTS a bare NaN /
@@ -163,18 +179,40 @@ class TestAccumulator(unittest.TestCase):
 
     def test_the_users_worked_example(self):
         # "if since last actual send there was 2 missed detections and 1 missed frames,
-        #  but this one we have a detection, then the record is:
-        #  frames_no_detection = 2, frames_without_frame = 1"
+        #  but this one we have a detection" — now with the counts split, so the two
+        #  no-detection kinds are counted separately.
         self._note(FrameOutcome.NO_DETECTIONS, frame_id=1)
         self._note(FrameOutcome.NO_FRAME,      frame_id=1)
         self._note(FrameOutcome.NO_VIABLE,     frame_id=2)
         self._note(FrameOutcome.VIABLE,        frame_id=3, detection=_detection(conf=0.8))
 
         s = self.acc.build()
-        self.assertEqual(s.frames_no_detection, 2)     # NO_DETECTIONS + NO_VIABLE
+        self.assertEqual(s.frames_no_detection, 1)     # the one NO_DETECTIONS
+        self.assertEqual(s.frames_no_viable, 1)        # the one NO_VIABLE
         self.assertEqual(s.frames_without_frame, 1)
         self.assertEqual(s.frame_id, 3)
         self.assertEqual(s.det_conf, 0.8)
+
+    def test_uncapped_single_frame_outcome_is_recoverable_from_counts(self):
+        # The point of the counter split: with the history dropped (uncapped mode), each
+        # of the four outcomes maps to a distinct (counts, detection) signature — so
+        # nothing is lost. Build a one-frame interval per outcome and read it back.
+        def signature(outcome, detection=None):
+            acc = TraceAccumulator()
+            acc.note(frame_id=1, outcome=outcome, pd_p=XY(), cmd=(0, 0, 0.5),
+                     detection=detection)
+            s = acc.build(include_history=False)
+            return (s.frames_no_detection, s.frames_no_viable, s.frames_without_frame,
+                    s.det_conf > 0)
+
+        sigs = {
+            "NO_FRAME":      signature(FrameOutcome.NO_FRAME),
+            "NO_DETECTIONS": signature(FrameOutcome.NO_DETECTIONS),
+            "NO_VIABLE":     signature(FrameOutcome.NO_VIABLE),
+            "VIABLE":        signature(FrameOutcome.VIABLE, _detection()),
+        }
+        self.assertEqual(len(set(sigs.values())), 4,
+                         f"outcomes are NOT distinguishable without history: {sigs}")
 
     def test_a_detection_on_the_FIRST_frame_survives_five_later_misses(self):
         # The whole reason for aggregating. A snapshot would report "no detection" here
@@ -282,17 +320,17 @@ class TestTracer(unittest.IsolatedAsyncioTestCase):
         tracer.note(frame_id=frame_id, outcome=outcome, pd_p=XY(1.0, 1.0),
                     cmd=(0.0, 0.0, 0.5), detection=detection)
 
-    async def test_sends_the_named_array(self):
+    async def test_sends_the_versioned_name(self):
         sender = _FakeSender()
-        tracer, _ = self._tracer(sender, name="BDD", array_id=0)
+        tracer, _ = self._tracer(sender)      # default name = TRACE_NAME = "BDD1"
 
         self._note(tracer, FrameOutcome.VIABLE, detection=_detection())
         await self._drain()
 
         self.assertEqual(len(sender.calls), 1)
-        name, array_id, data = sender.calls[0]
-        self.assertEqual((name, array_id), ("BDD", 0))
-        self.assertEqual(data[SLOT_FORMAT_VERSION], float(TRACE_FORMAT_VERSION))
+        name, array_id, _data = sender.calls[0]
+        self.assertEqual((name, array_id), (TRACE_NAME, 0))
+        self.assertEqual(version_from_name(name), TRACE_FORMAT_VERSION)
         self.assertEqual(tracer.sent, 1)
 
     async def test_one_record_per_period_summarising_every_frame_between(self):
