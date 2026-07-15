@@ -80,26 +80,26 @@ computed from it.
 
 ## Trace layout
 
-`DEBUG_FLOAT_ARRAY`, `name = "BDD"`, `array_id = 0`. **Format version 3.**
+`DEBUG_FLOAT_ARRAY`, `name = "BDD"`, `array_id = 0`. **Format version 4.**
 
 | slot | field | absent / idle | notes |
 |-----:|-------|---------------|-------|
-| 0 | format version | — | `3`. Non-zero, so a message can never truncate to nothing. |
+| 0 | format version | — | `4`. Non-zero, so a message can never truncate to nothing. |
 | 1 | frame id | — | the **most recent** frame of the interval; the one in our log prefix `frame=#0123`. |
 | 2 | frames with no viable detection | `0` | **count over the interval**: frames that arrived carrying no usable target. |
 | 3 | iterations with no frame at all | `0` | **count over the interval**: the pipeline itself starved. |
-| 4 | frame history: count + frames 0–8 | `0` | count in bits 0–5, then 2 bits per frame. |
-| 5 | frame history: frames 9–20 | `0` | 2 bits per frame. |
-| 6 | `pd_coeff_p.x` | — | in force at send time, after the final clamp into `[p_min, p_max]`. |
-| 7 | `pd_coeff_p.y` | — | " |
-| 8 | commanded roll | `0.0` | verbatim, as passed to `DroneMover`, pre-clamp. **Units vary — see below.** |
-| 9 | commanded pitch | `0.0` | " |
-| 10 | commanded thrust | `0.0` | " |
-| 11 | detection centre x | `0.0` | ← detection block. The **last viable** detection of the interval. Normalised `[0, 1]`. |
-| 12 | detection centre y | `0.0` | " |
-| 13 | detection width | `0.0` | " |
-| 14 | detection height | `0.0` | " |
-| 15 | detection confidence | `0.0` | " |
+| 4 | `pd_coeff_p.x` | — | in force at send time, after the final clamp into `[p_min, p_max]`. |
+| 5 | `pd_coeff_p.y` | — | " |
+| 6 | commanded roll | `0.0` | verbatim, as passed to `DroneMover`, pre-clamp. **Units vary — see below.** |
+| 7 | commanded pitch | `0.0` | " |
+| 8 | commanded thrust | `0.0` | " |
+| 9 | detection centre x | `0.0` | ← detection block. The **last viable** detection of the interval. Normalised `[0, 1]`. |
+| 10 | detection centre y | `0.0` | " |
+| 11 | detection width | `0.0` | " |
+| 12 | detection height | `0.0` | " |
+| 13 | detection confidence | `0.0` | " |
+| 14 | frame history: count + frames 0–8 | `0` | count in bits 0–5, then 2 bits per frame. **Empty in uncapped mode.** |
+| 15 | frame history: frames 9–20 | `0` | 2 bits per frame. |
 | 16–57 | reserved | `0.0` | always trimmed on the wire. |
 
 Slots 2 and 3 are two different starvation modes and neither implies the other.
@@ -108,7 +108,7 @@ means the camera/inference pipeline itself starved and the controller had nothin
 act on. Post-crash you cannot distinguish those from either counter alone, and the
 distinction points at completely different root causes, so both are recorded.
 
-### The frame history (slots 4–5)
+### The frame history (slots 14–15)
 
 Each frame's outcome is one of four, so **2 bits each**:
 
@@ -129,9 +129,9 @@ slots.
 Bit layout, fixed by the format version:
 
 ```
-slot 4:  bits  0..5    frame count (0..63; capacity is 21)
-         bits  6..23   9 outcomes, 2 bits each   -> interval frames 0..8
-slot 5:  bits  0..23   12 outcomes, 2 bits each  -> interval frames 9..20
+slot 14:  bits  0..5    frame count (0..63; capacity is 21)
+          bits  6..23   9 outcomes, 2 bits each   -> interval frames 0..8
+slot 15:  bits  0..23   12 outcomes, 2 bits each  -> interval frames 9..20
 ```
 
 No outcome straddles the slot boundary, so a decoder never stitches two floats.
@@ -149,16 +149,29 @@ not fit are simply not recorded, and the count reports what was. The counts in s
 the ones nearest impact. It only bites at pathologically low rates — at 0.1 Hz on a 30 fps
 loop an interval is 300 frames — and the aggregate stays exact regardless.)
 
-### Why the detection block goes last
+### Why the history goes last, and is dropped when uncapped
 
-MAVLink 2 trims trailing zero bytes from the payload on the wire. Putting the
-detection fields at the end means an interval with no viable detection physically
-shrinks, and the 42 reserved slots trim away on *every* message. Measured over the
-2026-04-27 UAE dive replay: **85 B/msg mean, against 264 B untrimmed** (~375 B/s at
-5 Hz).
+MAVLink 2 trims trailing zero bytes from the payload on the wire, so the fields most
+often zero belong at the end. In **uncapped** mode the history is dropped entirely
+(below), so it is zero on every record and belongs after the detection block; the
+whole tail then trims. Measured over the 2026-04-27 UAE dive replay:
 
-Note this saves link bandwidth only. The ulog still records all 58 floats, because
-the `debug_array` uORB struct is fixed-size.
+| mode | history | wire size | note |
+|---|---|---|---|
+| 5 Hz (capped) | always present | flat **92 B/msg** | history is non-zero, so nothing below it trims |
+| uncapped | dropped | **68–88 B/msg** | a no-detection frame trims to 68; a detection to 88 |
+
+The history goes last so that its two states both trim correctly: when it is **present**
+(capped mode) it is non-zero — the frame count fills the low bits — so anything below it
+could never trim, which is why nothing may sit below it; when it is **empty** (uncapped)
+the record is zero from the detection block on and the whole tail goes.
+
+Two honesty notes. First, this saves **wire** bytes and helps a **gzipped** `.ulg`
+(long zero runs compress to almost nothing) — but the raw record on the FC's SD card is a
+fixed-size uORB struct, so on the card itself nothing is saved, ever. Second, capped-mode
+records are now a flat 92 B (slightly larger than v3's 85 B mean) because the history sits
+below the detection block and stops it trimming — an accepted cost for making the uncapped
+tail trimmable, and noise on a ~2 Mbps link.
 
 ### The command slots are NOT always degrees
 
@@ -331,6 +344,12 @@ discovered post-crash, which is the one moment it cannot be fixed.
 control-loop iteration, each covering exactly one frame — the finest resolution the ulog
 can hold. That is *not* the same as "off" (an absent section, or `enabled: false`).
 
+An uncapped record **drops the frame history**. A one-frame history is redundant: the
+frame's outcome is already implied by the counts and the detection block — with the sole
+exception of the `NO_DETECTIONS`-vs-`NO_VIABLE` distinction, which the merged
+`frames_no_detection` count cannot carry, an accepted loss for this mode. Dropping it lets
+the record trim to nothing on the wire (68–88 B) and compress away in a gzipped `.ulg`.
+
 Frames per record must track **both** knobs — the configured rate (explicit) and the
 control-loop rate (implicit: the loop slows when the hardware thermally throttles, and
 nobody reconfigures anything). Swept against the 39 m/s UAE dive, varying the log rate and
@@ -365,7 +384,7 @@ neither the control loop nor the telemetry streams.
 | link saturated / send stalls | `note()` sees the in-flight task and skips *the send*, but keeps accumulating. The loop never blocks, and the frames it was too slow to report are not lost — the next record covers them. |
 | `SDLOG_PROFILE` Debug bit clear | messages still sent (harmless); loud WARNING at startup naming the fix. |
 | `ulog_trace` section absent | tracer disabled, zero overhead. |
-| interval longer than the 12-frame history | the oldest per-frame outcomes are dropped; the counts still cover the whole interval, so nothing aggregate is lost. |
+| interval longer than the 21-frame history | the latest per-frame outcomes that do not fit are dropped; the counts still cover the whole interval, so nothing aggregate is lost. |
 | PX4 not connected / MockDroneMover | `send_fn` records or no-ops; replay harness runs clean. |
 
 Nothing in this feature can abort the control loop. A stalled control loop can wreck
@@ -373,16 +392,17 @@ the hardware, and a *debugging* feature must never be the thing that stalls it.
 
 ## Testing
 
-**Host unit tests** — `BDD/test_ulog_trace.py`, 22 of them:
+**Host unit tests** — `BDD/test_ulog_trace.py`, 30 of them:
 
 *Layout* — `to_floats()` puts each field in its documented slot; the array is exactly 58
-long; the format version is slot 0 and **is 2**; reserved slots are zero; a no-detection
-interval zeroes everything from slot 11 on so the payload trims; non-finite values are
-clamped.
+long; the format version is slot 0 and **is 4**; the history is the last used block;
+reserved slots are zero; a no-detection interval zeroes everything from the detection block
+on so the payload trims; non-finite values are clamped.
 
-*History packing* — round-trips newest-first; a short interval pads with `NO_DATA` and
-**not** `NO_FRAME` (the whole reason the field is 4 bits wide); a full history stays
-exactly representable in float32; overflow drops the *oldest*.
+*History packing* — round-trips oldest-first; the explicit count bounds the decode (no
+phantom trailing frames); all-`NO_FRAME` is not confused with an empty history (the reason
+2 bits suffices only *with* a count); a full history stays exactly representable in float32;
+overflow drops the *latest*.
 
 *Aggregation* — the rules that actually changed, tested directly against
 `TraceAccumulator` with no event loop:
@@ -394,7 +414,12 @@ exactly representable in float32; overflow drops the *oldest*.
 - the *last* viable detection of an interval wins;
 - `reset()` clears the detection, so an interval that saw nothing reports zeros rather
   than re-reporting a target already logged;
+- past capacity the history stops growing but the *counts* do not;
 - `pd_p` and the command are the values in force at the end of the interval.
+
+*Rate vs loop rate* — frames-per-record tracks **both** the send rate and the (decimated)
+loop rate; every frame is accounted for at every combination; **uncapped writes one record
+per frame, carries no history, and its no-detection record trims to the counts**.
 
 *Tracer* — one record per period summarising every frame between; **a stalled send does
 not lose the frames it could not report** (the interval keeps growing and the next record
@@ -413,7 +438,7 @@ number: over the 1655-frame dive,
     1012 counted in slots 2+3  +  643 VIABLE frames in the histories  =  1655
 
 **every single control-loop iteration is accounted for**, with none double-counted and
-none lost between records. Median 5 frames per record (max 5, inside the 12-frame
+none lost between records. Median 5 frames per record (max 5, inside the 21-frame
 history). 20 records carry a detection whose *newest* frame was a miss — under the old
 snapshot design all 20 would have logged `det = 0`. Records carrying a detection rose
 141 → 161.
