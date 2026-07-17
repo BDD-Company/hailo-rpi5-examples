@@ -1585,6 +1585,12 @@ class GStreamerDetectionApp(GStreamerApp):
             f'output_tee. ! {recording_input_queue} ! {display_pipeline} '
             f'output_tee. ! {detection_section}'
             f'{tracker_pipeline} '
+            # Stays sync=false for EVERY source, including file. The control path must
+            # consume each frame the instant it exists rather than wait on a clock, and
+            # the whole tail is built around that (leaky=downstream, max-size-buffers=1).
+            # A file source is instead paced at the SOURCE, by an identity sync=true --
+            # see get_source_pipeline_string. Clocking this sink to throttle a file was
+            # tried and is a dead end: it stalled the run at 2 frames in 80s.
             f'{user_callback_pipeline} ! fakesink name=detection_sink sync=false async=false'
         )
 

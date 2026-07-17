@@ -118,9 +118,31 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
             f'videoscale ! '
         )
     else:
+        # `identity sync=true` paces the file at its own PTS, making it behave like the
+        # 30fps live camera the whole downstream is built for. Without it filesrc races
+        # to EOF as fast as the disk allows -- a 12MB clip in ~60ms -- so EOS fires
+        # almost immediately, on_eos rewinds, and it repeats: measured 13 EOS/s for a
+        # whole 80s run, seek-thrashing the pipeline while the queues fed inference a
+        # mix of overlapping passes. That, not the codec, is what looked like "playback
+        # wedges at frame 1 then EOS".
+        #
+        # It goes HERE, at the source, not on the sink. Everything downstream (leaky
+        # queues 1 deep, sync=false sink) is deliberately live-tuned to never wait on a
+        # clock; clocking the sink instead fights that and stalls the run at 2 frames in
+        # 80s. Pacing here leaves the live path's semantics untouched: frames arrive at
+        # 30fps and are handled exactly as camera frames are, drops included.
+        #
+        # And it goes BEFORE the decode queue, not after decodebin. That queue is
+        # leaky=downstream and only 1 deep, so with an unpaced filesrc in front of it it
+        # sheds COMPRESSED H.264 packets -- gutting the reference frames, so decodebin
+        # emits nothing at all (0 frames in 80s, measured). Pacing ahead of it means it
+        # never overflows and every packet decodes. Syncing on compressed buffers is
+        # sound here because make_clips.sh encodes baseline profile / no B-frames, so
+        # PTS == DTS and identity's clock wait matches presentation order.
         source_element = (
             f'filesrc location="{video_source}" name={name} ! '
             f' qtdemux name=demux demux.video_0 ! '
+            f'identity name={name}_pace sync=true ! '
             f'{QUEUE(name=f"{name}_queue_decode")} ! '
             f'decodebin name={name}_decodebin ! '
         )

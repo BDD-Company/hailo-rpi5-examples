@@ -483,7 +483,12 @@ class App(GStreamerDetectionApp):
 
         if not self.record_videos:
             # Preview only (no recording) — or a plain fakesink terminator.
-            return preview_branch if self.preview else "fakesink"
+            # async=false: a bare fakesink prerolls by default, i.e. it holds the whole
+            # pipeline in PAUSED until a first buffer reaches it. That deadlocks the
+            # file path, whose identity sync=true cannot hand over a buffer until the
+            # clock runs in PLAYING -- the run then sat in PAUSED forever. sync=false
+            # because this branch is a terminator that should never pace anything.
+            return preview_branch if self.preview else "fakesink sync=false async=false"
 
         record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         video_file_name = Path(self.video_filename_base if self.video_filename_base else f"RAW_{record_start_time_str}.mkv")
