@@ -24,7 +24,10 @@ record_videos: false
 # point to an EXISTING .hef on the machine running the app (deployed under
 # /home/bdd/models on the Pi; absent on dev hosts). labels_json is optional.
 inference:
-  hef_model_path: /home/bdd/models/2026-06-02_red-plate_v3.2_NV12+H8.hef
+  # NOTE (feat/bytetrack-locking-eval): this scene is pink BALLS, so we run the
+  # verified NV12+HAILO8 ball detector rather than the red-plate model referenced
+  # on main (which is HAILO8L/NHWC — wrong arch for this Hailo-8 box anyway).
+  hef_model_path: /home/bdd/models/2026-04-09_11n_ball_v3_nv12_h8.hef
   nms_score_threshold: 0.3
   nms_iou_threshold: 0.45
   # labels_json: /home/bdd/models/labels.json
@@ -252,7 +255,7 @@ drone:
     belly_down_min_horizontal_g_mss: 2.0  # min in-plane gravity to engage
 
 bytetrack:
-  enabled: false   # set true to enable ByteTrack (section is still validated)
+  enabled: true    # feat/bytetrack-locking-eval: enabled to test target locking
   track_thresh: 0.3
   det_thresh: 0.35
   match_thresh: 0.3
@@ -262,6 +265,7 @@ bytetrack:
   recovery_max_dist: null
   nms_thresh: 0.3
   nms_dist_thresh: 0.06
+  target_lock: true   # controller locks onto & follows one track_id (the whole point of this test)
 
 # Trace the decision pipeline into the PX4's own persistent ulog, so a crash that
 # destroys the Pi's SD card still leaves a record of what we saw and what we

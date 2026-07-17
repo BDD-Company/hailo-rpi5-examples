@@ -326,6 +326,17 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             detection.get_confidence(),
         ))
 
+    # feat/bytetrack-locking-eval: log the RAW (pre-tracker) detections every frame
+    # so a --vision-only run (no control thread => no GOT DETECTIONS line) still
+    # captures the full detection stream. Faithful for offline switch analysis AND
+    # for re-running BYTETracker with swept params. xyxy + confidence per detection.
+    logger.debug(
+        "frame=#%04d !!! RAWDETS n=%d %s",
+        frame_id, len(raw_dets),
+        [(round(r.left_edge, 4), round(r.top_edge, 4), round(r.right_edge, 4),
+          round(r.bottom_edge, 4), round(c, 4)) for r, c in raw_dets],
+    )
+
     # Run ByteTracker to assign stable track IDs
     if raw_dets:
         dets_array = np.array([
@@ -435,6 +446,17 @@ class App(GStreamerDetectionApp):
         self.sync = 'false'
 
 
+    def on_stream_rewound(self):
+        # Defensive; see FrameOrderGuard.reset. In practice file input gets its ids from
+        # buffer.offset, which counts straight through the rewind rather than restarting,
+        # so the guard would accept the new pass regardless and this changes nothing. It
+        # matters only if normalized_frame_id ever falls through to buffer.pts, which
+        # DOES restart at 0 on a flush seek and would otherwise leave the run silently
+        # blind for every pass after the first.
+        logger.info("Video looped; resetting frame-order guard for the new pass.")
+        frame_order_guard.reset()
+
+
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
         # Live preview branch (--preview): its own leaky, tiny queue gives it a
         # separate streaming thread; the leaky=downstream queue means a slow/stalled
@@ -462,7 +484,18 @@ class App(GStreamerDetectionApp):
 
         if not self.record_videos:
             # Preview only (no recording) — or a plain fakesink terminator.
-            return preview_branch if self.preview else "fakesink"
+            if self.preview:
+                return preview_branch
+            if self.source_type == 'file':
+                # A bare fakesink prerolls, holding the pipeline in PAUSED until a first
+                # buffer arrives — which the file path's identity sync=true cannot hand
+                # over until the clock runs in PLAYING. Deadlock: the run sat in PAUSED
+                # forever. async=false skips the preroll handshake; sync=false keeps this
+                # terminator from pacing anything (identity already does the pacing).
+                # Scoped to file on purpose: live capture keeps the exact element it has
+                # always had, so this cannot perturb the flight path.
+                return "fakesink sync=false async=false"
+            return "fakesink"
 
         record_start_time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         video_file_name = Path(self.video_filename_base if self.video_filename_base else f"RAW_{record_start_time_str}.mkv")

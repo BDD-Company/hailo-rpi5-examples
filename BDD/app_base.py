@@ -179,6 +179,9 @@ class GStreamerApp:
         self.threads = []
         self.shutdown_callbacks = []
         self.error_occurred = False
+        # Wall-clock of the last file rewind (and of playback start), used to tell a
+        # real loop from a decoder that wedged at frame 1 -- both surface as a bare EOS.
+        self._last_stream_start_t = None
         self.pipeline_latency = 0  # milliseconds; 0 = use each element's natural minimum latency; if frames are dropped or Gstreamer is stalled, then set to 50
 
         # Set Hailo parameters; these parameters should be set based on the model used
@@ -328,8 +331,26 @@ class GStreamerApp:
         return True
 
 
+    # A healthy pass over an eval clip runs minutes; a decoder that dies on the first
+    # frame reports EOS almost immediately. Anything shorter than this is not a loop.
+    MIN_HEALTHY_PASS_S = 2.0
+
     def on_eos(self):
         if self.source_type == "file":
+            elapsed = (time.monotonic() - self._last_stream_start_t
+                       if self._last_stream_start_t is not None else None)
+            if elapsed is not None and elapsed < self.MIN_HEALTHY_PASS_S:
+                # Otherwise this is indistinguishable from a normal loop in the log,
+                # which is how the known "wedges at frame 1" failure hid: playback
+                # silently produces nothing while the app looks healthy.
+                logger.error(
+                    "End-of-stream only %.2fs after playback started -- the decoder "
+                    "almost certainly failed on the first frame rather than the clip "
+                    "having played. Look for 'co located POCs unavailable' above. This "
+                    "clip's GOP structure is not reliably decodable here; re-encode it "
+                    "closed-GOP with docs/experiments/bytetrack_eval/make_clips.sh. "
+                    "Rewinding anyway.", elapsed)
+
             if self.sync == "false":
                 # Pause the pipeline to clear any queued data. It is required when running with sync=false
                 # This will produce some warnings, but it's fine
@@ -343,10 +364,23 @@ class GStreamerApp:
             else:
                 logger.error("Error rewinding video.")
 
+            # Between the flush and PLAYING, while no buffer can be in flight: let
+            # subclasses drop per-stream state that a rewind may invalidate. Done here
+            # rather than after PLAYING so a fast first buffer can't race the hook on
+            # the streaming thread.
+            self.on_stream_rewound()
+
             # Resume playback.
+            self._last_stream_start_t = time.monotonic()
             self.pipeline.set_state(Gst.State.PLAYING)
         else:
             self.shutdown()
+
+    def on_stream_rewound(self):
+        """Hook: the file source just looped back to the start (flush seek done,
+        playback not yet resumed). Any state that assumes a continuous stream — notably
+        a frame-id high-water mark — should be dropped here. No-op by default.
+        """
 
 
     def _add_buffer_counter_probe(self, element_name, pad_name='src'):
@@ -741,6 +775,7 @@ class GStreamerApp:
         self.pipeline.set_latency(new_latency)
 
         # Set pipeline to PLAYING state
+        self._last_stream_start_t = time.monotonic()
         self.pipeline.set_state(Gst.State.PLAYING)
 
         # Dump dot file
@@ -1550,6 +1585,12 @@ class GStreamerDetectionApp(GStreamerApp):
             f'output_tee. ! {recording_input_queue} ! {display_pipeline} '
             f'output_tee. ! {detection_section}'
             f'{tracker_pipeline} '
+            # Stays sync=false for EVERY source, including file. The control path must
+            # consume each frame the instant it exists rather than wait on a clock, and
+            # the whole tail is built around that (leaky=downstream, max-size-buffers=1).
+            # A file source is instead paced at the SOURCE, by an identity sync=true --
+            # see get_source_pipeline_string. Clocking this sink to throttle a file was
+            # tried and is a dead end: it stalled the run at 2 frames in 80s.
             f'{user_callback_pipeline} ! fakesink name=detection_sink sync=false async=false'
         )
 
