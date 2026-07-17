@@ -179,6 +179,9 @@ class GStreamerApp:
         self.threads = []
         self.shutdown_callbacks = []
         self.error_occurred = False
+        # Wall-clock of the last file rewind (and of playback start), used to tell a
+        # real loop from a decoder that wedged at frame 1 -- both surface as a bare EOS.
+        self._last_stream_start_t = None
         self.pipeline_latency = 0  # milliseconds; 0 = use each element's natural minimum latency; if frames are dropped or Gstreamer is stalled, then set to 50
 
         # Set Hailo parameters; these parameters should be set based on the model used
@@ -328,8 +331,26 @@ class GStreamerApp:
         return True
 
 
+    # A healthy pass over an eval clip runs minutes; a decoder that dies on the first
+    # frame reports EOS almost immediately. Anything shorter than this is not a loop.
+    MIN_HEALTHY_PASS_S = 2.0
+
     def on_eos(self):
         if self.source_type == "file":
+            elapsed = (time.monotonic() - self._last_stream_start_t
+                       if self._last_stream_start_t is not None else None)
+            if elapsed is not None and elapsed < self.MIN_HEALTHY_PASS_S:
+                # Otherwise this is indistinguishable from a normal loop in the log,
+                # which is how the known "wedges at frame 1" failure hid: playback
+                # silently produces nothing while the app looks healthy.
+                logger.error(
+                    "End-of-stream only %.2fs after playback started -- the decoder "
+                    "almost certainly failed on the first frame rather than the clip "
+                    "having played. Look for 'co located POCs unavailable' above. This "
+                    "clip's GOP structure is not reliably decodable here; re-encode it "
+                    "closed-GOP with docs/experiments/bytetrack_eval/make_clips.sh. "
+                    "Rewinding anyway.", elapsed)
+
             if self.sync == "false":
                 # Pause the pipeline to clear any queued data. It is required when running with sync=false
                 # This will produce some warnings, but it's fine
@@ -350,6 +371,7 @@ class GStreamerApp:
             self.on_stream_rewound()
 
             # Resume playback.
+            self._last_stream_start_t = time.monotonic()
             self.pipeline.set_state(Gst.State.PLAYING)
         else:
             self.shutdown()
@@ -753,6 +775,7 @@ class GStreamerApp:
         self.pipeline.set_latency(new_latency)
 
         # Set pipeline to PLAYING state
+        self._last_stream_start_t = time.monotonic()
         self.pipeline.set_state(Gst.State.PLAYING)
 
         # Dump dot file
