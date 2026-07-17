@@ -59,10 +59,11 @@ def test_camera_switch_back_and_forth():
 
 
 def test_rewind_without_reset_rejects_the_whole_next_pass():
-    # Regression: file input derives frame ids from buffer.offset, which restarts
-    # at 0 on the loop rewind. Without a reset the guard's high-water mark is still
-    # at the end of the previous pass, so it rejects every frame of every later
-    # pass -- the app stays alive but stops seeing anything at all.
+    # Pins WHY reset() exists. If a rewind restarts frame ids from 0, the guard's
+    # high-water mark is still at the end of the previous pass, so it rejects every
+    # frame of every later pass -- the app stays alive but stops seeing anything.
+    # The file path's buffer.offset does not restart (measured), but its fallback
+    # buffer.pts does; this is the failure that fallback would produce.
     g = FrameOrderGuard()
     assert _accepts(g, 0, [0, 1, 2, 3]) == [0, 1, 2, 3]
     assert _accepts(g, 0, [0, 1, 2, 3]) == []  # the bug, pinned

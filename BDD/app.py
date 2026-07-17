@@ -447,11 +447,12 @@ class App(GStreamerDetectionApp):
 
 
     def on_stream_rewound(self):
-        # File input takes its frame ids from buffer.offset (see normalized_frame_id),
-        # which restarts at 0 on the loop rewind. The guard's high-water mark is still
-        # at the last frame of the previous pass, so without this every frame of every
-        # later pass is rejected as "stale" and the run goes permanently blind — no
-        # detections, no RAWDETS, just a flood of drop warnings.
+        # Defensive; see FrameOrderGuard.reset. In practice file input gets its ids from
+        # buffer.offset, which counts straight through the rewind rather than restarting,
+        # so the guard would accept the new pass regardless and this changes nothing. It
+        # matters only if normalized_frame_id ever falls through to buffer.pts, which
+        # DOES restart at 0 on a flush seek and would otherwise leave the run silently
+        # blind for every pass after the first.
         logger.info("Video looped; resetting frame-order guard for the new pass.")
         frame_order_guard.reset()
 

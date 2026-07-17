@@ -44,10 +44,18 @@ class FrameOrderGuard:
 
         Only for a DELIBERATE stream discontinuity, where ids legitimately restart
         from a lower value and nothing upstream is stale — today that is the file
-        source's loop rewind (``GStreamerApp.on_eos``): a file's frame ids come from
-        ``buffer.offset``, which restarts at 0 after the seek. Without this the mark
-        stays at the end of the previous pass and every later pass is rejected in
-        full, leaving the app running but permanently blind.
+        source's loop rewind (``GStreamerApp.on_eos``).
+
+        This is defensive, not a fix for an observed failure. Which id a rewind
+        restarts depends on which source ``normalized_frame_id`` lands on, and the
+        two behave differently: ``buffer.offset`` (what the file path actually gets)
+        was measured to keep counting straight through the seek — one clean rewind
+        at 120s, ids ran on to 4335 with no restart — so the guard never rejects and
+        this reset changes nothing. Its lower-priority fallback ``buffer.pts`` DOES
+        restart at 0 on a flush seek, and that case would be silent and total: the
+        mark stays at the end of the previous pass, every later pass is rejected in
+        full, and the app runs on permanently blind. Cheap insurance against landing
+        on that path.
 
         Safe only because the rewind uses a FLUSH seek, which drops in-flight
         buffers: no frame from the previous generation can still arrive and be
