@@ -446,6 +446,16 @@ class App(GStreamerDetectionApp):
         self.sync = 'false'
 
 
+    def on_stream_rewound(self):
+        # File input takes its frame ids from buffer.offset (see normalized_frame_id),
+        # which restarts at 0 on the loop rewind. The guard's high-water mark is still
+        # at the last frame of the previous pass, so without this every frame of every
+        # later pass is rejected as "stale" and the run goes permanently blind — no
+        # detections, no RAWDETS, just a flood of drop warnings.
+        logger.info("Video looped; resetting frame-order guard for the new pass.")
+        frame_order_guard.reset()
+
+
     def get_output_pipeline_string(self, video_sink: str, sync: str = 'true', show_fps: str = 'true'):
         # Live preview branch (--preview): its own leaky, tiny queue gives it a
         # separate streaming thread; the leaky=downstream queue means a slow/stalled

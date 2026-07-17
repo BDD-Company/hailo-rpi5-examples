@@ -58,6 +58,43 @@ def test_camera_switch_back_and_forth():
     assert g.accept(1, 4) is True
 
 
+def test_rewind_without_reset_rejects_the_whole_next_pass():
+    # Regression: file input derives frame ids from buffer.offset, which restarts
+    # at 0 on the loop rewind. Without a reset the guard's high-water mark is still
+    # at the end of the previous pass, so it rejects every frame of every later
+    # pass -- the app stays alive but stops seeing anything at all.
+    g = FrameOrderGuard()
+    assert _accepts(g, 0, [0, 1, 2, 3]) == [0, 1, 2, 3]
+    assert _accepts(g, 0, [0, 1, 2, 3]) == []  # the bug, pinned
+
+
+def test_reset_lets_a_rewound_stream_replay_the_same_ids():
+    # A rewind is a deliberate stream discontinuity, not a reorder: the flush seek
+    # drops in-flight buffers, so ids legitimately restart from 0.
+    g = FrameOrderGuard()
+    _accepts(g, 0, [0, 1, 2, 3])
+    g.reset()
+    assert _accepts(g, 0, [0, 1, 2, 3]) == [0, 1, 2, 3]
+
+
+def test_reset_clears_every_camera():
+    g = FrameOrderGuard()
+    g.accept(0, 10)
+    g.accept(1, 20)
+    g.reset()
+    assert g.last(0) is None
+    assert g.last(1) is None
+
+
+def test_order_is_still_enforced_after_a_reset():
+    # Reset must not weaken the invariant within the new stream generation.
+    g = FrameOrderGuard()
+    g.accept(0, 100)
+    g.reset()
+    assert g.accept(0, 5) is True
+    assert g.accept(0, 4) is False  # stale within the new pass, still rejected
+
+
 def test_last_reports_high_water_mark():
     g = FrameOrderGuard()
     assert g.last(0) is None

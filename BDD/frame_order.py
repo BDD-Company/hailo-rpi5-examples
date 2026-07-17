@@ -39,6 +39,24 @@ class FrameOrderGuard:
         self._last_by_camera[camera_id] = frame_id
         return True
 
+    def reset(self) -> None:
+        """Forget every camera's high-water mark, starting a new stream generation.
+
+        Only for a DELIBERATE stream discontinuity, where ids legitimately restart
+        from a lower value and nothing upstream is stale — today that is the file
+        source's loop rewind (``GStreamerApp.on_eos``): a file's frame ids come from
+        ``buffer.offset``, which restarts at 0 after the seek. Without this the mark
+        stays at the end of the previous pass and every later pass is rejected in
+        full, leaving the app running but permanently blind.
+
+        Safe only because the rewind uses a FLUSH seek, which drops in-flight
+        buffers: no frame from the previous generation can still arrive and be
+        mistaken for an in-order frame of the new one. Call it AFTER the flush.
+        This does not weaken the invariant — order is enforced as strictly as ever
+        within each generation.
+        """
+        self._last_by_camera.clear()
+
     def last(self, camera_id: int) -> int | None:
         """Last accepted frame id for ``camera_id`` (None if none yet)."""
         return self._last_by_camera.get(camera_id)

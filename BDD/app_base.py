@@ -343,10 +343,22 @@ class GStreamerApp:
             else:
                 logger.error("Error rewinding video.")
 
+            # Between the flush and PLAYING, while no buffer can be in flight: let
+            # subclasses drop per-stream state keyed on frame ids, which restart at 0
+            # for the new pass. Done here rather than after PLAYING so a fast first
+            # buffer can't race the hook on the streaming thread.
+            self.on_stream_rewound()
+
             # Resume playback.
             self.pipeline.set_state(Gst.State.PLAYING)
         else:
             self.shutdown()
+
+    def on_stream_rewound(self):
+        """Hook: the file source just looped back to the start (flush seek done,
+        playback not yet resumed). Frame ids restart from 0, so any state holding a
+        frame-id high-water mark is now stale and must be dropped. No-op by default.
+        """
 
 
     def _add_buffer_counter_probe(self, element_name, pad_name='src'):
