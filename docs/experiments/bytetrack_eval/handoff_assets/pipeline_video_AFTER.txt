@@ -1,0 +1,34 @@
+filesrc location="/tmp/sky_red_ball_10-200px_10m_100s.mp4" name=source !
+qtdemux name=demux demux.video_0 !
+identity name=source_pace sync=true !
+queue name=source_queue_decode leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+decodebin name=source_decodebin !
+queue name=source_scale_q leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+videoscale name=source_videoscale n-threads=2 !
+queue name=source_convert_q leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+videoconvert n-threads=3 name=source_convert qos=false !
+video/x-raw, pixel-aspect-ratio=1/1, format=NV12, width=1280, height=720 !
+videorate name=source_videorate !
+capsfilter name=source_fps_caps caps="video/x-raw, format=NV12, width=1280, height=720, framerate=30/1" !
+tee name=output_tee output_tee. !
+queue name=recording_input_q leaky=downstream max-size-buffers=4 max-size-bytes=0 max-size-time=0 !
+fakesink sync=false async=false output_tee. !
+queue name=inference_wrapper_input_q leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+hailocropper name=inference_wrapper_crop so-path=/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/cropping_algorithms/libwhole_buffer.so function-name=create_crops use-letterbox=true resize-method=inter-area internal-offset=true hailoaggregator name=inference_wrapper_agg inference_wrapper_crop. !
+queue name=inference_wrapper_bypass_q leaky=no max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+inference_wrapper_agg.sink_0 inference_wrapper_crop. !
+queue name=inference_scale_q leaky=no max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+videoscale name=inference_videoscale n-threads=2 qos=false !
+queue name=inference_convert_q leaky=no max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+video/x-raw, pixel-aspect-ratio=1/1 !
+videoconvert name=inference_videoconvert n-threads=2 !
+queue name=inference_hailonet_q leaky=no max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+hailonet name=inference_hailonet hef-path=/home/bdd/models/2026-04-09_11n_ball_v3_nv12_h8.hef batch-size=1  vdevice-group-id=1 nms-score-threshold=0.3 nms-iou-threshold=0.45 output-format-type=HAILO_FORMAT_TYPE_FLOAT32 force-writable=true !
+queue name=inference_hailofilter_q leaky=no max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+hailofilter name=inference_hailofilter so-path=/usr/local/hailo/resources/so/libyolo_hailortpp_postprocess.so   function-name=filter_letterbox  qos=false !
+queue name=inference_output_q leaky=no max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+inference_wrapper_agg.sink_1 inference_wrapper_agg. !
+queue name=inference_wrapper_output_q leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+queue name=identity_callback_q leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+identity name=identity_callback !
+fakesink name=detection_sink sync=false async=false
