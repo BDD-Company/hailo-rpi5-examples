@@ -20,9 +20,17 @@ class KalmanFilter:
     Observation: [cx, cy, w, h]
     """
 
-    def __init__(self, frame_rate: float = 30.0):
+    def __init__(self, frame_rate: float = 30.0,
+                 measurement_noise_floor: float = 0.0):
         # frame_rate accepted for API compatibility with BYTETracker;
         # noise is scaled by box height, not frame rate.
+        #
+        # measurement_noise_floor: lower bound on the per-coordinate measurement
+        # std (normalised units). ByteTrack scales measurement noise by box height,
+        # so a tiny far box is assumed sub-pixel accurate and barely filtered; the
+        # floor asserts the detector is never better than ~this, making the filter
+        # distrust small far targets. 0.0 (default) = original height-only scaling.
+        self._meas_floor = max(float(measurement_noise_floor), 0.0)
         # State transition: pos += vel (dt = 1 frame)
         self._F = np.eye(8)
         for i in range(4):
@@ -61,7 +69,7 @@ class KalmanFilter:
         bbox_cxcywh: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
         h = max(float(mean[3]), 1e-6)
-        std = _STD_WEIGHT_POS * h
+        std = max(_STD_WEIGHT_POS * h, self._meas_floor)
         R = np.diag(np.array([std, std, std / 10, std]) ** 2)
         S = self._H @ cov @ self._H.T + R
         K = np.linalg.solve(S.T, (cov @ self._H.T).T).T
@@ -319,6 +327,7 @@ class BYTETracker:
         recovery_max_dist: float | None = None,
         nms_thresh:        float | None = None,
         nms_dist_thresh:   float | None = None,
+        measurement_noise_floor: float | None = None,
     ):
         self.track_thresh      = track_thresh
         self.det_thresh        = det_thresh
@@ -328,7 +337,8 @@ class BYTETracker:
         self.nms_thresh        = nms_thresh
         self.nms_dist_thresh   = nms_dist_thresh
         self.max_lost_age      = int(frame_rate / 30.0 * track_buffer)
-        self._kf = KalmanFilter(frame_rate=frame_rate)
+        self._kf = KalmanFilter(frame_rate=frame_rate,
+                                measurement_noise_floor=measurement_noise_floor or 0.0)
         self.tracked_stracks: list[STrack] = []
         self.lost_stracks:    list[STrack] = []
 

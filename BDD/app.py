@@ -28,7 +28,7 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 from bytetrack import BYTETracker
 
-from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP
+from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP, kalman_or_raw_bbox
 from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
 from frame_utils import Frame
 from frame_order import FrameOrderGuard
@@ -50,6 +50,9 @@ logger = logging.getLogger(__name__)
 global_logger = logger # a hack
 DEBUG = False
 USE_TRACKER = False
+# Phase-2 noise reduction: build matched detections from the tracker's smoothed
+# (Kalman) bbox instead of the raw detector rect. Set from config in main().
+USE_KALMAN_BBOX = False
 
 # -----------------------------------------------------------------------------------------------
 # User-defined class to be used in the callback function
@@ -365,6 +368,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     # )
 
     track_id_map: dict[int, int] = {}
+    track_by_idx: dict[int, object] = {}   # det index -> matched STrack (for Kalman bbox)
     if USE_TRACKER:
         # BYTETracker is not thread-safe; safe here because GStreamer uses a single streaming thread.
         active_tracks = user_data.tracker.update(dets_array, frame_id)
@@ -389,6 +393,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             )
             if idx is not None:
                 track_id_map[idx] = track.track_id
+                track_by_idx[idx] = track
 
         logger.debug(
             "frame=#%04d ByteTracker track_id_map: %s (unmatched det indices: %s)",
@@ -397,10 +402,12 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             [i for i in range(len(raw_dets)) if i not in track_id_map],
         )
 
-    # Construct immutable Detection objects with track_id set at creation time
+    # Construct immutable Detection objects with track_id set at creation time.
+    # Phase-2: matched detections may use the tracker's smoothed Kalman bbox
+    # (default-off; kalman_or_raw_bbox returns the raw rect unchanged when disabled).
     detections_list = [
         Detection(
-            bbox=rect,
+            bbox=kalman_or_raw_bbox(rect, track_by_idx.get(i), USE_KALMAN_BBOX),
             confidence=conf,
             track_id=track_id_map.get(i),
         )
@@ -810,6 +817,14 @@ def main():
     # null / enabled=false disables it. Check the object, not a flag.
     global USE_TRACKER
     USE_TRACKER = config.bytetrack is not None
+
+    # Phase-2 noise reduction (default-off): use the tracker's smoothed Kalman bbox
+    # for matched detections. Requires the tracker; ignored when tracking is off.
+    global USE_KALMAN_BBOX
+    USE_KALMAN_BBOX = USE_TRACKER and config.bytetrack.use_kalman_bbox
+    if USE_KALMAN_BBOX:
+        logger.info("!!! Phase-2 use_kalman_bbox ENABLED: matched detections use the "
+                    "tracker's smoothed bbox")
 
     # RAW recording: on by config unless --no-record forces it off.
     record_videos = config.record_videos and not no_record_flag

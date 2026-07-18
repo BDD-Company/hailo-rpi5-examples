@@ -469,6 +469,21 @@ class dotdict(dict):
 
 
 
+def kalman_or_raw_bbox(raw_rect: 'Rect', track, use_kalman_bbox: bool) -> 'Rect':
+    """Pick the bbox for a Detection: the tracker's smoothed (Kalman) box when
+    `use_kalman_bbox` is on AND this detection matched a track, else the raw
+    detector rect. `track` is any object exposing `.bbox` as [x1,y1,x2,y2]
+    (an STrack), or None for an unmatched detection.
+
+    Phase-2 of the target noise-reduction design: the smoothed box already exists
+    inside ByteTrack and is otherwise discarded. Default-off — returns the raw rect
+    unchanged, byte-for-byte identical to the pre-feature path.
+    """
+    if use_kalman_bbox and track is not None:
+        return Rect.from_xyxy(*track.bbox)
+    return raw_rect
+
+
 @dataclass(slots=True, order=True, frozen=True)
 class Detection:
     bbox : Rect = field(default_factory=Rect)
