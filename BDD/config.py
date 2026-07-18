@@ -446,11 +446,25 @@ class Config:
         nms_dist_thresh:   Annotated[Optional[float], Range(min=0.0)] = None
         # Consumed by the controller (not BYTETracker): keep the locked target id.
         target_lock:       bool = True
+        # Controller re-acquisition clutter rejection (also not a BYTETracker kwarg).
+        # When the lock is cleared and the controller must re-pick a target, refuse
+        # detections whose track has been persistently STATIC -- static distractors
+        # (ground clutter, glints) score as high as a real fast target but do not
+        # move. A brand-new or moving track is always eligible, so initial acquisition
+        # of a slow/static target is unaffected, and an established lock is never
+        # dropped. reacquire_static_speed is in normalised-frame units per frame;
+        # a track observed for at least reacquire_speed_window/... frames moving less
+        # than this is treated as clutter. See
+        # docs/experiments/bytetrack-fast-target-2026-07-18.md.
+        reacquire_reject_static: bool = True
+        reacquire_static_speed:  Annotated[float, Range(min=0.0)] = 0.02
+        reacquire_speed_window:  Annotated[int, Range(min=2)]     = 5
 
         def tracker_kwargs(self) -> dict:
-            # target_lock is consumed by the controller, NOT a valid BYTETracker
-            # constructor kwarg. (`enabled` is a file-only toggle, never a field.)
-            controller_only = ('target_lock',)
+            # These are consumed by the controller, NOT valid BYTETracker constructor
+            # kwargs. (`enabled` is a file-only toggle, never a field.)
+            controller_only = ('target_lock', 'reacquire_reject_static',
+                               'reacquire_static_speed', 'reacquire_speed_window')
             return {k: v for k, v in asdict(self).items() if k not in controller_only}
     bytetrack: Optional[ByteTrack]
 
