@@ -261,10 +261,16 @@ bytetrack:
   match_thresh: 0.3
   track_buffer: 30
   frame_rate: 30
-  match_max_dist: 0.2
+  match_max_dist: 0.35   # was 0.2; a fast target (median ~0.05/frame, jumps >0.2 across
+                         # blackouts) needs a wider association gate or its track fragments.
+                         # 2026-07-18 FAST-target eval: 0.2->0.35 lifted noisy on-true 66->76%
+                         # and cut false switches 64->39; inert on slow targets (only binds on
+                         # large displacement). See docs/experiments/bytetrack-fast-target-2026-07-18.md
   recovery_max_dist: null
   nms_thresh: 0.3
-  nms_dist_thresh: 0.06
+  nms_dist_thresh: 0.02  # was 0.06; centre-only dist-NMS at 0.06 (~77px) is wider than most
+                         # of these 10-200px balls, so a bigger noise ball drifting within 0.06
+                         # of the small true ball DELETES the true detection. 0.02 fixes it.
   target_lock: true   # controller locks onto & follows one track_id (the whole point of this test)
 
 # Trace the decision pipeline into the PX4's own persistent ulog, so a crash that
