@@ -459,12 +459,27 @@ class Config:
         reacquire_reject_static: bool = True
         reacquire_static_speed:  Annotated[float, Range(min=0.0)] = 0.02
         reacquire_speed_window:  Annotated[int, Range(min=2)]     = 5
+        # ── Phase-2 target noise reduction (default-off; all A/B'd on the replay
+        # corpus before enabling — see BDD/experiments/2026-07-12-target-estimate-
+        # noise-reduction-design.md). Both disable-able by leaving them at default.
+        #
+        # Lower bound on the Kalman measurement std (normalised units). ByteTrack
+        # scales measurement noise by box height, so a tiny far box is assumed
+        # sub-pixel accurate and barely filtered; the floor makes the filter distrust
+        # small far targets. None/0.0 = original height-only scaling. Forwarded to
+        # BYTETracker (a real constructor kwarg).
+        measurement_noise_floor: Annotated[Optional[float], Range(min=0.0)] = None
+        # When True, app.py builds the target Detection from the tracker's smoothed
+        # (Kalman) bbox for matched detections instead of the raw detector rect.
+        # Consumed by app.py, NOT a BYTETracker kwarg. False = use the raw rect (today).
+        use_kalman_bbox: bool = False
 
         def tracker_kwargs(self) -> dict:
-            # These are consumed by the controller, NOT valid BYTETracker constructor
-            # kwargs. (`enabled` is a file-only toggle, never a field.)
+            # These are consumed by the controller/app, NOT valid BYTETracker
+            # constructor kwargs. (`enabled` is a file-only toggle, never a field.)
             controller_only = ('target_lock', 'reacquire_reject_static',
-                               'reacquire_static_speed', 'reacquire_speed_window')
+                               'reacquire_static_speed', 'reacquire_speed_window',
+                               'use_kalman_bbox')
             return {k: v for k, v in asdict(self).items() if k not in controller_only}
     bytetrack: Optional[ByteTrack]
 

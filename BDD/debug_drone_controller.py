@@ -37,6 +37,7 @@ from debug_output import debug_output_thread
 from interfaces import FrameSinkInterface
 from config import Config
 from parse_config import ConfigError, parse_config
+import aim_metrics
 
 import time as real_time_module
 
@@ -714,7 +715,30 @@ def main():
         help="No display at all: no window, no video decode (unless --video is given). "
              "The fastest way to replay a flight; needs no X/Wayland.",
     )
+    parser.add_argument(
+        "--metrics",
+        action='store_true',
+        default=False,
+        help="After replay, print the Phase-0 aim-quality metrics: per-axis jitter "
+             "(RMS 2nd-difference of the commanded aim). Implies headless.",
+    )
+    parser.add_argument(
+        "--baseline-params",
+        type=lambda x: dict(ast.literal_eval(x)),
+        default=None,
+        help="Run a SECOND replay of the same log with these dotted params as the "
+             "control, and print an A/B: jitter of both runs plus the filter-added "
+             "lag (cross-correlation) the --params run adds over this baseline. "
+             "E.g. --baseline-params \"{}\" to compare against the config's defaults. "
+             "Implies --metrics and headless. NOTE: this harness replays the log's "
+             "POST-tracker detections straight into the controller — it does NOT run "
+             "BYTETracker or app.py's callback. So the A/B reflects CONTROLLER-side "
+             "changes only (e.g. estimate()/lookahead/PD); it is BLIND to tracker or "
+             "detection-bbox changes (bytetrack.* / use_kalman_bbox), which need "
+             "debug_app_callback.py or an on-rig run.",
+    )
     args = parser.parse_args()
+    metrics_mode = args.metrics or args.baseline_params is not None
 
     # Resolve log and video paths
     if args.path.is_dir():
@@ -751,7 +775,7 @@ def main():
     # ── Open video ─────────────────────────────────────────────────────
     # Headless skips the decode entirely unless video was asked for explicitly: the
     # controller is happy with blank frames, and decoding a whole flight is the slow part.
-    if args.headless and args.video is None:
+    if (args.headless or metrics_mode) and args.video is None:
         video_path = None
 
     video_reader = VideoReader(video_path)
@@ -770,12 +794,12 @@ def main():
 
     # ── Build replay data ──────────────────────────────────────────────
     detections_list = build_detections_list(frames, video_reader)
-    replay_queue = ReplayQueue(detections_list, auto_advance=args.headless)
+    replay_queue = ReplayQueue(detections_list, auto_advance=args.headless or metrics_mode)
 
     # ── Set up output display ──────────────────────────────────────────
     output_queue = None
     output_thread = None
-    if not args.headless:
+    if not (args.headless or metrics_mode):
         output_queue = OverwriteQueue(maxsize=200)
         sink = InteractiveDisplaySink(
             replay_queue,
@@ -801,9 +825,48 @@ def main():
 
     logger.info("Replay finished: %d commands issued.", len(drone.commands) if drone else 0)
 
+    # ── Phase-0 aim-quality metrics ────────────────────────────────────
+    if metrics_mode and drone is not None:
+        if args.baseline_params is not None:
+            # Control run: same log, baseline (filter-off) params. Rebuild a fresh
+            # detections list + queue so the second pass is fully independent.
+            baseline_config = load_replay_config(args.config, args.baseline_params)
+            baseline_reader = VideoReader(video_path)
+            baseline_queue = ReplayQueue(
+                build_detections_list(frames, baseline_reader), auto_advance=True)
+            logger.info("Running baseline (control) replay for A/B...")
+            baseline_drone = run_replay(baseline_config, baseline_queue, frames, base_ns)
+            report = aim_metrics.summarize_ab(baseline_drone.commands, drone.commands)
+            _print_ab_metrics(report, log_file)
+        else:
+            _print_run_metrics(aim_metrics.summarize_run(drone.commands), log_file)
+
     # Keep display open until user closes it
     if output_thread is not None and output_thread.is_alive():
         output_thread.join(timeout=5)
+
+
+def _fmt_jitter(j: dict) -> str:
+    return f"roll={j['roll']:.4f}  pitch={j['pitch']:.4f}"
+
+
+def _print_run_metrics(report: dict, log_file) -> None:
+    print("\n=== Phase-0 aim metrics (jitter = RMS 2nd-diff of commanded aim, deg) ===")
+    print(f"log:        {log_file}")
+    print(f"aim frames: {report['aim_frames']}")
+    print(f"jitter:     {_fmt_jitter(report['jitter'])}")
+    print("(lower jitter = quieter aim; needs a --baseline-params A/B to read lag)\n")
+
+
+def _print_ab_metrics(report: dict, log_file) -> None:
+    ref, filt, lag = report["reference"], report["filtered"], report["lag"]
+    print("\n=== Phase-0 aim metrics A/B (jitter deg, lag in aim-frames) ===")
+    print(f"log:      {log_file}")
+    print(f"baseline: aim_frames={ref['aim_frames']:5d}  jitter {_fmt_jitter(ref['jitter'])}")
+    print(f"filtered: aim_frames={filt['aim_frames']:5d}  jitter {_fmt_jitter(filt['jitter'])}")
+    print(f"added lag (filtered vs baseline): roll={lag['roll']:+d}  pitch={lag['pitch']:+d}")
+    print("(want: filtered jitter < baseline, added lag ~0; a change that quiets the "
+          "aim by adding lag is a worse miss on a closing target)\n")
 
 
 if __name__ == "__main__":

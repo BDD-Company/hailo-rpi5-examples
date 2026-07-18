@@ -55,6 +55,56 @@ def test_update_reduces_uncertainty():
     assert np.trace(cov_upd) < np.trace(cov_pred)
 
 
+# ── Phase-2 measurement-noise floor (noise reduction design §3.3) ────────
+# ByteTrack scales measurement noise by box height, so a tiny (far) box is
+# assumed sub-pixel accurate and barely filtered. A floor makes the filter
+# distrust exactly those small far targets. Default 0.0 => today's behaviour.
+
+def _small_box_update(floor):
+    """Filter one noisy cx jump on a tiny box; return the updated cx."""
+    kf = KalmanFilter(measurement_noise_floor=floor)
+    bbox = np.array([0.5, 0.5, 0.02, 0.02])   # ~8px target: h=0.02 normalised
+    mean, cov = kf.initiate(bbox)
+    mean, cov = kf.predict(mean, cov)
+    measurement = np.array([0.6, 0.5, 0.02, 0.02])  # cx jumps +0.1 (noise)
+    mean_upd, _ = kf.update(mean, cov, measurement)
+    return mean_upd[0]
+
+
+def test_noise_floor_makes_small_box_filter_more():
+    # With the floor the filtered cx moves LESS toward the noisy measurement.
+    cx_no_floor = _small_box_update(0.0)
+    cx_floored  = _small_box_update(0.02)
+    assert abs(cx_floored - 0.5) < abs(cx_no_floor - 0.5)
+
+
+def test_noise_floor_default_zero_is_unchanged():
+    # Default constructor (no floor) behaves exactly like an explicit 0.0 floor.
+    kf_default = KalmanFilter()
+    kf_zero    = KalmanFilter(measurement_noise_floor=0.0)
+    bbox = np.array([0.5, 0.5, 0.02, 0.02])
+    m_d, c_d = kf_default.initiate(bbox)
+    m_z, c_z = kf_zero.initiate(bbox)
+    meas = np.array([0.6, 0.5, 0.02, 0.02])
+    upd_d, _ = kf_default.update(*kf_default.predict(m_d, c_d), meas)
+    upd_z, _ = kf_zero.update(*kf_zero.predict(m_z, c_z), meas)
+    assert np.allclose(upd_d, upd_z)
+
+
+def test_noise_floor_inert_for_large_box():
+    # A large box's height-scaled std already exceeds a small floor, so the floor
+    # changes nothing: the leverage is on small far targets only.
+    kf_no_floor = KalmanFilter()
+    kf_floor    = KalmanFilter(measurement_noise_floor=0.001)
+    bbox = np.array([0.5, 0.5, 0.4, 0.4])   # big near target
+    meas = np.array([0.55, 0.5, 0.4, 0.4])
+    m0, c0 = kf_no_floor.initiate(bbox)
+    m1, c1 = kf_floor.initiate(bbox)
+    upd0, _ = kf_no_floor.update(*kf_no_floor.predict(m0, c0), meas)
+    upd1, _ = kf_floor.update(*kf_floor.predict(m1, c1), meas)
+    assert np.allclose(upd0, upd1)
+
+
 from bytetrack import STrack, TrackState
 
 
@@ -67,6 +117,18 @@ def reset_strack_counter():
 def _make_strack(x1=0.1, y1=0.1, x2=0.3, y2=0.3, score=0.8):
     kf = KalmanFilter()
     return STrack(np.array([x1, y1, x2, y2]), score, kf)
+
+
+from bytetrack import BYTETracker
+
+
+def test_bytetracker_forwards_noise_floor_to_kalman():
+    t = BYTETracker(measurement_noise_floor=0.02)
+    assert t._kf._meas_floor == 0.02
+
+
+def test_bytetracker_noise_floor_defaults_to_zero():
+    assert BYTETracker()._kf._meas_floor == 0.0
 
 
 def test_strack_initial_state():

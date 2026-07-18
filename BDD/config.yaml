@@ -284,6 +284,16 @@ bytetrack:
   reacquire_static_speed: 0.02   # normalised-frame units/frame; below this a track is clutter
   reacquire_speed_window: 5      # frames of history used to estimate a track's speed
 
+  # ── Phase-2 target noise reduction (default OFF; A/B on the replay corpus before
+  # enabling — see BDD/experiments/2026-07-12-target-estimate-noise-reduction-design.md).
+  # Both are disabled at the values below; delete or flip them to turn the filter on.
+  use_kalman_bbox: false          # true: matched detections use the tracker's smoothed
+                                  # (Kalman) bbox instead of the raw detector rect
+  measurement_noise_floor: null   # e.g. 0.02: lower bound on the Kalman measurement std
+                                  # (normalised). Makes the filter distrust small far
+                                  # targets it otherwise treats as sub-pixel accurate.
+                                  # null = original height-only noise scaling.
+
 # Trace the decision pipeline into the PX4's own persistent ulog, so a crash that
 # destroys the Pi's SD card still leaves a record of what we saw and what we
 # commanded. One MAVLink DEBUG_FLOAT_ARRAY named "BDD" per tick; see ulog_trace.py
