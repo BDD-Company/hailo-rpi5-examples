@@ -4,6 +4,7 @@ import asyncio
 import math
 import time
 from  copy import copy
+from collections import deque
 from queue import Empty, Queue
 
 from helpers import XY
@@ -157,6 +158,7 @@ def _pick_target_detection(
     confidence_min: float,
     locked_track_id: int | None,
     use_track_lock: bool,
+    static_track_ids: "set[int] | None" = None,
 ) -> Detection | None:
     """
     Выбор одной детекции для сопровождения. При use_track_lock и заданном
@@ -164,6 +166,15 @@ def _pick_target_detection(
     чтобы не перескакивать на случайные высоко-уверенные ложные срабатывания.
     Если заблокированный трек в кадре отсутствует — None (ведём себя как
     при потере цели, оценщик/затухание сами продолжают движение).
+
+    static_track_ids: track ids the caller has judged to be persistently STATIC
+    (ground clutter). Used ONLY at re-acquisition (when no track is locked): those
+    detections are refused so the controller re-locks the real, moving target rather
+    than a static distractor scoring just as high. A track absent from this set --
+    a new or moving one -- is always eligible, so initial acquisition of a slow/
+    static target is unchanged; and this never affects following an existing lock.
+    If every visible detection is persistently-static clutter, returns None (no
+    target this frame -- the estimator/decay coasts, exactly as on any lost frame).
     """
     pool = [d for d in detections if d is not None and d.confidence >= confidence_min]
     if not pool:
@@ -174,7 +185,64 @@ def _pick_target_detection(
         if locked:
             return max(locked, key=lambda d: d.confidence)
         return None
+    # Re-acquisition: no track locked. Reject persistently-static clutter.
+    if static_track_ids:
+        moving_pool = [d for d in pool if d.track_id not in static_track_ids]
+        if moving_pool:
+            return max(moving_pool, key=lambda d: d.confidence)
+        return None
     return max(pool, key=lambda d: d.confidence)
+
+
+class _TrackMotionTracker:
+    """Causal per-track speed estimate for re-acquisition clutter rejection.
+
+    Feeds on the per-frame detection list and reports which track ids are
+    persistently static (observed >= 2 times over a short window, moving less than
+    `static_speed` normalised-frame-units per frame). Bounded: only the last
+    `window` positions per id are kept, and ids unseen for a while are pruned, so a
+    long flight cannot grow this without limit.
+    """
+
+    __slots__ = ("static_speed", "window", "_pos", "_last_seen")
+
+    def __init__(self, static_speed: float, window: int):
+        self.static_speed = static_speed
+        self.window = max(2, int(window))
+        self._pos: "dict[int, deque]" = {}
+        self._last_seen: "dict[int, int]" = {}
+
+    def update(self, detections: list, frame_id: int) -> None:
+        for d in detections:
+            tid = getattr(d, "track_id", None)
+            if tid is None:
+                continue
+            dq = self._pos.get(tid)
+            if dq is None:
+                dq = self._pos[tid] = deque(maxlen=self.window)
+            c = d.bbox.center
+            dq.append((frame_id, c.x, c.y))
+            self._last_seen[tid] = frame_id
+        # prune ids unseen for more than 2 windows to bound memory
+        if frame_id % 30 == 0 and self._last_seen:
+            cutoff = frame_id - 2 * self.window
+            stale = [t for t, f in self._last_seen.items() if f < cutoff]
+            for t in stale:
+                self._pos.pop(t, None)
+                self._last_seen.pop(t, None)
+
+    def static_ids(self) -> "set[int]":
+        out = set()
+        for tid, dq in self._pos.items():
+            if len(dq) < 2:
+                continue                    # too new to judge -> eligible
+            (f0, x0, y0), (f1, x1, y1) = dq[0], dq[-1]
+            if f1 <= f0:
+                continue
+            speed = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5 / (f1 - f0)
+            if speed < self.static_speed:
+                out.add(tid)
+        return out
 
 
 def compute_inertia_correction(telemetry_dict, target_relative_pos, gain, min_speed_ms=0.3):
@@ -403,6 +471,14 @@ async def drone_controlling_thread_async(
 
     # bytetrack is Optional (None when tracking disabled); default to locking.
     BYTETRACK_TARGET_LOCK = control_config.bytetrack.target_lock if control_config.bytetrack is not None else True
+    # Re-acquisition clutter rejection: refuse a persistently-static distractor when
+    # re-picking a target. Off unless bytetrack is enabled and target_lock is on.
+    _bt = control_config.bytetrack
+    REACQUIRE_REJECT_STATIC = bool(_bt and BYTETRACK_TARGET_LOCK and _bt.reacquire_reject_static)
+    _track_motion = (
+        _TrackMotionTracker(_bt.reacquire_static_speed, _bt.reacquire_speed_window)
+        if REACQUIRE_REJECT_STATIC else None
+    )
 
     AIM_POINT = control_config.aim_point
     aim_point = AIM_POINT
@@ -940,6 +1016,12 @@ async def drone_controlling_thread_async(
 
             # filter out accidential Nones
             detections = [d for d in detections if d is not None]
+            # Update per-track motion and compute the persistently-static clutter set
+            # BEFORE picking, so re-acquisition can refuse static distractors.
+            static_track_ids = None
+            if _track_motion is not None:
+                _track_motion.update(detections, frame_id)
+                static_track_ids = _track_motion.static_ids()
             target_relative_pos = None
             target_relative_pos_uncorrected = None
             target_position_ned = None
@@ -948,7 +1030,8 @@ async def drone_controlling_thread_async(
             target_size = None
 
             picked = _pick_target_detection(
-                detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK
+                detections, CONFIDENCE_MIN, locked_track_id, BYTETRACK_TARGET_LOCK,
+                static_track_ids,
             )
             detection = picked if picked is not None else Detection()
             # Guard the read: cpu.temperature is a sysfs access, so even %-style would

@@ -52,7 +52,7 @@ def label_det(truth, fid, cx, cy):
     return ((cx - tx) ** 2 + (cy - ty) ** 2) ** 0.5 <= _tol(tw, th)
 
 
-def find_shift(truth, noisy_frames, nb_frames, span=3):
+def find_shift(truth, noisy_frames, nb_frames, span=15):
     """Frame offset between the clean and noisy runs, or None if they don't align.
 
     Do not assume the two runs are frame-aligned just because both clips were cut

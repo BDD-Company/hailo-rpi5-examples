@@ -272,6 +272,17 @@ bytetrack:
                          # of these 10-200px balls, so a bigger noise ball drifting within 0.06
                          # of the small true ball DELETES the true detection. 0.02 fixes it.
   target_lock: true   # controller locks onto & follows one track_id (the whole point of this test)
+  # Re-acquisition clutter rejection (controller-side, 2026-07-18 FAST-target eval).
+  # When the lock clears and a new target must be picked, refuse a persistently-STATIC
+  # distractor: on the noisy FAST clip the distractor balls score as high as the true
+  # ball (0.81) but are static (~0.0005/frame) while the true ball moves ~0.05/frame.
+  # Rejecting known-static tracks at re-pick lifts noisy on-true 76->88% and cuts false
+  # switches 39->22, without touching the clean case (99.4%). A new/moving track is
+  # always eligible (initial acquisition of a slow target is unaffected) and an
+  # established lock is never dropped. See docs/experiments/bytetrack-fast-target-2026-07-18.md
+  reacquire_reject_static: true
+  reacquire_static_speed: 0.02   # normalised-frame units/frame; below this a track is clutter
+  reacquire_speed_window: 5      # frames of history used to estimate a track's speed
 
 # Trace the decision pipeline into the PX4's own persistent ulog, so a crash that
 # destroys the Pi's SD card still leaves a record of what we saw and what we

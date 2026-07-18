@@ -1123,3 +1123,23 @@ def test_consumers_gate_on_presence_not_enabled():
 def test_app_gates_tracker_on_bytetrack_presence():
     app_code = _strip_comments((CONFIG_YAML.parent / 'app.py').read_text())
     assert "config.bytetrack is not None" in app_code
+
+
+def test_bytetrack_tracker_kwargs_excludes_controller_only_fields():
+    # Controller-only knobs (target_lock + the re-acquisition clutter-rejection
+    # trio) must NOT be forwarded to BYTETracker, whose constructor would reject
+    # them. Everything else must be forwarded verbatim.
+    bt = Config.ByteTrack(match_max_dist=0.35, nms_dist_thresh=0.02,
+                          reacquire_reject_static=True, reacquire_static_speed=0.02,
+                          reacquire_speed_window=5)
+    kwargs = bt.tracker_kwargs()
+    for controller_only in ('target_lock', 'reacquire_reject_static',
+                            'reacquire_static_speed', 'reacquire_speed_window'):
+        assert controller_only not in kwargs
+    assert kwargs['match_max_dist'] == 0.35
+    assert kwargs['nms_dist_thresh'] == 0.02
+    # forwarded set is exactly the real BYTETracker constructor kwargs
+    import inspect
+    from bytetrack import BYTETracker
+    ctor = set(inspect.signature(BYTETracker.__init__).parameters) - {'self'}
+    assert set(kwargs) == ctor
