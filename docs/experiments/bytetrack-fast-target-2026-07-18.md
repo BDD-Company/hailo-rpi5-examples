@@ -92,4 +92,86 @@ controller-lock replay), `groundtruth.py` (exact labels + `find_shift`),
 
 ## Results
 
-(To be filled in after the sweep + confirm.)
+Captured both 10-min clips on-box (`--vision-only --no-record --tiles 1x1`, sustained
+~30 fps, 720p decode never fell behind). Clean/noisy align at **shift +0** (median
+nearest-det distance 0.0004); truth covers 98.1% of frames. The true ball is detected
+in **98.0%** of noisy frames and the longest genuine detection gap is **9 frames** — so
+neither the on-true nor the re-lock ceiling is detection-limited; the loss is all in
+*which* detection the controller follows.
+
+**Clean clip** (target ~100% / 0 switches): **99.4% on-true, 0 false switches, max
+re-lock 6 frames** — passes with the tuned params (and with baseline). Locking the
+fast target in the absence of noise is not the problem.
+
+**Noisy clip** — on-true % / false switches (true→noise) / max re-lock (frames):
+
+| stage | rule | on-true | false sw | max re-lock |
+|-------|------|--------:|---------:|------------:|
+| main baseline | config as shipped (nms 0.06, mmd 0.2) | 66.2% | 64 | 452 |
+| Stage 1 (config) | nms 0.02 + mmd 0.35 | 76.3% | 39 | 414 |
+| Stage 2 (code) | + reject persistently-static clutter at re-acq | **88.3%** | **22** | 317 |
+
+The strict targets (≥95% / ≤2 / ≤15fr) are **not** met even after both stages — but
+main→final is a large, real gain: on-true **66→88%**, false switches **64→22**, clean
+unaffected. The offline number is reproduced **byte-for-byte** by the real controller
+code (`_pick_target_detection` + `_TrackMotionTracker` fed the captured stream: 88.4%).
+
+### Why config alone stops at 76%, and the discriminator that breaks it
+
+The true ball is detected 98% of frames, but the controller's re-pick (after the lock
+clears) took the **globally highest-confidence** detection — and the distractor balls
+score as high as the true ball (0.81). Diagnosis: **25% of frames the lock sat on
+noise while the true ball was detected and available**. No BYTETracker parameter can
+fix a controller decision.
+
+The clean discriminator is **motion**: true-ball tracks move at a median **0.050/frame
+(64 px @1280)**; distractor tracks move at **0.0005/frame (0.6 px)** — a 100× gap. The
+distractors are essentially static. So at re-acquisition, refuse any track that is
+persistently static; the true (moving) target wins even when a distractor scores
+higher. Config knobs `recovery_max_dist`/`match_max_dist`/`track_buffer` cannot express
+this (they operate on the tracker's association, not the controller's target choice).
+
+### What was tried in the harness (docs/experiments/bytetrack_eval/spatial_relock.py)
+
+- *Spatial re-acq* (nearest to last-known / motion-predicted position): fragile — one
+  bad velocity estimate with no fallback flings the prediction off-frame and it never
+  recovers (≈99% lost). With a global fallback it only reaches ~79% (the fallback still
+  grabs static noise).
+- *Motion: prefer movers + drop a lock that goes static*: best on-true (**90.5%**), but
+  the "drop static lock" half is unsafe for flight — a head-on target has near-zero
+  image-plane motion and would be dropped as clutter.
+- *Reject known-static at re-acq only* (**shipped**): 88.3%, fewest false switches (22),
+  and safe — never drops an established lock; a new/moving track is always eligible, so
+  initial acquisition of a slow/static target is unaffected; when only static clutter is
+  visible it picks nothing (estimator coasts, as on any lost frame). Config-gated
+  (`bytetrack.reacquire_reject_static`, default on) and degrades to today's behaviour.
+
+### Shipped
+
+- **Stage 1** (`2ca2903`): `config.yaml` bytetrack `nms_dist_thresh 0.06→0.02`,
+  `match_max_dist 0.2→0.35`.
+- **Stage 2** (`4c9a595`): controller re-acquisition clutter rejection —
+  `_pick_target_detection(static_track_ids=…)` + `_TrackMotionTracker`; config knobs
+  `reacquire_reject_static` / `reacquire_static_speed` / `reacquire_speed_window`;
+  host-test enablement (`conftest.py` conditional mavsdk stub) + unit tests.
+
+### On-box confirm
+
+New config parses and the app boots cleanly on `bdd-sd9-testrig1` with the full tuned
+bytetrack block (logged `Config.ByteTrack(... match_max_dist=0.35 ... nms_dist_thresh=
+0.02 ... reacquire_reject_static=True, reacquire_static_speed=0.02, reacquire_speed_
+window=5)`). Re-running the noisy clip on-box with the shipped params, the on-box
+BYTETracker track ids reproduce the offline harness **100% (4211/4211 frames)** — the
+offline sweep is faithful to the box. The controller lock path itself was validated
+off-box byte-for-byte (the live control thread needs the FMU, so it was not exercised
+on the bench).
+
+### Limits / not done (config-only scope for the controller stayed intact aside from
+the one agreed code change)
+
+- Strict ≤2-switch / ≤15fr re-lock is not reachable with a simple, flight-safe
+  heuristic on this adversarial 0.75-noise scene; the detection ceiling is ~98%.
+  Closing the last ~10% would need motion-model / multi-hypothesis target association,
+  a larger change than warranted here.
+- `reacquire_static_speed` (0.02 norm/frame) is a generous margin below the true ball's
+  0.05; it was not over-tuned to this clip's noise-speed distribution.
