@@ -76,8 +76,12 @@ def test_unblocks_single_waiter():
 
 
 def test_fifo_when_not_overwritten():
-    q = OverwriteQueue(maxsize=128)
     N = 10_000
+    # Size the queue to hold every item so the overwrite path never triggers.
+    # This makes "not overwritten" a guarantee rather than a timing race:
+    # nothing is ever dropped, so FIFO losslessness holds deterministically
+    # regardless of how the producer/consumer threads interleave.
+    q = OverwriteQueue(maxsize=N)
     out = []
 
     start = threading.Barrier(2)
@@ -86,14 +90,11 @@ def test_fifo_when_not_overwritten():
         start.wait()
         for i in range(N):
             q.put(i)
-            # slow down the producer and allow consumer to pick up
-            # 50 is arbitrary discovered by experimenting
-            if i % 50 == 0: time.sleep(0)
 
     def consumer():
         start.wait()
         for _ in range(N):
-            out.append(q.get(timeout=1.0))
+            out.append(q.get(timeout=5.0))
 
     tp = threading.Thread(target=producer, daemon=True)
     tc = threading.Thread(target=consumer, daemon=True)
@@ -101,12 +102,11 @@ def test_fifo_when_not_overwritten():
     tp.start()
     tc.start()
 
-    tp.join(timeout=2.0)
-    tc.join(timeout=2.0)
+    tp.join(timeout=10.0)
+    tc.join(timeout=10.0)
 
     assert len(out) == N
-    assert out[:100] == list(range(100))
-    assert out[-1] == N - 1
+    assert out == list(range(N))
 
 
 
@@ -138,8 +138,15 @@ def test_overwrite_keeps_latest_items():
     tc.join()
 
     assert seen
+    # The newest item produced is always the last one consumed: nothing
+    # overwrites it after it is appended.
     assert seen[-1] == N - 1
-    assert all(a < b for a, b in zip(seen[-100:-1], seen[-99:]))
+    # Overwrite-oldest never reorders or duplicates: get() always pops the
+    # smallest outstanding value, so the whole consumed sequence is strictly
+    # increasing. (The previous `seen[-100:-1]` vs `seen[-99:]` slice compared
+    # equal (x, x) pairs whenever the consumer collected fewer than 100 items,
+    # which was purely timing-dependent — the source of the flakiness.)
+    assert all(a < b for a, b in zip(seen, seen[1:]))
 
 
 if __name__ == "__main__":
