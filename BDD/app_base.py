@@ -27,6 +27,7 @@ from pipelines import (
     SOURCE_PIPELINE,
     INFERENCE_PIPELINE,
     INFERENCE_PIPELINE_WRAPPER,
+    NON_LETTERBOX_POST_FUNCTION,
     SWITCHABLE_DETECTION_SECTION,
     TRACKER_PIPELINE,
     USER_CALLBACK_PIPELINE,
@@ -1492,10 +1493,17 @@ class GStreamerDetectionApp(GStreamerApp):
             # One cropper+hailonet+aggregator branch. share_device adds
             # scheduling-algorithm=1 (round-robin) so two same-hef hailonets can
             # share one vdevice (switchable mode); same hef => no weight reload on switch.
+            #
+            # Tiled branches must NOT use the *_letterbox postprocess: it flattens
+            # detections by the tile ROI's bbox, pre-applying the tile→frame remap that
+            # hailotileaggregator applies again (bboxes land at tile_offset + x/2).
+            tiled = tx > 1 or ty > 1
+            post_function = (NON_LETTERBOX_POST_FUNCTION(self.post_function_name)
+                             if tiled else self.post_function_name)
             inner = INFERENCE_PIPELINE(
                 hef_path=self.hef_path,
                 post_process_so=self.post_process_so,
-                post_function_name=self.post_function_name,
+                post_function_name=post_function,
                 batch_size=self.batch_size,
                 config_json=self.labels_json,
                 name=branch_name,

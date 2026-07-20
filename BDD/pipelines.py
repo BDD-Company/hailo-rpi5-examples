@@ -14,6 +14,7 @@ from hailo_apps.hailo_app_python.core.common.defines import (
 )
 
 import os
+import re
 
 """
 Set of pipelines based on hailo default examples.
@@ -190,6 +191,24 @@ def SOURCE_PIPELINE(video_source, video_width=640, video_height=640,
     return source_pipeline
 
 
+def NON_LETTERBOX_POST_FUNCTION(post_function_name):
+    """Postprocess function to use on a TILED inference branch: the plain (non-letterbox)
+    variant of ``post_function_name``.
+
+    The ``*_letterbox`` postprocess variants flatten every detection by the ROI's own
+    bbox (``create_flattened_bbox(roi->get_bbox(), roi->get_scaling_bbox())``). On a
+    tile crop the ROI bbox IS the tile bbox, so ``filter_letterbox`` pre-applies the
+    tile→frame remap — and hailotileaggregator then applies the same remap again.
+    Result: every tiled detection lands at ``tile_offset + x/2`` (the offset-bbox bug
+    of 2026-07-20). Tile crops are never letterboxed anyway (hailotilecropper emits
+    plain crops; videoscale's stretch preserves normalized coordinates), so the tiled
+    branch must use the plain variant and let the aggregator do the one remap.
+    """
+    if post_function_name and post_function_name.endswith('_letterbox'):
+        return post_function_name[: -len('_letterbox')]
+    return post_function_name
+
+
 def INFERENCE_PIPELINE(
     hef_path,
     post_process_so=None,
@@ -324,6 +343,15 @@ def INFERENCE_PIPELINE_WRAPPER(inner_pipeline, bypass_max_size_buffers=1, name='
         # topology (an extra queue is a thread hand-off this hot path doesn't need).
         tile_q = ''
     else:
+        # A letterbox postprocess inside a tiled wrapper double-remaps every bbox
+        # (see NON_LETTERBOX_POST_FUNCTION) — refuse to build such a pipeline. This
+        # is construction time, before anything is armed, so failing fast is safe.
+        if re.search(r'function-name=\S*_letterbox\b', inner_pipeline):
+            raise ValueError(
+                'tiled INFERENCE_PIPELINE_WRAPPER got a letterbox postprocess '
+                '(function-name=*_letterbox) in its inner pipeline; detections would '
+                'be remapped tile→frame twice. Use the plain variant '
+                '(NON_LETTERBOX_POST_FUNCTION) for tiled branches.')
         # hailotilecropper has built-in grid tiling (no so-path); single-scale =
         # exactly tiles_x×tiles_y crops (multi-scale would emit a full pyramid).
         overlap = (f'overlap-x-axis={tiling_overlap} overlap-y-axis={tiling_overlap} '

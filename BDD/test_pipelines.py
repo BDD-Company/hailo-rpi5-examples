@@ -16,6 +16,7 @@ pytest.importorskip("hailo_apps", reason="pipelines.py imports hailo_apps (Pi on
 
 from pipelines import (  # noqa: E402
     INFERENCE_PIPELINE_WRAPPER,
+    NON_LETTERBOX_POST_FUNCTION,
     SWITCHABLE_DETECTION_SECTION,
 )
 
@@ -38,6 +39,30 @@ def test_tiled_uses_tile_cropper_and_flattens_detections():
     assert 'tiles-along-x-axis=2' in s and 'tiles-along-y-axis=1' in s
     # Without flatten-detections the callback's get_objects_typed() silently finds zero.
     assert 'flatten-detections=true' in s
+
+
+def test_non_letterbox_post_function_strips_the_letterbox_suffix():
+    """filter_letterbox flattens detections by the ROI's own bbox; on a tile ROI that
+    pre-applies the tile→frame remap hailotileaggregator applies again, so every tiled
+    bbox lands at tile_offset + x/2 (the 2026-07-20 offset-bbox bug). Tiled branches
+    must use the plain variant."""
+    assert NON_LETTERBOX_POST_FUNCTION('filter_letterbox') == 'filter'
+    assert NON_LETTERBOX_POST_FUNCTION('filter') == 'filter'
+    assert NON_LETTERBOX_POST_FUNCTION(None) is None
+
+
+def test_tiled_wrapper_refuses_a_letterbox_postprocess():
+    """The double-remap invariant spans two files (app_base picks the function name,
+    pipelines wraps the branch) — nothing else pins them together, so the wrapper
+    fails fast at construction time if handed a letterbox postprocess."""
+    letterbox_inner = 'hailofilter so-path=libyolo.so function-name=filter_letterbox qos=false'
+    with pytest.raises(ValueError, match='letterbox'):
+        INFERENCE_PIPELINE_WRAPPER(letterbox_inner, tiles_x=2, tiles_y=1)
+    # The plain variant is accepted on the tiled path...
+    plain_inner = letterbox_inner.replace('filter_letterbox', 'filter')
+    assert 'hailotilecropper' in INFERENCE_PIPELINE_WRAPPER(plain_inner, tiles_x=2, tiles_y=1)
+    # ...and the whole-frame path keeps letterbox (the cropper really letterboxes there).
+    assert 'hailocropper' in INFERENCE_PIPELINE_WRAPPER(letterbox_inner, tiles_x=1, tiles_y=1)
 
 
 def test_tile_iou_threshold_is_configurable():
