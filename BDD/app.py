@@ -913,7 +913,7 @@ def main():
                        "config.camera.video_format=%s", video_format, config.camera.video_format)
     else:
         logger.info("!!! capture video_format: %s (matches model input)", video_format)
-    if tiles != (1, 1) and video_format == 'NV12':
+    if switchable and video_format == 'NV12':
         logger.warning("!!! NV12 capture + tiling together: extra format handling on the "
                        "tile path may further raise latency/CPU — measure before relying on it.")
 
