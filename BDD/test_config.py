@@ -1063,7 +1063,10 @@ def _shipped_config(**mutate) -> Config:
 
 
 def test_shipped_config_enables_ulog_trace():
-    assert _shipped_config().ulog_trace == Config.UlogTrace(rate_hz=5.0)
+    # rate_hz 0 = uncapped (one record per control-loop iteration, ~30/s at rig fps)
+    # — still ENABLED, which is what this pins. The section going missing or being
+    # switched off is the regression to catch, not the rate.
+    assert _shipped_config().ulog_trace == Config.UlogTrace(rate_hz=0.0)
 
 
 def test_ulog_trace_is_off_when_disabled_or_absent():
