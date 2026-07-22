@@ -16,7 +16,8 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_p
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
 from hailo_apps.hailo_app_python.core.common.core import get_default_parser
 from app_base import GStreamerDetectionApp
-from tiling_policy import TilingSwitchPolicy, TilingSwitchCoordinator, BranchStallWatchdog
+from tiling_policy import (TilingLadderPolicy, TilingSwitchCoordinator,
+                           BranchStallWatchdog, build_ladder)
 from drone_controller import drone_controlling_thread
 from platform_controller import platform_controlling_thread
 
@@ -64,47 +65,49 @@ class user_app_callback_class(app_callback_class):
         self.detections_queue = detections_queue
         self.tracker = tracker
 
-        # Runtime whole<->tile switching. The decision lives in the pure, unit-tested
-        # TilingSwitchPolicy; the serialization in TilingSwitchCoordinator. This class
+        # Runtime tiling-ladder switching. The decision lives in the pure, unit-tested
+        # TilingLadderPolicy; the serialization in TilingSwitchCoordinator. This class
         # only decides WHEN to hand the (blocking) switch to a worker thread, because
         # the GStreamer streaming thread must never wait on a handover. Wired by main()
-        # via attach_tiling_switch(); None until then.
+        # via attach_tiling_ladder(); None until then.
         self._coordinator = None
         self.auto_switch = False
 
-    def attach_tiling_switch(self, switch_fn, policy: TilingSwitchPolicy,
+    def attach_tiling_ladder(self, switch_fn, policy: TilingLadderPolicy,
                              auto_switch: bool = False):
-        """Route every branch switch through one serialized coordinator.
+        """Route every tier switch through one serialized coordinator.
 
-        `switch_fn(to_tiling) -> bool` is the blocking GStreamer handover
-        (app.switch_tiling). `auto_switch` enables the per-frame detection-state policy;
-        even with it off the coordinator is installed, so the --test-switch-s harness
-        goes through the same serialized path and keeps `policy.tiling_on` truthful."""
+        `switch_fn(tier_i) -> bool` is the blocking GStreamer handover
+        (app.switch_to_tier). `auto_switch` enables the per-frame size/loss policy; even
+        with it off the coordinator is installed, so the --test-switch-s harness goes
+        through the same serialized path and keeps the policy's tier truthful."""
         self._coordinator = TilingSwitchCoordinator(policy, switch_fn)
         self.auto_switch = auto_switch
 
     @property
     def coordinator(self):
-        """The serialized switch entry point; None until attach_tiling_switch()."""
+        """The serialized switch entry point; None until attach_tiling_ladder()."""
         return self._coordinator
 
-    def request_tiling(self, to_tiling: bool) -> bool:
-        """Blocking, thread-safe branch switch. The ONLY entry point — used by the
-        policy worker and by the --test-switch-s harness alike."""
+    def request_tier(self, tier_i: int) -> bool:
+        """Blocking, thread-safe tier switch. The ONLY entry point — used by the policy
+        worker and by the --test-switch-s harness alike."""
         if self._coordinator is None:
-            logger.warning("request_tiling: switchable tiling is not configured; ignoring")
+            logger.warning("request_tier: the tiling ladder is not configured; ignoring")
             return False
-        return self._coordinator.request(to_tiling)
+        return self._coordinator.request(tier_i)
 
-    def note_detection(self, best_conf: float):
-        """Per-frame detection-state hot-switch policy, on the GStreamer streaming
-        thread. `best_conf` is the highest target confidence this frame (0 if none).
+    def note_tiling(self, side):
+        """Per-frame ladder policy, on the GStreamer streaming thread. `side` is
+        max(bbox_w, bbox_h) of the primary tracked target (normalized 0..1), or None
+        when no target is matched — which starts the target-lost escalation.
+
         The coordinator returns a target only when a switch should START (never while
         one is in flight), so at most one worker thread exists at a time. No-op unless
         auto_switch is on."""
         if not self.auto_switch or self._coordinator is None:
             return
-        target = self._coordinator.note(best_conf)
+        target = self._coordinator.note(side, time.monotonic())
         if target is not None:
             # Never block the streaming thread: the handover waits up to ~1s for the
             # incoming branch's first buffer.
@@ -371,8 +374,6 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         dets_array = np.empty((0, 5))
 
     _best_conf = max((c for _, c in raw_dets), default=0.0)
-    # Detection-state whole<->tile policy (no-op unless tiling.auto_switch is on).
-    user_data.note_detection(_best_conf)
 
     # Throttled detection summary — confirms the model is producing valid detections
     # from the current pixel format (e.g. NV12 fed correctly). Throttle on the callback
@@ -423,6 +424,22 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
             [i for i in range(len(raw_dets)) if i not in track_id_map],
         )
 
+    # Size-driven tiling ladder: side = max(w,h) of the primary tracked target (the
+    # matched track with the largest max(w,h)), or None if no track matched — which
+    # starts the target-lost escalation. Fed AFTER tracking so it uses stable track
+    # identity rather than raw detections: an unmatched blob is clutter, and letting it
+    # drive the ladder would hold the rig on a low-latency rung while the real target
+    # is unseen. No-op unless the auto-switch ladder is configured (main()).
+    primary_side = None
+    if USE_TRACKER and track_id_map:
+        # track_id_map keys are indices into raw_dets
+        primary_side = max(max(raw_dets[i][0].width, raw_dets[i][0].height)
+                           for i in track_id_map)
+    if user_data.get_count() % 30 == 0:
+        logger.info("!!! TILING-SIZE frame=#%d use_tracker=%s tracks=%d primary_side=%s",
+                    frame_id, USE_TRACKER, len(track_id_map), primary_side)
+    user_data.note_tiling(primary_side)
+
     # Construct immutable Detection objects with track_id set at creation time.
     # Phase-2: matched detections may use the tracker's smoothed Kalman bbox
     # (default-off; kalman_or_raw_bbox returns the raw rect unchanged when disabled).
@@ -453,7 +470,7 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
 
 
 class App(GStreamerDetectionApp):
-    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, tiles=None, tiling_overlap=None, tile_iou_threshold=None, switchable_tiling=False, start_on_tiling=False, preview=False):
+    def __init__(self, app_callback, user_data, config : Config, parser=None, video_output_path = None, video_output_chunk_length_s = 30, video_filename_base=None, record_videos=True, camera_switcher = None, video_format=None, ladder_grids=None, tiling_overlap=None, tile_iou_threshold=None, preview=False):
         self.video_output_directory = video_output_path or '.'
         self.video_output_chunk_length_s = video_output_chunk_length_s or 30
         self.video_filename_base = video_filename_base
@@ -466,9 +483,9 @@ class App(GStreamerDetectionApp):
         self.preview = bool(preview)
         self.camera_switcher = camera_switcher
         super().__init__(app_callback, user_data, inference=config.inference, camera_settings=config.camera, parser=parser,
-                         video_format=video_format, tiles=tiles, tiling_overlap=tiling_overlap,
-                         tile_iou_threshold=tile_iou_threshold, switchable_tiling=switchable_tiling,
-                         start_on_tiling=start_on_tiling)
+                         video_format=video_format, ladder_grids=ladder_grids,
+                         tiling_overlap=tiling_overlap,
+                         tile_iou_threshold=tile_iou_threshold)
 
         #NOTE: unfortunatelly that has to be string, rest of the HAILO python code depends on it
         self.sync = 'false'
@@ -641,8 +658,8 @@ def _pop_value(argv: list[str], flag: str, example: str = 'VALUE') -> str | None
     an IndexError) if the flag is given with no value following it.
 
     Both spellings are accepted because argparse accepts both, and a flag popped here
-    never reaches argparse — so ``--tiles=2x2`` would otherwise sail past this function
-    and die downstream as an opaque "unrecognized arguments"."""
+    never reaches argparse — so ``--test-switch-s=10`` would otherwise sail past this
+    function and die downstream as an opaque "unrecognized arguments"."""
     for i, tok in enumerate(argv):
         if tok == flag:
             if i + 1 >= len(argv):
@@ -755,23 +772,12 @@ def main():
     # "app.py --preview (DISPLAY=:0)" launch config).
     preview_flag = _pop_flag(sys.argv, "--preview")
 
-    # --tiles NxM: static inference tile grid (e.g. --tiles 2x2; 1x1 = whole-frame).
-    # None => use config.tiling.
-    tiles_spec = _pop_value(sys.argv, "--tiles", example="2x2")
-    tiles_override = _parse_grid(tiles_spec) if tiles_spec else None
+    # The tile grid is NOT a CLI knob any more: config.tiling.ladder is the sole tiling
+    # control (--tiles / --switch-tiles are gone with the binary switch they configured).
+    # For a whole-frame-only run, empty the ladder in the config.
 
-    # --switch-tiles NxM: runtime-switchable tiling with an NxM tile branch (whole-
-    # frame active at startup, hot-switchable). Forces switchable on.
-    switch_tiles_spec = _pop_value(sys.argv, "--switch-tiles", example="2x1")
-    switch_tiles_override = _parse_grid(switch_tiles_spec) if switch_tiles_spec else None
-
-    if tiles_override is not None and switch_tiles_override is not None:
-        raise SystemExit("--tiles and --switch-tiles are mutually exclusive: --tiles sets a "
-                         "STATIC grid, --switch-tiles builds a hot-switchable tile branch. "
-                         "Pass only one.")
-
-    # --test-switch-s N: manual handover validation — toggle whole-frame<->tiling every
-    # N seconds. Harness only; needs switchable tiling. Old name --switch-test-s still
+    # --test-switch-s N: manual handover validation — step through the ladder rungs every
+    # N seconds. Harness only; needs a >= 2 rung ladder. Old name --switch-test-s still
     # works (deprecated) so runbooks/skills on older checkouts keep running.
     _TEST_SWITCH_S_REMOVAL = "2026-09-30"
     switch_test_s_spec = _pop_value(sys.argv, "--test-switch-s", example="10")
@@ -782,8 +788,8 @@ def main():
     if switch_test_s is not None and switch_test_s <= 0:
         raise SystemExit("--test-switch-s expects a positive number of seconds")
 
-    # --test-kill-tile-after-s N: fault injection. Once tiling is the active branch, shut
-    # its valve so the branch dies AFTER warming up — the failure switch_tiling's warmup
+    # --test-kill-tile-after-s N: fault injection. Once a TILED rung is active, shut its
+    # valve so the branch dies AFTER warming up — the failure switch_to_tier's warmup
     # timeout cannot catch. Proves BranchStallWatchdog on real hardware.
     kill_tile_after_s_spec = _pop_value(sys.argv, "--test-kill-tile-after-s", example="12")
     kill_tile_after_s = (_parse_float(kill_tile_after_s_spec, "--test-kill-tile-after-s")
@@ -851,57 +857,43 @@ def main():
     record_videos = config.record_videos and not no_record_flag
     logger.info("!!! RAW video recording: %s", "ENABLED" if record_videos else "DISABLED")
 
-    # Switchable tiling: --switch-tiles forces it on; config.tiling.switchable /
-    # auto_switch / start_on_tiling each imply it. `--tiles NxM` means "STATIC grid" and
-    # therefore forces it OFF — that is the only way to get a plain single-branch run
-    # (e.g. `--tiles 1x1` for whole-frame only) from the CLI now that the shipped
-    # config.yaml enables auto_switch.
-    config_wants_switchable = (config.tiling.switchable or config.tiling.auto_switch
-                               or config.tiling.start_on_tiling)
-    switchable = switch_tiles_override is not None or (tiles_override is None and config_wants_switchable)
-    if tiles_override is not None and config_wants_switchable:
-        logger.warning("!!! --tiles %dx%d forces a STATIC grid: config.tiling switchable/auto_switch/"
-                       "start_on_tiling are ignored for this run (use --switch-tiles to keep them).",
-                       tiles_override[0], tiles_override[1])
+    # The size-driven ladder is the ONLY tiling model. build_ladder validates it (last
+    # rung 1x1, strictly-decreasing tile counts) and returns [] for an absent/empty
+    # ladder, which means a plain non-switchable whole-frame run. "Switchable" is
+    # derived: >= 2 rungs to switch between.
+    tiers = build_ladder(config.tiling)
+    ladder_grids = [(t.tiles_x, t.tiles_y) for t in tiers]
+    switchable = len(tiers) >= 2
 
-    _no_switchable = ("Pass --switch-tiles NxM, or set tiling.switchable / tiling.auto_switch / "
-                      "tiling.start_on_tiling in the config (and drop --tiles, which forces a "
-                      "static grid).")
+    _no_ladder = ("Give tiling.ladder at least two rungs in the config (e.g. 2x1 then 1x1); "
+                  "an empty ladder is a plain whole-frame run with nothing to switch.")
     if switch_test_s and not switchable:
-        raise SystemExit("--test-switch-s toggles the whole-frame<->tiling handover, which only "
-                         "exists with switchable tiling. " + _no_switchable)
+        raise SystemExit("--test-switch-s steps through the ladder handover, which only exists "
+                         "with a >= 2 rung ladder. " + _no_ladder)
     if kill_tile_after_s and not switchable:
-        raise SystemExit("--test-kill-tile-after-s kills the tile branch, which only exists with "
-                         "switchable tiling. " + _no_switchable)
+        raise SystemExit("--test-kill-tile-after-s kills a tiled rung, which only exists with a "
+                         ">= 2 rung ladder. " + _no_ladder)
     if switch_test_s and config.tiling.auto_switch:
         logger.warning("!!! --test-switch-s together with tiling.auto_switch: the harness and the "
-                       "detection policy will both drive the branch and fight each other. "
+                       "size policy will both drive the tier and fight each other. "
                        "Both switches are serialized, but the run is not representative.")
 
-    # Which branch is live at startup. Only meaningful when both branches exist.
-    start_on_tiling = switchable and config.tiling.start_on_tiling
-
     if switchable:
-        tiles = switch_tiles_override if switch_tiles_override is not None \
-            else (config.tiling.tiles_x, config.tiling.tiles_y)
-        if tiles == (1, 1):
-            tiles = (2, 1)  # a 1x1 "tile branch" == whole-frame; default to 2x1
-        logger.info("!!! SWITCHABLE tiling: whole-frame <-> %dx%d (%s active at startup)",
-                    tiles[0], tiles[1], "TILING" if start_on_tiling else "whole-frame")
-        if start_on_tiling and not config.tiling.auto_switch:
-            logger.warning("!!! start_on_tiling without auto_switch: nothing will ever switch back "
-                           "to whole-frame on its own; the run stays on the higher-latency branch.")
+        logger.info("!!! TILING LADDER (%d rungs, whole-frame active at startup): %s",
+                    len(ladder_grids),
+                    " -> ".join(f"{tx}x{ty}" for tx, ty in ladder_grids))
+        if not config.tiling.auto_switch:
+            logger.warning("!!! tiling.auto_switch is OFF: the ladder is built but nothing drives "
+                           "it; the run stays on whole-frame unless --test-switch-s is passed.")
+        worst = max(tx * ty for tx, ty in ladder_grids)
+        if worst > 2:
+            logger.warning(
+                "!!! The ladder's most-tiled rung runs %d inferences/frame: while it is active, "
+                "capture->command LATENCY will be SUB-PAR. On this rig only ~2 tiles stay under "
+                "the 200ms budget (2x2 ~230ms e2e, 3x2 ~300ms). That rung is for reacquiring a "
+                "small/lost target, not for low-latency control.", worst)
     else:
-        # Static tile grid: CLI --tiles wins, else config.tiling.
-        tiles = tiles_override if tiles_override is not None else (config.tiling.tiles_x, config.tiling.tiles_y)
-        logger.info("!!! Inference tiling: %dx%d (%s)", tiles[0], tiles[1],
-                    "whole-frame" if tiles == (1, 1) else f"{tiles[0]*tiles[1]} tiles/frame")
-    if not switchable and tiles != (1, 1):
-        logger.warning(
-            "!!! TILING %dx%d enabled (%d inferences/frame): capture->command LATENCY and CPU "
-            "will be SUB-PAR vs whole-frame. On this rig only ~2 tiles stay under the 200ms "
-            "budget (2x2 ~230ms e2e). Use tiling for small-object recall, not low-latency control.",
-            tiles[0], tiles[1], tiles[0] * tiles[1])
+        logger.info("!!! Inference tiling: whole-frame (no ladder configured)")
 
     # Capture format follows the MODEL input: NV12-input hef -> capture NV12,
     # RGB-input hef -> capture RGB. The hailocropper requires capture format ==
@@ -977,11 +969,9 @@ def main():
         video_filename_base=f"RAW_{start_time_str}",
         record_videos=record_videos,
         video_format=video_format,
-        tiles=tiles,
+        ladder_grids=ladder_grids,
         tiling_overlap=config.tiling.overlap,
         tile_iou_threshold=config.tiling.tile_iou_threshold,
-        switchable_tiling=switchable,
-        start_on_tiling=start_on_tiling,
         preview=preview_flag)
     if preview_flag:
         logger.info("!!! PREVIEW window enabled (%s); needs a display (DISPLAY/WAYLAND_DISPLAY set)",
@@ -990,40 +980,43 @@ def main():
         # Picked up by GStreamerApp.run() to spawn one thread per CameraConfig.
         app.camera_switcher = camera_switcher
 
-    # Install the switch coordinator whenever the pipeline HAS two branches, even if
-    # the automatic policy is off: the --test-switch-s harness must go through the same
+    # Install the switch coordinator whenever the pipeline HAS a ladder, even if the
+    # automatic policy is off: the --test-switch-s harness must go through the same
     # serialized path, or it desyncs the policy and races the handover.
-    # tiling_on MUST match the branch the pipeline actually booted on, or the policy's
-    # very first decision is made about the wrong branch.
+    # current_i MUST match the tier the pipeline actually booted on, or the policy's
+    # very first decision is made about the wrong rung.
     if switchable:
-        assert app.tiling_active == start_on_tiling, (
-            f"pipeline booted on {'tiling' if app.tiling_active else 'whole-frame'} but "
-            f"start_on_tiling={start_on_tiling}")
-        user_data.attach_tiling_switch(
-            switch_fn=app.switch_tiling,
-            policy=TilingSwitchPolicy(
-                switch_conf=config.tiling.switch_conf,
-                lost_frames_to_tile=config.tiling.lost_frames_to_tile,
-                locked_frames_to_whole=config.tiling.locked_frames_to_whole,
-                locked_streak_miss_penalty=config.tiling.locked_streak_miss_penalty,
-                tiling_on=start_on_tiling,
+        whole_i = len(tiers) - 1
+        assert app.active_tier == whole_i, (
+            f"pipeline booted on tier {app.active_tier} but the ladder's whole-frame "
+            f"rung is {whole_i}")
+        user_data.attach_tiling_ladder(
+            switch_fn=app.switch_to_tier,
+            policy=TilingLadderPolicy(
+                tiers,
+                lost_to_2x1_s=config.tiling.lost_to_2x1_s,
+                lost_to_3x2_s=config.tiling.lost_to_3x2_s,
+                current_i=whole_i,          # whole-frame is live at startup
             ),
             auto_switch=config.tiling.auto_switch,
         )
         if config.tiling.auto_switch:
-            _p = config.tiling.locked_streak_miss_penalty
-            # Drift is positive (=> prompt return to whole-frame) while miss rate < 1/(1+P).
-            _tol = f"prompt below {100.0 / (1 + _p):.0f}% misses" if _p else "ignores misses"
-            logger.info("!!! auto-switch tiling policy: lost>=%d consecutive -> tile, "
-                        "locked>=%d -> whole (miss penalty -%d, %s), conf>=%.2f",
-                        config.tiling.lost_frames_to_tile, config.tiling.locked_frames_to_whole,
-                        _p, _tol, config.tiling.switch_conf)
+            logger.info("!!! auto-switch ladder policy: size = max(bbox_w, bbox_h) of the primary "
+                        "tracked target; per-rung thresholds %s; target lost -> rung %d after "
+                        "%.1fs, rung 0 after %.1fs",
+                        [(f"{t.tiles_x}x{t.tiles_y}", t.up_side, t.down_side) for t in tiers],
+                        max(len(tiers) - 2, 0),
+                        config.tiling.lost_to_2x1_s, config.tiling.lost_to_3x2_s)
+            if not USE_TRACKER:
+                logger.error("!!! tiling.auto_switch needs bytetrack (size comes from MATCHED "
+                             "tracks): with the tracker off no size is ever fed and the ladder "
+                             "will only ever escalate on target-lost timers.")
 
-        # Post-switch watchdog: the handover refuses a branch that never warms up, but
-        # nothing else notices a branch that warms up and LATER dies — app_callback simply
+        # Post-switch watchdog: the handover refuses a rung that never warms up, but
+        # nothing else notices a rung that warms up and LATER dies — app_callback simply
         # stops firing and the control loop starves. Poll the callback counter; if it
-        # freezes while tiling is active, revert to whole-frame. Daemon thread: it must
-        # never hold up shutdown, and losing it at exit costs nothing.
+        # freezes while a tiled rung is active, revert to whole-frame. Daemon thread: it
+        # must never hold up shutdown, and losing it at exit costs nothing.
         stall_watchdog = BranchStallWatchdog(
             coordinator=user_data.coordinator,
             frame_count_fn=user_data.get_count,
@@ -1042,7 +1035,7 @@ def main():
         threading.Thread(target=_stall_watchdog_thread, name="branch-stall-watchdog",
                          daemon=True).start()
         logger.info("!!! branch stall watchdog: revert to whole-frame after %.1fs without a "
-                    "callback while tiling; then refuse tiling for %.1fs",
+                    "callback on a tiled rung; then refuse to leave whole-frame for %.1fs",
                     config.tiling.stall_timeout_s, config.tiling.stall_cooldown_s)
 
     # Optional dual-camera switching verification harness. The thread drives
@@ -1064,46 +1057,51 @@ def main():
         threading.Thread(target=_switch_test_thread, name="camera-switch-test", daemon=True).start()
         logger.warning("!!! Dual-camera switching test harness enabled: toggle every %.2fs", test_switch_interval_s)
 
-    # Manual hot-switch validation: toggle whole-frame <-> tiling every N seconds
-    # so the handover (valve + input-selector) can be confirmed glitch-free on the
-    # log (BRANCH SWITCH lines, DETS continuity, StageB stepping). Only meaningful
-    # with switchable tiling; the automatic policy will call the same switch_tiling().
+    # Manual hot-switch validation: step through the ladder rungs every N seconds so the
+    # handover (valve + input-selector) can be confirmed glitch-free on the log (BRANCH
+    # SWITCH lines, DETS continuity, StageB stepping). Only meaningful with a >= 2 rung
+    # ladder; the automatic policy calls the same switch_to_tier().
     if switch_test_s:
-        # Routed through user_data.request_tiling (the coordinator), NOT app.switch_tiling
+        # Routed through user_data.request_tier (the coordinator), NOT app.switch_to_tier
         # directly: that is what keeps the policy's belief in sync with the pipeline and
         # stops this thread from racing the policy worker over the valves/selector.
         def _tiling_switch_test():
-            to_tiling = True
+            # Walk the whole ladder rung by rung and wrap around, so a manual run
+            # exercises every branch rather than just one pair.
+            tier_i = 0
             while True:
                 time.sleep(switch_test_s)
-                ok = user_data.request_tiling(to_tiling)
-                logger.info("!!! --test-switch-s: requested %s -> %s",
-                            "TILING" if to_tiling else "WHOLE-FRAME",
-                            "ok" if ok else "ABORTED (branch kept)")
-                to_tiling = not to_tiling
+                ok = user_data.request_tier(tier_i)
+                grid = ladder_grids[tier_i]
+                logger.info("!!! --test-switch-s: requested tier %d (%dx%d) -> %s",
+                            tier_i, grid[0], grid[1],
+                            "ok" if ok else "ABORTED (rung kept)")
+                tier_i = (tier_i + 1) % len(ladder_grids)
         threading.Thread(target=_tiling_switch_test, name="tiling-switch-test", daemon=True).start()
-        logger.info("!!! --test-switch-s: toggling whole<->tiling every %.1fs", switch_test_s)
+        logger.info("!!! --test-switch-s: stepping through the %d ladder rungs every %.1fs",
+                    len(ladder_grids), switch_test_s)
 
-    # Fault injection for the post-switch watchdog: wait for tiling to become the active
-    # branch, then shut its valve. The branch has already warmed up and been accepted, so
-    # the handover's warmup timeout cannot catch this; only the watchdog can.
+    # Fault injection for the post-switch watchdog: wait for a tiled rung to become
+    # active, then shut its valve. That branch has already warmed up and been accepted,
+    # so the handover's warmup timeout cannot catch this; only the watchdog can.
     if kill_tile_after_s:
         def _kill_tile_branch():
             time.sleep(kill_tile_after_s)
             if not switch_test_s and not config.tiling.auto_switch:
-                # Nothing else will ever select tiling, so select it ourselves first.
+                # Nothing else will ever leave whole-frame, so select a tiled rung here.
                 logger.warning("!!! --test-kill-tile-after-s: no switch driver configured; "
-                               "switching to tiling first so there is something to kill")
-                user_data.request_tiling(True)
+                               "switching to a tiled rung first so there is something to kill")
+                user_data.request_tier(0)
             deadline = time.monotonic() + 60.0
             while time.monotonic() < deadline:
                 if app.kill_tile_branch_for_test():
                     return
-                time.sleep(0.2)     # not on tiling yet; wait for a driver to select it
-            logger.error("!!! --test-kill-tile-after-s: tiling never became active; nothing killed")
+                time.sleep(0.2)     # still on whole-frame; wait for a driver to leave it
+            logger.error("!!! --test-kill-tile-after-s: no tiled rung ever became active; "
+                         "nothing killed")
         threading.Thread(target=_kill_tile_branch, name="tile-branch-killer", daemon=True).start()
-        logger.warning("!!! --test-kill-tile-after-s: will kill the tile branch %.1fs from now",
-                       kill_tile_after_s)
+        logger.warning("!!! --test-kill-tile-after-s: will kill the active tiled rung %.1fs "
+                       "from now", kill_tile_after_s)
 
     logger.info("!!! Config: %s", config)
     if DEBUG:

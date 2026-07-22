@@ -14,6 +14,7 @@ live flight tuning and its numbers change constantly.
 """
 
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -206,6 +207,12 @@ def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log
 
     cfg = ddc.load_replay_config(CONFIG_YAML)
     assert cfg.ulog_trace is not None, "config.yaml should ship with the trace enabled"
+    # What is under test here is the RATE-LIMITED aggregation path, so pin the rate
+    # instead of inheriting whatever the shipped config is tuned to. rate_hz=0 (uncapped,
+    # one record per iteration) would make every history exactly one frame long and the
+    # aggregation assertions below vacuous. test_config.py owns "the shipped config still
+    # enables the trace"; this test owns the behaviour.
+    cfg = replace(cfg, ulog_trace=Config.UlogTrace(rate_hz=5.0))
 
     _config_dict, frames, base_ns = ddc.parse_log(synthetic_log)
     replay_queue = ddc.ReplayQueue(ddc.build_detections_list(frames, None), auto_advance=True)
@@ -224,7 +231,8 @@ def test_the_ulog_trace_is_emitted_through_the_real_control_thread(synthetic_log
         assert all(math.isfinite(v) for v in data)
 
     # The trace is rate-limited on the control loop's clock, which the replay drives from
-    # the log's timestamps — so the count should track 5 Hz of FLIGHT time, not wall time.
+    # the log's timestamps — so the count should track the configured Hz of FLIGHT time,
+    # not wall time.
     stamps = sorted(fd["timestamp_ns"] for fd in frames.values() if fd.get("timestamp_ns"))
     flight_s = (stamps[-1] - stamps[0]) / 1e9
     expected = flight_s * cfg.ulog_trace.rate_hz

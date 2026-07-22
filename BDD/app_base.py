@@ -28,11 +28,11 @@ from pipelines import (
     INFERENCE_PIPELINE,
     INFERENCE_PIPELINE_WRAPPER,
     NON_LETTERBOX_POST_FUNCTION,
-    SWITCHABLE_DETECTION_SECTION,
     TRACKER_PIPELINE,
     USER_CALLBACK_PIPELINE,
     DISPLAY_PIPELINE
 )
+from tiling_pipeline import build_switchable_detection_section
 
 
 # Based on hailo_app_python/core/gstreamer/gstreamer_app.py
@@ -190,11 +190,10 @@ class GStreamerApp:
         self.video_width = 1280
         self.video_height = 720
         self.video_format = HAILO_RGB_VIDEO_FORMAT
-        # Tile grid for the inference wrapper. 1×1 = whole-frame (default, lowest
-        # latency); >1 enables hailotilecropper (more small-object recall, more
-        # inference cost). Set from config/CLI by the App subclass.
-        self.tiles_x = 1
-        self.tiles_y = 1
+        # Switchable tiling ladder as [(tiles_x, tiles_y), ...] (index 0 = most tiles,
+        # last = (1,1) whole-frame). None/empty => plain non-switchable whole-frame.
+        # Set from build_ladder(config.tiling) by the App subclass.
+        self.ladder_grids = None
         # Fractional tile overlap (0..1) for the hailotilecropper; 0 = abutting tiles.
         # Set from config.tiling.overlap by the App subclass; only the tiled path uses it.
         self.tiling_overlap = 0.0
@@ -204,16 +203,16 @@ class GStreamerApp:
         # stamp goes. Branch names differ between the single-branch and switchable
         # pipelines, so get_pipeline_string() sets this to whichever it built.
         self.detection_start_probe_element = 'inference_wrapper_input_q'
-        # Guards the valve/selector handover in switch_tiling. Held across the blocking
+        # Guards the valve/selector handover in switch_to_tier. Held across the blocking
         # first-buffer wait, so NEVER acquire a policy lock while holding it (see
         # tiling_policy.TilingSwitchCoordinator for the ordering).
         self._switch_lock = threading.RLock()
-        # Which branch is live at startup. Set from config.tiling.start_on_tiling by the
-        # App subclass BEFORE create_pipeline() runs: it decides which valve boots open
-        # and which selector pad create_pipeline() activates.
-        self.start_on_tiling = False
-        # Branch the pipeline is actually on; kept in step with the above.
-        self._tiling_active = False
+        # Ladder tier the pipeline is actually on. The whole-frame rung (last index) is
+        # always the one live at startup: it is the lowest-latency path and the branch
+        # everything degrades back to. A cold target is picked up by the policy's
+        # target-lost escalation within lost_to_2x1_s, which is why there is no
+        # "boot on tiles" switch any more.
+        self._active_tier = 0
         self.hef_path = None
         self.app_callback = None
 
@@ -265,17 +264,7 @@ class GStreamerApp:
             logger.error(f"Error creating pipeline", exc_info=True)
             sys.exit(1)
 
-        # Boot on the tile branch. Opening valve_tile in the pipeline string is only half
-        # of it: input-selector activates its FIRST-LINKED pad, which is sink_0 (whole),
-        # and active-pad is a pad object that does not exist until parse_launch has run.
-        if self.switchable_tiling and self.start_on_tiling:
-            sel = self.pipeline.get_by_name("branch_selector")
-            if sel is None:
-                logger.error("start_on_tiling: branch_selector missing; staying on whole-frame")
-            else:
-                sel.set_property("active-pad", sel.get_static_pad("sink_1"))
-                self._tiling_active = True
-                logger.info("!!! startup branch: TILING (%dx%d)", self.tiles_x, self.tiles_y)
+        self._init_selector_startup_pad()
 
         # Connect to hailo_display fps-measurements
         if self.show_fps:
@@ -288,6 +277,31 @@ class GStreamerApp:
 
         # Create a GLib Main Loop
         self.loop = GLib.MainLoop()
+
+    def _init_selector_startup_pad(self):
+        """Point the input-selector at the whole-frame rung (the LAST sink pad) so the
+        active pad matches the only valve the pipeline string leaves open.
+
+        input-selector activates its first-linked pad — sink_0, which is tier 0, the
+        MOST-tiled rung — and active-pad is a pad object that does not exist until
+        parse_launch has run, so it cannot be set in the pipeline string. Leave this out
+        and the selector reads from a branch whose valve is shut: an instant stall."""
+        if not self.switchable_tiling or not self.ladder_grids:
+            return
+        whole_i = len(self.ladder_grids) - 1
+        sel = self.pipeline.get_by_name("branch_selector")
+        if sel is None:
+            logger.error("ladder: branch_selector missing; cannot select the whole-frame rung")
+            return
+        pad = sel.get_static_pad(f"sink_{whole_i}")
+        if pad is None:
+            logger.error("ladder: branch_selector has no sink_%d; leaving the default pad",
+                         whole_i)
+            return
+        sel.set_property("active-pad", pad)
+        self._active_tier = whole_i
+        logger.info("!!! startup tier: %d (whole-frame) of a %d-rung ladder %s",
+                    whole_i, len(self.ladder_grids), self.ladder_grids)
 
     def bus_call(self, bus, message : Gst.Message, loop):
         t = message.type
@@ -428,13 +442,13 @@ class GStreamerApp:
             return Gst.PadProbeReturn.OK
         pad.add_probe(Gst.PadProbeType.BUFFER, _probe_cb, None)
 
-    def switch_tiling(self, to_tiling: bool, warmup_timeout_s: float = 1.0) -> bool:
-        """Hot-switch the active inference branch between whole-frame and tiling
-        (only valid when built with switchable_tiling). 4-step make-before-break
-        handover with zero command gap: open the incoming valve, wait for its first
-        output buffer, flip the input-selector's active-pad, then close the outgoing
-        valve. Same hef on both hailonets => no PCIe weight reload, only the steady
-        latency steps (whole ~100ms <-> tiled >200ms). Safe to call from any thread.
+    def switch_to_tier(self, target_i: int, warmup_timeout_s: float = 1.0) -> bool:
+        """Hot-switch the active inference branch to ladder tier `target_i` (only valid
+        when built with a >= 2 rung ladder). 4-step make-before-break handover with zero
+        command gap: open the incoming valve, wait for its first output buffer, flip the
+        input-selector's active-pad, then close the outgoing valve. Same hef on every
+        hailonet => no PCIe weight reload, only the steady latency step (more tiles =
+        more inferences per frame). Safe to call from any thread.
 
         GRACEFUL DEGRADATION (never strand the pipeline): if the incoming branch
         produces NO buffer within warmup_timeout_s, ABORT the switch — re-close the
@@ -443,39 +457,46 @@ class GStreamerApp:
         detections. A dead-branch switch would starve app_callback (DET FPS -> 0)
         with no recovery, and on this rig a stalled control loop can wreck hardware.
 
-        EXPECTED SIDE EFFECT — a switch TO tiling can drop a duplicate frame. Both valves
-        are open during the make-before-break window, so the same source frame travels
-        down both branches. The whole-frame branch is faster, so when the selector flips
-        onto the slower tile branch its in-flight buffer can carry a frame id the callback
-        has already seen; FrameOrderGuard rejects it and logs "Dropping out-of-order/
-        duplicate frame N (last=N)". It depends on where in the frame interval the flip
-        lands: one on-device run saw 6 drops across 9 ->TILING switches, another 0 across
-        2. Zero drops ever landed near a ->WHOLE switch — the fast branch only skips
-        forward. This is the guard doing its job, not a regression, so "order-drops == 0"
-        holds in steady state but is not guaranteed across handovers.
+        EXPECTED SIDE EFFECT — a switch to a MORE-tiled rung can drop a duplicate frame.
+        Both valves are open during the make-before-break window, so the same source frame
+        travels down both branches. The rung with fewer tiles is faster, so when the
+        selector flips onto the slower one its in-flight buffer can carry a frame id the
+        callback has already seen; FrameOrderGuard rejects it and logs "Dropping
+        out-of-order/duplicate frame N (last=N)". It depends on where in the frame interval
+        the flip lands: one on-device run saw 6 drops across 9 ->TILING switches, another 0
+        across 2. Zero drops ever landed near a switch toward whole-frame — the faster
+        branch only skips forward. This is the guard doing its job, not a regression, so
+        "order-drops == 0" holds in steady state but is not guaranteed across handovers.
 
-        Returns True if the active branch is the target after the call (including a
-        no-op when already there), False if the switch could not be performed.
+        Returns True if the active tier is target_i after the call (including a no-op
+        when already there), False if the switch could not be performed.
 
         Serialized by self._switch_lock: two callers interleaving their valve/selector
         set_property calls could leave the selector pointing at a shut-valve branch (a
         stall). Do NOT call this directly from application code — go through
         tiling_policy.TilingSwitchCoordinator.request(), which also keeps the policy's
-        view of the active branch in sync. The lock here is defense-in-depth."""
+        view of the active tier in sync. The lock here is defense-in-depth."""
         with self._switch_lock:
             sel = self.pipeline.get_by_name("branch_selector")
-            v_whole = self.pipeline.get_by_name("valve_whole")
-            v_tile = self.pipeline.get_by_name("valve_tile")
-            if sel is None or v_whole is None or v_tile is None:
-                logger.warning("switch_tiling: switchable-tiling pipeline not present; ignoring")
+            if sel is None:
+                logger.warning("switch_to_tier: ladder pipeline not present; ignoring")
                 return False
-            target_pad_name = "sink_1" if to_tiling else "sink_0"
+            target_pad_name = f"sink_{target_i}"
             cur = sel.get_property("active-pad")
-            if cur is not None and cur.get_name() == target_pad_name:
-                self._tiling_active = to_tiling
+            cur_name = cur.get_name() if cur is not None else None
+            if cur_name == target_pad_name:
+                self._active_tier = target_i
                 return True  # already there
-            incoming_valve = v_tile if to_tiling else v_whole
-            outgoing_valve = v_whole if to_tiling else v_tile
+            incoming_valve = self.pipeline.get_by_name(f"valve_tier{target_i}")
+            if incoming_valve is None:
+                logger.warning("switch_to_tier: no valve_tier%d in the pipeline; ignoring",
+                               target_i)
+                return False
+            # The outgoing valve is the currently-active tier's, derived from the active
+            # pad name ("sink_K" -> "valve_tierK") rather than from self._active_tier, so
+            # the pipeline itself is the source of truth even if our bookkeeping drifted.
+            outgoing_valve = (self.pipeline.get_by_name(cur_name.replace("sink_", "valve_tier"))
+                              if cur_name else None)
             target_pad = sel.get_static_pad(target_pad_name)
 
             incoming_valve.set_property("drop", False)        # 1. open incoming branch
@@ -487,48 +508,63 @@ class GStreamerApp:
             if not ready.wait(warmup_timeout_s) and not ready.is_set():
                 # Incoming branch never produced -> REVERT: re-close the valve we opened,
                 # keep the selector + outgoing valve on the branch that IS producing.
-                logger.warning("switch_tiling: incoming %s branch gave no buffer in %.1fs; "
+                logger.warning("switch_to_tier: incoming tier %d gave no buffer in %.1fs; "
                                "ABORTING switch, staying on %s",
-                               "TILING" if to_tiling else "WHOLE-FRAME", warmup_timeout_s,
-                               "WHOLE-FRAME" if to_tiling else "TILING")
+                               target_i, warmup_timeout_s, cur_name)
                 incoming_valve.set_property("drop", True)      # undo step 1
                 try: target_pad.remove_probe(probe_id)
                 except Exception: pass
                 return False
             sel.set_property("active-pad", target_pad)         # 3. flip selector (atomic)
-            outgoing_valve.set_property("drop", True)           # 4. idle the outgoing branch
-            self._tiling_active = to_tiling
-            logger.warning("!!! BRANCH SWITCH -> %s", "TILING" if to_tiling else "WHOLE-FRAME")
+            if outgoing_valve is not None:
+                outgoing_valve.set_property("drop", True)      # 4. idle the outgoing branch
+            self._active_tier = target_i
+            logger.warning("!!! BRANCH SWITCH -> tier %d (%s)", target_i,
+                           self._tier_label(target_i))
             return True
 
+    def _tier_label(self, i: int) -> str:
+        """"2x1" / "whole-frame" for logs; tolerates an unset ladder."""
+        if not self.ladder_grids or not (0 <= i < len(self.ladder_grids)):
+            return f"tier {i}"
+        tx, ty = self.ladder_grids[i]
+        return "whole-frame" if (tx, ty) == (1, 1) else f"{tx}x{ty}"
+
     @property
-    def tiling_active(self) -> bool:
-        """Branch the pipeline is actually on (False = whole-frame)."""
+    def active_tier(self) -> int:
+        """Ladder tier the pipeline is actually on."""
         with self._switch_lock:
-            return self._tiling_active
+            return self._active_tier
 
     def kill_tile_branch_for_test(self) -> bool:
         """FAULT INJECTION, harness only (--test-kill-tile-after-s).
 
-        Shut valve_tile while the input-selector is still pointing at it. The tile branch
-        has warmed up and been accepted, and now stops delivering — the exact failure the
-        warmup timeout cannot catch and BranchStallWatchdog exists to recover from. There
-        is no other way to produce it on demand: a real branch death needs the hailonet or
-        the cropper to wedge.
+        Shut the ACTIVE tiled rung's valve while the input-selector is still pointing at
+        it. That branch has warmed up and been accepted, and now stops delivering — the
+        exact failure the warmup timeout cannot catch and BranchStallWatchdog exists to
+        recover from. There is no other way to produce it on demand: a real branch death
+        needs the hailonet or the cropper to wedge.
 
-        Returns False (and does nothing) unless tiling is the active branch."""
+        Returns False (and does nothing) unless a TILED rung is active — killing
+        whole-frame would just starve the pipeline with nothing to fall back to."""
         with self._switch_lock:
             sel = self.pipeline.get_by_name("branch_selector")
-            v_tile = self.pipeline.get_by_name("valve_tile")
-            if sel is None or v_tile is None:
-                logger.warning("kill_tile_branch_for_test: switchable-tiling pipeline not present")
+            if sel is None:
+                logger.warning("kill_tile_branch_for_test: ladder pipeline not present")
                 return False
             cur = sel.get_property("active-pad")
-            if cur is None or cur.get_name() != "sink_1":
-                return False        # not on tiling; nothing to kill
-            v_tile.set_property("drop", True)
-            logger.error("!!! TEST FAULT INJECTION: shut valve_tile while the selector is on it. "
-                         "The tile branch is now dead; the watchdog should revert to whole-frame.")
+            if cur is None:
+                return False
+            whole_i = len(self.ladder_grids) - 1 if self.ladder_grids else 0
+            if cur.get_name() == f"sink_{whole_i}":
+                return False        # on whole-frame; nothing to kill
+            valve = self.pipeline.get_by_name(cur.get_name().replace("sink_", "valve_tier"))
+            if valve is None:
+                return False
+            valve.set_property("drop", True)
+            logger.error("!!! TEST FAULT INJECTION: shut %s while the selector is on it. "
+                         "That rung is now dead; the watchdog should revert to whole-frame.",
+                         valve.get_name())
             return True
 
     def _log_pipeline_health(self):
@@ -1384,8 +1420,8 @@ def display_user_data_frame(user_data: app_callback_class):
 
 class GStreamerDetectionApp(GStreamerApp):
     def __init__(self, app_callback, user_data, inference : Config.Inference, camera_settings : Config.Camera, parser=None,
-                 video_format=None, tiles=None, tiling_overlap=None, tile_iou_threshold=None,
-                 switchable_tiling=False, start_on_tiling=False):
+                 video_format=None, ladder_grids=None, tiling_overlap=None,
+                 tile_iou_threshold=None):
         if parser == None:
             parser = get_default_parser()
 
@@ -1418,21 +1454,21 @@ class GStreamerDetectionApp(GStreamerApp):
         # capsfilter matches what the picamera2 producer actually pushes.
         if video_format is not None:
             self.video_format = video_format
-        # Tile grid (tiles_x, tiles_y); 1×1 = whole-frame. From config.tiling / CLI.
-        if tiles is not None:
-            self.tiles_x, self.tiles_y = int(tiles[0]), int(tiles[1])
-        # Fractional tile overlap (0..1) for the hailotilecropper; only affects the
-        # tiled path (ignored for whole-frame). From config.tiling.overlap.
+        # Ladder grids [(tiles_x, tiles_y), ...], index 0 = most tiles, last = (1,1)
+        # whole-frame. From build_ladder(config.tiling); empty/None => plain whole-frame.
+        if ladder_grids:
+            self.ladder_grids = [(int(tx), int(ty)) for tx, ty in ladder_grids]
+        # Fractional tile overlap (0..1) for the hailotilecropper; only affects tiled
+        # rungs (ignored for whole-frame). From config.tiling.overlap.
         if tiling_overlap is not None:
             self.tiling_overlap = float(tiling_overlap)
-        # Seam dedup IoU for the hailotileaggregator; tiled path only.
+        # Seam dedup IoU for the hailotileaggregator; tiled rungs only.
         if tile_iou_threshold is not None:
             self.tile_iou_threshold = float(tile_iou_threshold)
-        # Switchable tiling: build whole-frame + tile branches behind valves +
-        # input-selector, hot-switchable at runtime. start_on_tiling picks which one is
-        # live at startup; both are read by create_pipeline() below, so set them first.
-        self.switchable_tiling = bool(switchable_tiling)
-        self.start_on_tiling = bool(start_on_tiling) and self.switchable_tiling
+        # A ladder with >= 2 rungs gets the hot-switchable N-branch pipeline; one rung
+        # (or none) is a plain single-branch whole-frame build. read by create_pipeline()
+        # below, so derive it before the pipeline is built.
+        self.switchable_tiling = bool(self.ladder_grids and len(self.ladder_grids) >= 2)
         # Set Hailo parameters these parameters should be set based on the model used
         self.batch_size = 1
         # Model + NMS come from config.inference (config.yaml); CLI --hef-path /
@@ -1565,19 +1601,25 @@ class GStreamerDetectionApp(GStreamerApp):
         )
 
         if self.switchable_tiling:
-            whole_branch = _inference_branch('whole', 1, 1, share_device=True)
-            tile_branch = _inference_branch('tile', self.tiles_x, self.tiles_y, share_device=True)
-            detection_section = SWITCHABLE_DETECTION_SECTION(
-                whole_branch, tile_branch, start_on_tiling=self.start_on_tiling)
-            # The detection-start stamp belongs on whichever branch is live at startup
-            # (libcamera source path only — see _install_detection_start_probe).
-            self.detection_start_probe_element = (
-                'tile_wrapper_input_q' if self.start_on_tiling else 'whole_wrapper_input_q')
+            # One valve-gated branch per ladder rung, sharing the source through a tee and
+            # merging at one input-selector. The whole-frame rung (last) is live at
+            # startup; switch_to_tier() opens the incoming valve, waits for its first
+            # buffer, flips the selector, then closes the old valve — zero command gap.
+            # Same hef on every hailonet (shared vdevice) => no PCIe weight reload.
+            detection_section = build_switchable_detection_section(
+                self.ladder_grids,
+                lambda name, tx, ty: _inference_branch(name, tx, ty, share_device=True),
+                QUEUE,
+            )
+            # The detection-start stamp belongs on the branch that is live at startup —
+            # the whole-frame rung (libcamera source path only, see
+            # _install_detection_start_probe).
+            self.detection_start_probe_element = f'tier{len(self.ladder_grids) - 1}_wrapper_input_q'
         else:
-            # Single-branch path keeps the historic 'inference'/'inference_wrapper'
-            # element names (latency probes + health logs reference them).
-            detection_pipeline_wrapper = _inference_branch('inference', self.tiles_x, self.tiles_y,
-                                                           share_device=False)
+            # Single-branch path: plain whole-frame. Keeps the historic
+            # 'inference'/'inference_wrapper' element names (latency probes + health
+            # logs reference them).
+            detection_pipeline_wrapper = _inference_branch('inference', 1, 1, share_device=False)
             detection_section = f'{detection_pipeline_wrapper} ! '
             self.detection_start_probe_element = 'inference_wrapper_input_q'
 
