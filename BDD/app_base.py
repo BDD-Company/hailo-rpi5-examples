@@ -1402,6 +1402,16 @@ class GStreamerDetectionApp(GStreamerApp):
         # this in run(); set here at construction so self.camera_settings is always
         # present (the base __init__ defaults it to None as a backstop).
         self.camera_settings = camera_settings
+        # Resolution is owned by config.camera. The base __init__ seeds
+        # self.video_width/height with a 1280x720 placeholder, but those are what
+        # SOURCE_PIPELINE's capsfilter is built from (and, on the no-switcher path,
+        # what the picamera producer captures at) — while the appsrc caps and the
+        # switcher producer read config.camera. Leave them out of sync and every
+        # resolution except the placeholder dies at negotiation with
+        # "caps ... not accepted" -> Internal data stream error.
+        if camera_settings is not None:
+            self.video_width = int(camera_settings.width)
+            self.video_height = int(camera_settings.height)
         # Additional initialization code can be added here
         # Pipeline pixel format (camera capture + appsrc caps). Defaults to RGB;
         # config.camera.video_format (e.g. NV12) flows in here so SOURCE_PIPELINE's
