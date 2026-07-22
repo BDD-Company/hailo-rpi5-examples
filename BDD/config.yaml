@@ -49,18 +49,25 @@ tiling:
   tile_iou_threshold: 0.4
   # Run the size+loss policy automatically. When false the pipeline is still built
   # (if the ladder has >= 2 rungs) but only --test-switch-s drives switching.
-  auto_switch: false
+  # Requires bytetrack.enabled: true — the size comes from MATCHED tracks.
+  auto_switch: true
   # Target-lost escalation (seconds): drop to the rung above whole after lost_to_2x1_s
-  # of no matched track, then to tier 0 (most tiles) after lost_to_3x2_s.
+  # of no matched track, then to tier 0 (most tiles) after lost_to_3x2_s. This also
+  # covers startup: at boot nothing is matched, so the ladder walks down on its own.
   lost_to_2x1_s: 1.0
   lost_to_3x2_s: 10.0
   # Size-driven ladder. side = max(bbox_w, bbox_h) of the tracked target (0..1).
   # Climb toward whole when side >= up_side; descend toward more tiles when
-  # side < down_side. Last rung MUST be 1x1. Uncomment + set auto_switch: true to use.
-  # ladder:
-  #   - {tiles_x: 3, tiles_y: 2, up_side: 0.05}
-  #   - {tiles_x: 2, tiles_y: 1, up_side: 0.10, down_side: 0.02}
-  #   - {tiles_x: 1, tiles_y: 1, down_side: 0.05}
+  # side < down_side. Last rung MUST be 1x1; tile counts must strictly decrease.
+  #
+  # LATENCY per rung (measured e2e p50, file input): 1x1 60ms, 2x1 90ms, 2x2 217ms,
+  # 3x2 297ms. Only <=2x1 holds 30fps under the ~200ms control budget, so 3x2 is a
+  # REACQUIRE rung — the size thresholds keep it for a target too small to steer by
+  # anyway, and the loss timer only reaches it after 10s of seeing nothing.
+  ladder:
+    - {tiles_x: 3, tiles_y: 2, up_side: 0.05}
+    - {tiles_x: 2, tiles_y: 1, up_side: 0.10, down_side: 0.02}
+    - {tiles_x: 1, tiles_y: 1, down_side: 0.05}
 
   # Post-switch watchdog (ladders with >= 2 rungs). The handover already refuses to move
   # onto a rung that never warms up; this catches a rung that warms up and LATER dies
