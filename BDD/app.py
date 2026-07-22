@@ -276,6 +276,27 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
     detection_start_timestamp_ns  = normalized_timestamp(buffer.get_reference_timestamp_meta(unix_timestamp_caps))
     detection_end_timestamp_ns  = time.monotonic_ns()
 
+    # File input (filesrc -> qtdemux -> identity sync=true) carries none of the
+    # producer's timestamp metas, so without this StageB records nothing and the
+    # controller's "e2e" silently collapses to stageC. Reconstruct the instant the
+    # pace identity released this buffer — base_time + running_time(PTS) — which is
+    # the file-path analogue of the capture timestamp. GstSystemClock runs on
+    # CLOCK_MONOTONIC, the same domain as time.monotonic_ns(), so the deltas are
+    # directly comparable.
+    if detection_start_timestamp_ns == 0 and buffer.pts != Gst.CLOCK_TIME_NONE:
+        try:
+            _seg_event = pad.get_sticky_event(Gst.EventType.SEGMENT, 0)
+            _element = pad.get_parent_element()
+            if _seg_event is not None and _element is not None:
+                _running_time = _seg_event.parse_segment().to_running_time(
+                    Gst.Format.TIME, buffer.pts)
+                _base_time = _element.get_base_time()
+                if (_running_time != Gst.CLOCK_TIME_NONE
+                        and _base_time != Gst.CLOCK_TIME_NONE):
+                    detection_start_timestamp_ns = _base_time + _running_time
+        except Exception:
+            pass  # measurement aid only — never let it take down the frame path
+
     # Stage-A/B latency: record before the fallbacks below zero the deltas out.
     _sensor_present = sensor_timestamp_ns != 0
     _push_present = detection_start_timestamp_ns != 0
