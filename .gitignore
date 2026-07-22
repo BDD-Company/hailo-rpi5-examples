@@ -169,3 +169,9 @@ benchmark/
 .claude/
 # Local test recordings (large videos/logs, not for VCS)
 recordings/
+
+# graphify knowledge graph output (generated, 18M)
+graphify-out/
+
+# local pip freeze artifact
+requirements.txt_INSTALLED
