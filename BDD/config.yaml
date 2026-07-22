@@ -3,22 +3,24 @@
 # their bounds are enforced at load time; unknown keys are reported as errors.
 # XY values are written as [x, y].
 
-confidence_min: 0.4
-confidence_move: 0.3
+confidence_min: 0.35
+confidence_move: 0.35
 
 aim_point: [0.5, 0.5]
+
 aim_point_max_offset: [0.5, 0.6]
 
 # target_size_m: [0.2, 0.2]    # balloon
-target_size_m: [2, 2]          # large balloon
-# target_size_m: [1.2, 1.2]    # shahed small
-# target_size_m: [3.5, 2.5]    # shahed large
+# target_size_m: [1.5, 1.5]          # large balloon
+# target_size_m: [1.2, 1.2]    # shahed small1
+target_size_m: [3.5, 2.5]    # shahed large
+# target_size_m: [2000000, 2000000]    # sun
 
 follow_target_position_ned: false
 
 # Record the camera feed to ./_DEBUG/RAW_*.mkv (software x264enc, ~1 CPU core).
 # Set false (or pass --no-record) to free CPU for inference/tiling.
-record_videos: false
+record_videos: true
 
 # Hailo inference: detection model + NMS post-processing. hef_model_path must
 # point to an EXISTING .hef on the machine running the app (deployed under
@@ -27,7 +29,7 @@ inference:
   # NOTE (feat/bytetrack-locking-eval): this scene is pink BALLS, so we run the
   # verified NV12+HAILO8 ball detector rather than the red-plate model referenced
   # on main (which is HAILO8L/NHWC — wrong arch for this Hailo-8 box anyway).
-  hef_model_path: /home/bdd/models/2026-04-09_11n_ball_v3_nv12_h8.hef
+  hef_model_path: /home/bdd/models/2026-06-02_red-plate_v4_NV12+H8.hef
   nms_score_threshold: 0.3
   nms_iou_threshold: 0.45
   # labels_json: /home/bdd/models/labels.json
@@ -53,7 +55,7 @@ tiling:
   # Runtime-switchable tiling: build BOTH a whole-frame branch and a tiles_x×tiles_y
   # branch behind valves + an input-selector, hot-switchable at runtime. Implied by
   # auto_switch and by start_on_tiling, so it does not need to be set separately.
-  switchable: false
+  switchable: true
 
   # Boot on the TILE branch instead of whole-frame (implies switchable). The first frames
   # are inferred at 2×1 tiling's small-object recall, so a distant target is acquired
@@ -84,7 +86,7 @@ tiling:
   #     P=0 ignores misses entirely; P >= locked_frames_to_whole restores reset-on-miss.
   auto_switch: true
   lost_frames_to_tile: 10
-  locked_frames_to_whole: 20
+  locked_frames_to_whole: 100
   locked_streak_miss_penalty: 2
   switch_conf: 0.4
 
@@ -98,10 +100,10 @@ tiling:
   stall_cooldown_s: 30.0
 
 thrust:
-  cruise: 0.9
+  cruise: 0.8
   hover: 0.5
   min: 0.4
-  max: 0.95
+  max: 0.9
 
   dynamic: false
   # Optional sub-section: set `enabled: false` to disable (section still validated).
@@ -111,7 +113,7 @@ thrust:
     medium_distance_m: 20
     medium_coeff: 0.9
     near_distance_m: 10
-    near_coeff: 1.1
+    near_coeff: 1.2
 
 target_lost:
   repeat_same_commands_frames: 1   # keep emitting last command for this many lost frames before fading
@@ -142,10 +144,10 @@ optical_refinement:
   adjust_aim_point_at_edge_of_frame_max_size: 0.25   # w*h, e.g. w=0.5, h=0.5, size=0.25
 
 pd_coeff:
-  p: [8, 2]          # per-axis P gain (x, y)
+  p: [4, 2]          # per-axis P gain (x, y)
   d: 0
-  p_min: [0.5, 0.25]
-  p_max: [4, 2]
+  p_min: [0.9, 0.75]
+  p_max: [8, 4]
 
   # Dynamically adjust P coeff based on target size.
   p_dynamic: false
@@ -168,19 +170,19 @@ pd_coeff:
   # Applied LAST of all P modifications, then clamped into [p_min, p_max].
   # Optional sub-section: OMIT it entirely to disable.
   speed_reduction:
-    enabled: true
+    enabled: false
     start_speed_ms: 15.0   # at or below this speed, P is untouched
     coeff: 0.947           # per-step multiplier, 0..1 (1.0 = no reduction)
     speed_step_ms: 1.0     # one reduction step, m/s
 
 takeoff:
-  delay_until_n_detection_frames: 10
+  delay_until_n_detection_frames: 5
   #TODO: change from nanoseconds to miliseconds
-  duration_ns: 500000000           # initial "safe" takeoff window
+  duration_ns: 1000000000           # initial "safe" takeoff window
   # starting from platform with guides, make sure that initial takeoff is almost perpendicular
   # and we don't hit the guides with props.
-  pd_coeff_p: [0.1, 0.1]
-  thrust: 1.0 # max speed just to get off the rails
+  pd_coeff_p: [0.2, 0.2]
+  thrust: 0.9 # max speed just to get off the rails
 
 # Multi-camera support. The shared caps (width/height/fps/video_format/
 # active_id/switch_to_wide_size/switch_to_zoom_size) apply to ALL cameras (a
@@ -228,7 +230,7 @@ camera:
     - camera_id: 0
       name: wide
       sensor_index: 0          # Picamera2 camera_num -> ov5647
-      frame_angular_size_deg: [107, 85]
+      frame_angular_size_deg: [90, 65]
     # - camera_id: 1
     #   name: zoom
     #   sensor_index: 1          # Picamera2 camera_num -> imx477
@@ -287,7 +289,7 @@ bytetrack:
   # ── Phase-2 target noise reduction (default OFF; A/B on the replay corpus before
   # enabling — see BDD/experiments/2026-07-12-target-estimate-noise-reduction-design.md).
   # Both are disabled at the values below; delete or flip them to turn the filter on.
-  use_kalman_bbox: false          # true: matched detections use the tracker's smoothed
+  use_kalman_bbox: true          # true: matched detections use the tracker's smoothed
                                   # (Kalman) bbox instead of the raw detector rect
   measurement_noise_floor: null   # e.g. 0.02: lower bound on the Kalman measurement std
                                   # (normalised). Makes the filter distrust small far
@@ -311,4 +313,4 @@ ulog_trace:
   #   0    = uncapped: one record per control-loop iteration (one frame each).
   #   <=50 = every record is written by the FC in full.
   # Above ~195/s the PX4 logger silently discards most of them — see config.py.
-  rate_hz: 5.0
+  rate_hz: 0
