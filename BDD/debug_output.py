@@ -182,10 +182,10 @@ def draw_detection(frame, detection : Detection, color, special_point = None, li
     if detection.track_id is not None:
         draw_text(frame,
             f"#{detection.track_id}",
-            bbox.min_point + XY(0, -16),
+            bbox.min_point + XY(16, -4),
             font_scale = 0.5,
             color = NEUTRAL_RECT_COLOR,
-            bg_color = shadow_color(NEUTRAL_RECT_COLOR),
+            # bg_color = shadow_color(NEUTRAL_RECT_COLOR),
             line_width = 1
         )
 
