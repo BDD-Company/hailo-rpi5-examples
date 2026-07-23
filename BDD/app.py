@@ -603,6 +603,24 @@ def _stop_debug_output(output_queue):
     output_queue.put(DEBUG_OUTPUT_STOP)
 
 
+def _vision_only_debug_feed(detections_queue, output_queue):
+    """Feed the debug-overlay window (debug_output_thread -> OpenCVShowImageSink) in
+    --vision-only mode, where there is no control thread to fill output_queue.
+
+    Normally the controller puts a rich dict (aim point, selected target, telemetry) on
+    output_queue; with no controller the debug window would block forever on an empty
+    queue. Mirror each Detections the callback produces into output_queue as a minimal
+    dict. annotate_frame_with_detection_info degrades gracefully: given only 'detections'
+    it draws the detection boxes (aim-point/target-selection overlays need the controller).
+    Exits on the same STOP sentinel the callback path uses at shutdown."""
+    while True:
+        det = detections_queue.get()
+        if det is STOP:
+            output_queue.put(DEBUG_OUTPUT_STOP)
+            return
+        output_queue.put({'detections': det})
+
+
 def preview_sink_name() -> str:
     """GStreamer sink element for the --preview window. See get_output_pipeline_string
     for why Wayland must not get autovideosink. Shared with main() so the startup log
@@ -767,6 +785,12 @@ def main():
     # for inference/tiling).
     no_record_flag = _pop_flag(sys.argv, "--no-record")
 
+    # --record-debug: record the ANNOTATED overlay video (debug_*.mkv) for later reference,
+    # even with the raw recording off. This is ONE encoder (the overlay), so you can pair it
+    # with --no-record to keep the second (raw RAW_*.mkv) encoder off and still capture the
+    # decision overlay. Independent of record_videos below.
+    record_debug_flag = _pop_flag(sys.argv, "--record-debug")
+
     # --preview: also show the incoming camera video in a live window. Opt-in because
     # it needs a display; on a headless bench run without it (see the
     # "app.py --preview (DISPLAY=:0)" launch config).
@@ -811,7 +835,7 @@ def main():
     # With size 1 the callback overwrites, so get() returns the latest frame and stale
     # frames are dropped instead of queued (same drop count, but keeps new not old).
     detections_queue = OverwriteQueue(maxsize=1)
-    output_queue = OverwriteQueue(maxsize=200)
+    output_queue = OverwriteQueue(maxsize=2)
 
 
     event = threading.Event()
@@ -1128,6 +1152,14 @@ def main():
         # The pipeline normally waits for the controller to signal readiness on
         # `event`; with no controller, set it now so app.run() starts capture.
         event.set()
+        # No controller => nothing fills output_queue that the debug-overlay window draws
+        # from. Mirror the callback's detections into it so the DEBUG IMAGE window still
+        # shows (detection boxes only; aim-point/target overlays need the controller).
+        threading.Thread(
+            target=_vision_only_debug_feed,
+            args=(detections_queue, output_queue),
+            name="VisionDebugFeed", daemon=True,
+        ).start()
     elif app.options_menu.action == 'platform':
         action_thread = threading.Thread(
             target = platform_controlling_thread,
@@ -1190,28 +1222,36 @@ def main():
         action_thread.start()
     app.add_shutdown_callback(lambda: detections_queue.put(STOP))
 
+    debug_sink = MultiSink()
     # Debug overlay recorder (debug_*.mkv): draws detection annotations
     # (annotate_frame_with_detection_info) AND runs a SECOND software x264enc — a full
-    # Cortex-A76 core on Pi5 (no HW H264 encoder), on EVERY control-loop frame. Gate it
-    # on record_videos so --no-record / record_videos=False frees BOTH encoders. It was
-    # previously always-on, which defeated --no-record's "free a core" purpose and added
-    # e2e latency by pinning the core the GIL-bound control loop needs. output_queue is a
-    # bounded OverwriteQueue, so with the drain thread off the control thread's puts just
-    # overwrite (no leak); the queue put itself is a cheap dict of references.
+    # Cortex-A76 core on Pi5 (no HW H264 encoder), on EVERY control-loop frame. Gated on
+    # record_videos (full recording) OR --record-debug (overlay only, raw off) so a plain
+    # run frees BOTH encoders. It was previously always-on, which defeated --no-record's
+    # "free a core" purpose and added e2e latency by pinning the core the GIL-bound control
+    # loop needs. output_queue is a bounded OverwriteQueue, so with the drain thread off the
+    # control thread's puts just overwrite (no leak); the queue put is a cheap dict of refs.
     output_thread = None
-    if record_videos:
-        sink = MultiSink([
-            # RtspStreamerSink(30, 8554),
+    if record_videos or record_debug_flag:
+        logger.info("!!! DEBUG overlay recording: ENABLED (debug_*.mkv)")
+        debug_sink.append(
             RecorderSink(30,
                 "./_DEBUG",
                 segment_seconds=10,
                 filename_base=f"debug_{start_time_str}",
-            ),
-            # OpenCVShowImageSink(window_title='DEBUG IMAGE')
-        ])
+            )
+        )
+
+    # Show whole annotated frame
+    if True:
+        debug_sink.append(
+            OpenCVShowImageSink(window_title='DEBUG IMAGE')
+        )
+    
+    if len(debug_sink) > 0:
         output_thread = threading.Thread(
             target = debug_output_thread,
-            args = (output_queue, sink),
+            args = (output_queue, debug_sink),
             name="DEBUG"
         )
         output_thread.start()

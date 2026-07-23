@@ -17,7 +17,11 @@ class OpenCVShowImageSink(FrameSinkInterface):
         self._input_handler = input_handler
         # self._fps_counter = FPSCounter()
         self._fps_hint = fps_hint
-        self._frame_queue = queue.Queue()
+        # Bounded on purpose: a live display shows the NEWEST frame; if cv2.imshow can't
+        # keep up with the producer (e.g. slow over VNC) we DROP stale frames rather than
+        # buffer them. The old unbounded queue.Queue() grew ~2.6MB/frame and exhausted RAM
+        # in ~90s -> OOM -> the whole pipeline (camera included) stalled and the app aborted.
+        self._frame_queue = queue.Queue(maxsize=2)
         self._display_thread = None
 
 
@@ -31,7 +35,14 @@ class OpenCVShowImageSink(FrameSinkInterface):
 
 
     def stop(self):
-        self._frame_queue.put_nowait(None)
+        # Drain first so the None sentinel always fits in the bounded queue even when the
+        # display thread is behind (a full queue would make put_nowait(None) raise).
+        try:
+            while True:
+                self._frame_queue.get_nowait()
+        except queue.Empty:
+            pass
+        self._frame_queue.put(None)
         if self._display_thread is not None:
             self._display_thread.join()
 
@@ -45,7 +56,20 @@ class OpenCVShowImageSink(FrameSinkInterface):
         if frame is None:
             return
 
-        self._frame_queue.put(frame)
+        # Latest-frame-wins: never block or grow unbounded. If the display is behind, drop
+        # the stale queued frame and enqueue the newest. (Prevents the OOM described in
+        # __init__.)
+        try:
+            self._frame_queue.put_nowait(frame)
+        except queue.Full:
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._frame_queue.put_nowait(frame)
+            except queue.Full:
+                pass
 
 
     def __display_thread_func(self, frame_size):
@@ -61,7 +85,11 @@ class OpenCVShowImageSink(FrameSinkInterface):
                     break
 
                 frame_id += 1
-                cv2.imshow(self._window_name, frame)
+                # Frames arrive RGB (annotate_frame_with_detection_info builds the canvas
+                # via to_rgb; the recorder sink declares caps=RGB). cv2.imshow's convention
+                # is BGR, so without this swap red<->blue are exchanged (a pink ball reads
+                # blue). GStreamer sinks respect the declared caps and need no swap.
+                cv2.imshow(self._window_name, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
                 # cv2.setWindowTitle(self._window_name, f"{self._window_title} zoom: {frame.metadata.zoom_factor} FPS: {current_fps}")
                 key = cv2.waitKeyEx(int(1000 / (self._fps_hint * 2)))
                 # if key == -1:
