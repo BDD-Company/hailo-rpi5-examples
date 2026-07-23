@@ -46,16 +46,13 @@ class FrameOrderGuard:
         from a lower value and nothing upstream is stale — today that is the file
         source's loop rewind (``GStreamerApp.on_eos``).
 
-        This is defensive, not a fix for an observed failure. Which id a rewind
-        restarts depends on which source ``normalized_frame_id`` lands on, and the
-        two behave differently: ``buffer.offset`` (what the file path actually gets)
-        was measured to keep counting straight through the seek — one clean rewind
-        at 120s, ids ran on to 4335 with no restart — so the guard never rejects and
-        this reset changes nothing. Its lower-priority fallback ``buffer.pts`` DOES
-        restart at 0 on a flush seek, and that case would be silent and total: the
-        mark stays at the end of the previous pass, every later pass is rejected in
-        full, and the app runs on permanently blind. Cheap insurance against landing
-        on that path.
+        LOAD-BEARING on the file path. ``normalized_frame_id`` derives the file-input
+        id from ``buffer.pts`` (as a frame index) because that is the only
+        branch-independent id that survives the tile aggregator (``buffer.offset`` is
+        stamped per branch and restarts low on every tiling switch). ``buffer.pts``
+        restarts at 0 on the loop's flush seek, so without this reset the mark would
+        stay at the end of the previous pass, every later pass would be rejected in
+        full, and the app would run on permanently blind.
 
         Safe only because the rewind uses a FLUSH seek, which drops in-flight
         buffers: no frame from the previous generation can still arrive and be
@@ -68,3 +65,41 @@ class FrameOrderGuard:
     def last(self, camera_id: int) -> int | None:
         """Last accepted frame id for ``camera_id`` (None if none yet)."""
         return self._last_by_camera.get(camera_id)
+
+
+def resolve_frame_id(frame_meta_ts, pts, offset, frame_duration_ns):
+    """Pick the per-frame id fed to BOTH :class:`FrameOrderGuard` and ByteTracker.
+
+    That id has two hard requirements:
+
+    * **branch-independent** -- the same source frame must resolve to the same id no
+      matter which tiling rung produced the buffer, or a branch switch re-blinds the
+      guard (measured 53% of frames dropped: the per-branch ``buffer.offset`` restarts
+      low whenever a valve reopens, so the shared guard rejects the whole catch-up
+      window as reorders);
+    * **~1 per frame** -- ByteTracker's ``track_buffer`` expiry counts frame_id
+      DIFFERENCES, not wall time (see ``BYTETracker.update``), so the id must step by
+      ~1 per frame.
+
+    The only buffer property that is both is ``buffer.pts``: it survives the hailo tile
+    aggregator (which rebuilds tiled frames into a fresh buffer that DROPS custom
+    reference metas) and is identical for a given source frame on every rung. But raw
+    pts is nanoseconds -- it jumps ~3e7 per frame and would break ByteTracker -- so we
+    divide by the frame duration to get a real frame index.
+
+    Priority: producer frame-id meta (survives only a 1x1/whole-frame branch) ->
+    pts-as-frame-index -> raw offset (per-branch; last resort when pts can't be indexed)
+    -> None (caller substitutes a wallclock id). All arguments are plain ints or None
+    (the app.py wrapper maps the GStreamer NONE sentinels to None), keeping this pure
+    and host-testable.
+
+    Note the pts index restarts at 0 on a file-loop flush seek; ``on_stream_rewound``
+    handles that by resetting the guard.
+    """
+    if frame_meta_ts is not None:
+        return frame_meta_ts
+    if pts is not None and frame_duration_ns:
+        return round(pts / frame_duration_ns)
+    if offset is not None:
+        return offset
+    return None

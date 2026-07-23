@@ -129,6 +129,32 @@ often enough to make it dominate. NOT yet reproduced on main. **Camera path is b
 
 ---
 
+> **UPDATE 2026-07-23 — FIXED & RIG-CONFIRMED. Fix (b) buffer.pts, NOT the source-side probe.**
+> The §5 recommendation (stamp a branch-independent reference meta pre-tee) was built and
+> **FAILED on the rig**: the `hailotileaggregator` rebuilds each tiled frame into a fresh buffer
+> that DROPS custom reference metas (survives only the 1x1 passthrough), so tiled rungs still fell
+> back to per-branch `buffer.offset` (`frame 1 ... last=960` after a switch). **Reference metas do
+> not survive the tile aggregator — a wrong assumption in §5.**
+>
+> The id that DOES survive AND is branch-independent is **`buffer.pts`**. Raw pts breaks
+> ByteTracker (its `track_buffer` counts frame_id deltas, needs ~1/frame), so the id is a
+> **pts-derived frame INDEX** `round(pts/frame_duration_ns)` — §5 option A after all. Impl: pure
+> `resolve_frame_id()` in `frame_order.py`; `normalized_frame_id` is a thin Gst adapter taking
+> `user_data.source_frame_duration_ns` (set in `main()` from `config.camera.fps`). `SourceFrameCounter`
+> /probe deleted. `on_stream_rewound -> guard.reset()` is now LOAD-BEARING (pts restarts at 0/loop).
+>
+> **Rig result (clean_720.mp4, 8 switches, ~5400 frames): out-of-order drops 7099 -> 4**, all 4 are
+> `frame N (last=N)` exact duplicates at the make-before-break handover (guard doing its job), NOT
+> blinding. Frame ids continuous across every switch, no restart. Tracking intact
+> (`DETS n=1 maxconf=0.81 tracks=1`, `primary_side` climbing). 0 stalls/tracebacks. Host suite 355
+> pass, pylint 10/10.
+>
+> **CAMERA PATH VERIFIED (live imx477, same rig).** Forced switches (`--test-switch-s 4`, empty scene,
+> `auto_switch:false`, no `--input` => `-i rpi`): **48 whole<->tiled switches -> 10 drops (0.2% of 4840
+> frames), all benign handover dups/off-by-one**, ids continuous across every switch incl. tiled->whole.
+> Note: on camera the whole rung uses the picamera frame-id meta (`frame_count`) and tiled rungs use
+> the pts-index — they track within <=1 frame at 30fps, so mixing schemes across a switch never blinds.
+
 ## 5. RECOMMENDED FIX (the pending todo)
 
 Stamp a **branch-independent frame id on the source, before `branch_src_tee`**, into the same
@@ -247,7 +273,9 @@ burst law: each burst's length ≈ (time the other branch was active) × 30fps, 
 
 ## 8. Remaining work (priority order)
 
-1. **[BLOCKER] Source-side frame-id probe** (§5). Redeploy, re-run §7, confirm drops ~0.
+1. **[BLOCKER — DONE & RIG-CONFIRMED 2026-07-23]** Frame-id fix landed via pts-derived index
+   (`resolve_frame_id`); NOT the source-side probe (that failed — aggregator drops metas). Rig:
+   out-of-order drops 7099 -> 4 (all benign handover duplicates), tracking intact. See §5 UPDATE.
 2. **Log `primary_side` at the switch decision** so threshold correctness is verifiable.
 3. **Re-verify threshold correctness** on the clean clip after 1–2 (climb at side≥up, descend at
    side<down, one step per decision, hysteresis holds — the dead-band walk that the branch never
@@ -262,8 +290,9 @@ burst law: each burst's length ≈ (time the other branch was active) × 30fps, 
    1×1/2×1/2×2/3×2; only ≤2×1 holds the ~200ms control budget). 3×2 is defensible ONLY as a
    reacquire rung. User chose to ship 3×2→2×1→1×1; revisit if the eval shows the 3×2 rung is
    never usefully reached or costs too much when it is.
-8. **Camera-path (live) run** to confirm the blinding is truly file-input-only, and a real
-   hysteresis walk with a physically moving target.
+8. **Camera-path (live) run** — DONE 2026-07-23 (imx477, forced switches, 48 switches -> 10 benign
+   drops, no blinding; see §5 UPDATE). STILL TODO: a real hysteresis walk with a physically moving
+   target (this run used an empty scene + `--test-switch-s`, so auto-switch thresholds are unexercised).
 9. **Finish the branch:** decide merge/PR for `fix/tiling-bbox-double-remap` (6 commits incl. the
    uncommitted-work snapshot) AND `feat/tiling-ladder`. Nothing is pushed. The `84140ea` config
    snapshot is a rig-tuning snapshot, NOT validated — flag before merging to main.

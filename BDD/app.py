@@ -32,7 +32,7 @@ from bytetrack import BYTETracker
 from helpers import FrameMetadata, Rect, XY,  Detection, Detections, MoveCommand, STOP, kalman_or_raw_bbox
 from helpers import CameraConfig, CameraSwitcher, DEFAULT_CAMERA_ID
 from frame_utils import Frame
-from frame_order import FrameOrderGuard
+from frame_order import FrameOrderGuard, resolve_frame_id
 from config import Config
 from dataclasses import asdict, replace
 from OverwriteQueue import OverwriteQueue
@@ -64,6 +64,11 @@ class user_app_callback_class(app_callback_class):
         super().__init__()
         self.detections_queue = detections_queue
         self.tracker = tracker
+
+        # ns-per-frame used to turn the branch-independent buffer.pts into a ~1-per-frame
+        # index (see normalized_frame_id / frame_order.resolve_frame_id). Set by main()
+        # from config.camera.fps; None => the id falls back to the per-branch buffer.offset.
+        self.source_frame_duration_ns = None
 
         # Runtime tiling-ladder switching. The decision lives in the pure, unit-tested
         # TilingLadderPolicy; the serialization in TilingSwitchCoordinator. This class
@@ -134,27 +139,21 @@ def normalized_timestamp(ts):
     else:
         return 0
 
-def normalized_frame_id(buffer: Gst.Buffer, frame_meta) -> int:
-    """Return a stable per-frame identifier suitable for deduplication.
+def normalized_frame_id(buffer: Gst.Buffer, frame_meta, frame_duration_ns=None) -> int:
+    """Return a stable, branch-independent, ~1-per-frame identifier for this buffer.
 
-    Priority:
-      1. Picamera2 frame-id reference timestamp meta (appsrc / rpi path)
-      2. buffer.offset — libcamerasrc sets this to the frame sequence number
-      3. buffer.pts   — always set by libcamerasrc; unique per frame
-      4. time.monotonic_ns() — last resort; unique per call, dedup won't fire
+    Thin GStreamer adapter around frame_order.resolve_frame_id: map the buffer's GST
+    NONE sentinels to plain None, delegate the priority logic (producer meta ->
+    pts-as-frame-index -> offset), and substitute a wallclock last resort when nothing
+    identifies the frame. `frame_duration_ns` (from config.camera.fps, via user_data)
+    is what turns the branch-independent pts into a frame index; see resolve_frame_id
+    for why pts -- not the per-branch buffer.offset -- is the id the tiled path needs.
     """
-    if frame_meta is not None:
-        return frame_meta.timestamp
-
-    offset = buffer.offset
-    if offset != Gst.BUFFER_OFFSET_NONE:
-        return int(offset)
-
-    pts = buffer.pts
-    if pts != Gst.CLOCK_TIME_NONE:
-        return int(pts)
-
-    return time.monotonic_ns()
+    meta_ts = frame_meta.timestamp if frame_meta is not None else None
+    pts = None if buffer.pts == Gst.CLOCK_TIME_NONE else int(buffer.pts)
+    offset = None if buffer.offset == Gst.BUFFER_OFFSET_NONE else int(buffer.offset)
+    fid = resolve_frame_id(meta_ts, pts, offset, frame_duration_ns)
+    return fid if fid is not None else time.monotonic_ns()
 
 
 # Strict per-camera frame-order invariant for the inference/tracker path. Frames
@@ -308,7 +307,8 @@ def app_callback(pad: Gst.Pad, info: Gst.PadProbeInfo, user_data : user_app_call
         (detection_end_timestamp_ns - detection_start_timestamp_ns) / 1e6 if _push_present else None,
     )
 
-    frame_id = normalized_frame_id(buffer, buffer.get_reference_timestamp_meta(frame_id_caps))
+    frame_id = normalized_frame_id(buffer, buffer.get_reference_timestamp_meta(frame_id_caps),
+                                   getattr(user_data, "source_frame_duration_ns", None))
     camera_id = _read_camera_id(buffer)
 
     # Picamera2 metadata absent when using libcamerasrc; fall back to wall-clock time
@@ -492,12 +492,12 @@ class App(GStreamerDetectionApp):
 
 
     def on_stream_rewound(self):
-        # Defensive; see FrameOrderGuard.reset. In practice file input gets its ids from
-        # buffer.offset, which counts straight through the rewind rather than restarting,
-        # so the guard would accept the new pass regardless and this changes nothing. It
-        # matters only if normalized_frame_id ever falls through to buffer.pts, which
-        # DOES restart at 0 on a flush seek and would otherwise leave the run silently
-        # blind for every pass after the first.
+        # LOAD-BEARING on the file path. File input derives its frame id from buffer.pts
+        # (normalized_frame_id turns pts into a frame index), which restarts at 0 on the
+        # loop's flush seek. Without this reset the guard's high-water mark would stay at the
+        # end of the previous pass and reject every frame of every later pass, leaving the run
+        # silently blind. The flush seek drops in-flight buffers, so resetting here cannot
+        # admit a stale pre-rewind frame. See FrameOrderGuard.reset.
         logger.info("Video looped; resetting frame-order guard for the new pass.")
         frame_order_guard.reset()
 
@@ -927,6 +927,14 @@ def main():
 
     user_data = user_app_callback_class(detections_queue, bytetracker)
     user_data.use_frame = True
+
+    # Frame duration (ns) that turns the branch-independent buffer.pts into a ~1-per-frame
+    # id in normalized_frame_id — the fix for tiling branch switches blinding the callback
+    # on file input (per-branch buffer.offset restarts low on every switch). Sourced from
+    # config so it is identical on every rung; absent/zero fps leaves it None (falls back
+    # to buffer.offset).
+    _fps = getattr(config.camera, "fps", None)
+    user_data.source_frame_duration_ns = round(Gst.SECOND / _fps) if _fps else None
 
     # Build CameraSwitcher from the validated 'camera' section. Each CameraEntry
     # maps onto a CameraConfig; the shared caps come from the section itself.

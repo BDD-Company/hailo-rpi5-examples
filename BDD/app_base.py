@@ -740,6 +740,12 @@ class GStreamerApp:
             # depends on which pipeline shape was built (switchable tiling renames it).
             self._install_detection_start_probe(self.detection_start_probe_element)
 
+        # NOTE (2026-07-23): the source-side frame-id probe was tried here but does NOT
+        # work on tiled rungs -- the hailotileaggregator rebuilds the frame into a fresh
+        # buffer that drops custom reference metas, so the callback still fell back to the
+        # per-branch buffer.offset. The branch-independent id that DOES survive the
+        # aggregator is buffer.pts; normalized_frame_id now prefers it. See its docstring.
+
         # Periodic pipeline health snapshot (buffer counts, queue levels, stall detection).
         # GLib.timeout_add_seconds(2, self._log_pipeline_health)
 

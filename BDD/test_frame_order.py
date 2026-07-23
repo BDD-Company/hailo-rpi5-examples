@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from frame_order import FrameOrderGuard
+from frame_order import FrameOrderGuard, resolve_frame_id
 
 
 def _accepts(guard, camera_id, ids):
@@ -103,6 +103,62 @@ def test_last_reports_high_water_mark():
     g.accept(0, 9)
     g.accept(0, 5)  # rejected, must not lower the mark
     assert g.last(0) == 9
+
+
+# ---------------------------------------------------------------------------
+# resolve_frame_id: pick the per-frame id fed to BOTH the guard AND ByteTracker.
+# It must be branch-INDEPENDENT (so a tiling branch switch can't blind the guard) and
+# increment ~1 per frame (ByteTracker's track_buffer expiry counts frame_id deltas).
+# The only buffer property that is both is buffer.pts -- which survives the tile
+# aggregator (unlike custom metas) and is the same source frame on every rung (unlike
+# the per-branch buffer.offset) -- converted to a frame index via the frame duration.
+# Raw pts (nanoseconds) would jump ~3e7/frame and break ByteTracker, hence the divide.
+# ---------------------------------------------------------------------------
+
+_DUR = 33_333_333  # ns/frame at 30 fps
+
+
+def test_producer_frame_meta_wins_over_everything():
+    assert resolve_frame_id(500, 33_333_333, 7, _DUR) == 500
+
+
+def test_pts_becomes_a_one_per_frame_index():
+    assert resolve_frame_id(None, 0, None, _DUR) == 0
+    assert resolve_frame_id(None, 1 * _DUR, None, _DUR) == 1
+    assert resolve_frame_id(None, 2 * _DUR, None, _DUR) == 2
+    # tolerates real-CFR pts jitter that isn't an exact multiple of the duration
+    assert resolve_frame_id(None, 3 * _DUR + 1000, None, _DUR) == 3
+
+
+def test_pts_index_is_branch_independent():
+    # Same source frame (same pts) resolves to the SAME id regardless of which branch
+    # produced the buffer -- that is the whole point.
+    assert resolve_frame_id(None, 7 * _DUR, None, _DUR) == resolve_frame_id(None, 7 * _DUR, 999, _DUR)
+
+
+def test_pts_index_across_a_branch_switch_is_never_rejected_by_the_guard():
+    # Frames 0..2 on the whole-frame rung, then a switch and frames 3..5 on a tiled rung.
+    # Because the id comes from pts (branch-independent), the sequence stays monotonic and
+    # the guard accepts every frame -- the fix for the 53%-blinding bug.
+    g = FrameOrderGuard()
+    ids = [resolve_frame_id(None, n * _DUR, None, _DUR) for n in range(6)]
+    assert all(g.accept(0, fid) for fid in ids)
+    assert ids == [0, 1, 2, 3, 4, 5]
+
+
+def test_falls_back_to_offset_when_pts_cannot_be_indexed():
+    # No producer meta and no known frame duration -> we cannot turn pts into a ~1/frame
+    # index without breaking ByteTracker, so use the raw offset rather than raw pts.
+    assert resolve_frame_id(None, 33_333_333, 42, None) == 42
+
+
+def test_falls_back_to_offset_when_no_meta_and_no_pts():
+    assert resolve_frame_id(None, None, 42, _DUR) == 42
+
+
+def test_returns_none_when_nothing_identifies_the_frame():
+    # Caller substitutes a wallclock last-resort id.
+    assert resolve_frame_id(None, None, None, _DUR) is None
 
 
 if __name__ == "__main__":
